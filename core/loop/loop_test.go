@@ -610,6 +610,113 @@ func TestPostToolRewriteNonObjectFailsWithBoundaries(t *testing.T) {
 	}
 }
 
+// ---- T5 최종 리뷰 차단의 영구 회귀: 생성 타입 decode가 놓치는
+// required·컨테이너 제약을 raw JSON 구조 검사가 verdict 기록 전에 강제 ----
+
+// pre_step Rewrite({}): messages 키 없음 → 거부 (모델이 nil 요청을 받는 경로 차단).
+func TestPreStepRewriteMissingMessagesRejected(t *testing.T) {
+	model := &FakeModel{script: []ModelResponse{{Text: "x"}}}
+	l, store := newLoop(t, model, &FakeTools{})
+	l.RegisterHook(gen.HookPointPreStep, func(ctx context.Context, hc HookContext) Decision {
+		return Rewrite(json.RawMessage(`{}`), "")
+	})
+	if err := l.RunTurn(context.Background(), "x"); err == nil {
+		t.Fatal("messages 없는 pre_step rewrite가 통과함")
+	}
+	if len(model.requests) != 0 {
+		t.Fatal("모델이 nil 요청을 받음")
+	}
+	assertNoVerdicts(t, store)
+}
+
+// turn_stopping Rewrite({}): text 키 없음 → 거부 (verdict에 {}가 남고
+// 실제로는 {"text":""}가 주입되는 어긋남 차단).
+func TestTurnStoppingRewriteMissingTextRejected(t *testing.T) {
+	model := &FakeModel{script: []ModelResponse{{Text: "x"}}}
+	l, store := newLoop(t, model, &FakeTools{})
+	l.RegisterHook(gen.HookPointTurnStopping, func(ctx context.Context, hc HookContext) Decision {
+		return Rewrite(json.RawMessage(`{}`), "")
+	})
+	if err := l.RunTurn(context.Background(), "x"); err == nil {
+		t.Fatal("text 없는 turn_stopping rewrite가 통과함")
+	}
+	assertNoVerdicts(t, store)
+	// 어긋난 user/message 주입도 없어야 한다 (원래 입력 1건만)
+	events, _ := store.ReadFrom(context.Background(), 1)
+	userMsgs := 0
+	for _, e := range events {
+		if e.Kind == gen.KindUserMessage {
+			userMsgs++
+		}
+	}
+	if userMsgs != 1 {
+		t.Fatalf("user/message %d건 (1건 기대) — 어긋난 주입 발생", userMsgs)
+	}
+}
+
+// pre_tool Rewrite({"name":"x","args":[]}): args가 배열 → 거부 (배열 인자 실행 차단).
+func TestPreToolRewriteArrayArgsRejected(t *testing.T) {
+	model := &FakeModel{script: []ModelResponse{
+		{ToolCalls: []ToolCall{{Name: "t", Args: json.RawMessage(`{}`)}}},
+	}}
+	tools := &FakeTools{}
+	l, store := newLoop(t, model, tools)
+	l.RegisterHook(gen.HookPointPreTool, func(ctx context.Context, hc HookContext) Decision {
+		return Rewrite(json.RawMessage(`{"name":"x","args":[]}`), "")
+	})
+	if err := l.RunTurn(context.Background(), "x"); err == nil {
+		t.Fatal("배열 args rewrite가 통과함")
+	}
+	if len(tools.calls) != 0 {
+		t.Fatal("배열 인자로 툴이 실행됨")
+	}
+	assertNoVerdicts(t, store)
+}
+
+// post_tool Rewrite({"status":"ok","output":[]}): output이 배열 → verdict 기록
+// 전에 거부 (durable verdict 후 최종 기록에서야 실패하는 경로 차단).
+func TestPostToolRewriteArrayOutputRejectedBeforeVerdict(t *testing.T) {
+	model := &FakeModel{script: []ModelResponse{
+		{ToolCalls: []ToolCall{{Name: "t", Args: json.RawMessage(`{}`)}}},
+	}}
+	l, store := newLoop(t, model, &FakeTools{})
+	l.RegisterHook(gen.HookPointPostTool, func(ctx context.Context, hc HookContext) Decision {
+		return Rewrite(json.RawMessage(`{"status":"ok","output":[]}`), "")
+	})
+	if err := l.RunTurn(context.Background(), "x"); err == nil {
+		t.Fatal("배열 output rewrite가 통과함")
+	}
+	assertNoVerdicts(t, store)
+}
+
+func assertNoVerdicts(t *testing.T, store *FakeStore) {
+	t.Helper()
+	events, _ := store.ReadFrom(context.Background(), 1)
+	for _, e := range events {
+		if e.Kind == gen.KindHookVerdict {
+			t.Fatal("검증 전 verdict 기록 발생 — 위반 rewrite의 판정이 durable하게 남음")
+		}
+	}
+}
+
+// 비차단 권고: normalizeOutput 표 — 객체 유지 / 스칼라·배열·null 래핑.
+func TestNormalizeOutputTable(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`{"a":1}`, `{"a":1}`},
+		{`  {"a":1}  `, `{"a":1}`},
+		{`"scalar"`, `{"value":"scalar"}`},
+		{`42`, `{"value":42}`},
+		{`[1,2]`, `{"value":[1,2]}`},
+		{`null`, `{"value":null}`},
+		{``, `{"value":null}`},
+	}
+	for _, c := range cases {
+		if got := string(normalizeOutput(json.RawMessage(c.in))); got != c.want {
+			t.Errorf("normalizeOutput(%q) = %s (%s 기대)", c.in, got, c.want)
+		}
+	}
+}
+
 // 훅 지점은 4개로 고정된다 (FR-LOOP-02).
 func TestRegisterHookRejectsUnknownPoint(t *testing.T) {
 	l, _ := newLoop(t, &FakeModel{}, &FakeTools{})

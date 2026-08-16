@@ -356,12 +356,22 @@ func (l *Loop) runHooks(ctx context.Context, point gen.HookPoint, payload json.R
 }
 
 // validateRewriteTarget은 지점별 rewrite 대체값의 형태 계약이다
-// (2026-08-17 [H] 승인 — 생성 payload 타입으로 strict decode).
+// (2026-08-17 [H] 승인). 생성 payload 타입의 strict decode는 미지 필드만
+// 잡을 뿐 스키마의 required·컨테이너 제약(누락 vs 빈 문자열, 객체 vs
+// 배열/null)을 강제하지 못하므로, raw JSON 수준의 구조 검사를 함께 한다 —
+// 이 검증 전체가 verdict 기록보다 먼저 수행된다.
 func validateRewriteTarget(point gen.HookPoint, x json.RawMessage) error {
+	fields, err := objectFields(x)
+	if err != nil {
+		return err
+	}
 	switch point {
 	case gen.HookPointPreStep:
 		var req ModelRequest // 모델 요청 형태는 코어 소유
-		return strictDecode(x, &req)
+		if err := strictDecode(x, &req); err != nil {
+			return err
+		}
+		return requireField(fields, "messages", '[', "배열")
 	case gen.HookPointPreTool:
 		var call gen.ToolCallPayload
 		if err := strictDecode(x, &call); err != nil {
@@ -370,10 +380,7 @@ func validateRewriteTarget(point gen.HookPoint, x json.RawMessage) error {
 		if call.Name == "" {
 			return fmt.Errorf("툴 이름이 없음 (빈/부분 대체는 실행 불가)")
 		}
-		if call.Args == nil {
-			return fmt.Errorf("args가 없음 — 불완전한 전체 교체는 거부한다")
-		}
-		return nil
+		return requireField(fields, "args", '{', "객체")
 	case gen.HookPointPostTool:
 		var res gen.ToolResultPayload
 		if err := strictDecode(x, &res); err != nil {
@@ -382,22 +389,47 @@ func validateRewriteTarget(point gen.HookPoint, x json.RawMessage) error {
 		if res.Status != gen.ToolResultPayloadStatusOk {
 			return fmt.Errorf("post_tool rewrite는 status:ok 분기만 허용 (%q)", res.Status)
 		}
-		if len(res.Output) == 0 {
-			return fmt.Errorf("output이 없음")
-		}
 		if res.Reason != nil || res.Error != nil {
 			return fmt.Errorf("ok 분기에 reason/error가 있음")
 		}
-		return nil
+		return requireField(fields, "output", '{', "객체")
 	case gen.HookPointTurnStopping:
 		var msg gen.UserMessagePayload
-		return strictDecode(x, &msg)
+		if err := strictDecode(x, &msg); err != nil {
+			return err
+		}
+		return requireField(fields, "text", '"', "문자열")
 	default:
 		return fmt.Errorf("알 수 없는 지점 %q", point)
 	}
 }
 
-// strictDecode는// strictDecode는 rewrite 대체값의 전체 교체 디코드다: zero-value 대상,
+// objectFields는 rewrite 대체값을 raw 필드 표로 파싱한다 — 필드의
+// 존재 여부와 값의 컨테이너 종류를 구분하기 위한 원본 보존 뷰다.
+func objectFields(x json.RawMessage) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(x, &fields); err != nil {
+		return nil, fmt.Errorf("객체가 아님: %w", err)
+	}
+	return fields, nil
+}
+
+// requireField는 필드가 존재하고 값이 요구된 JSON 컨테이너 종류
+// (첫 바이트 '{'=객체, '['=배열, '"'=문자열)임을 검사한다 — 스키마의
+// required·type 제약을 생성 타입 decode가 놓치는 부분의 보강이다.
+func requireField(fields map[string]json.RawMessage, key string, kind byte, kindName string) error {
+	v, ok := fields[key]
+	if !ok {
+		return fmt.Errorf("%s 키가 없음 (불완전한 전체 교체)", key)
+	}
+	trimmed := bytes.TrimSpace(v)
+	if len(trimmed) == 0 || trimmed[0] != kind {
+		return fmt.Errorf("%s는 null이 아닌 %s여야 함 (현재: %s)", key, kindName, trimmed)
+	}
+	return nil
+}
+
+// strictDecode는 rewrite 대체값의 전체 교체 디코드다: zero-value 대상,
 // 미지 필드 거부, 후행 데이터 거부.
 func strictDecode(data []byte, dst any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
