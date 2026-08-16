@@ -275,13 +275,14 @@ func (w *Writer) loop(nextSeq int64) {
 				}
 				prepared = append(prepared, p)
 			}
-			for _, rec := range prepared {
-				if err := append_(rec); err != nil {
-					sub.ack <- ackResult{err: err}
-					return
-				}
-				nextSeq++
+			// all-or-nothing 저장소 트랜잭션 — 부분 커밋이 없으므로
+			// 실패·크래시 어느 경우에도 목적지는 비어 있는 상태로 남는다.
+			if err := w.store.AppendBatch(context.Background(), prepared); err != nil {
+				w.setTerminal(fmt.Errorf("배치 append (%d건): %w", len(prepared), err))
+				sub.ack <- ackResult{err: w.terminal()}
+				return
 			}
+			nextSeq += int64(len(prepared))
 			sub.ack <- ackResult{seq: nextSeq - 1}
 			return
 		}

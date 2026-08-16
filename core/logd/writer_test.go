@@ -54,6 +54,27 @@ func (s *FakeStore) Append(ctx context.Context, rec gen.EventRecord) error {
 	return nil
 }
 
+// AppendBatch는 all-or-nothing 계약을 흉내낸다: failOn에 해당하는 seq가
+// 배치에 있으면 아무것도 저장하지 않고 실패한다.
+func (s *FakeStore) AppendBatch(ctx context.Context, recs []gen.EventRecord) error {
+	if s.gate != nil {
+		<-s.gate
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.appendCalls++
+	for _, rec := range recs {
+		if s.failOn != 0 && rec.Seq == s.failOn {
+			return s.failErr
+		}
+	}
+	for _, rec := range recs {
+		s.events = append(s.events, rec)
+		s.lastSeq = rec.Seq
+	}
+	return nil
+}
+
 func (s *FakeStore) ReadFrom(ctx context.Context, fromSeq int64) ([]gen.EventRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

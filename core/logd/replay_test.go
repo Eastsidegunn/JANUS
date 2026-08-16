@@ -309,6 +309,40 @@ func TestForkDestinationMustBeEmpty(t *testing.T) {
 	})
 }
 
+// T4 재재리뷰 차단의 회귀: 포크 배치는 저장소 수준에서 all-or-nothing이다 —
+// 배치 중간(2번째) 커밋 실패 시 목적지에 아무것도 남지 않는다. session/fork만
+// 내구 저장되면 존재하지 않는 복사 상태를 가리키는 손상 로그가 되기 때문.
+func TestForkAtomicOnStoreFailure(t *testing.T) {
+	ctx := context.Background()
+	root := strings.Repeat("b", 16)
+	src := &FakeStore{}
+	sw, _ := NewWriter(ctx, src)
+	sw.Submit(ctx, mkEvent(0, gen.KindSessionStart, "parent", root, `{}`))
+	sw.Submit(ctx, mkEvent(0, gen.KindUserMessage, "parent", root, `{"text":"x"}`))
+	sw.Close()
+
+	dst := &FakeStore{failOn: 2, failErr: errors.New("injected append failure")}
+	dw, err := NewWriter(ctx, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forkErr := Fork(ctx, src, 2, strings.Repeat("f", 32), dw)
+	if forkErr == nil {
+		t.Fatal("주입 실패에도 포크가 성공함")
+	}
+	got, _ := dst.ReadFrom(ctx, 1)
+	if len(got) != 0 {
+		t.Fatalf("배치 실패 후 목적지에 %d건 잔존 — 부분 커밋 (all-or-nothing 위반)", len(got))
+	}
+	// 저장소 커밋 실패이므로 writer는 종료 상태다
+	if _, err := dw.Submit(ctx, mkEvent(0, gen.KindSessionStart, "parent", root, `{}`)); !errors.Is(err, ErrTerminal) {
+		t.Fatalf("배치 실패 후 Submit = %v (ErrTerminal 기대)", err)
+	}
+	if err := dw.Close(); !errors.Is(err, ErrTerminal) {
+		t.Fatalf("Close = %v (ErrTerminal 기대)", err)
+	}
+}
+
 // 비차단 권고의 회귀: atSeq는 원본에 실제 존재하는 seq여야 한다.
 func TestForkRequiresExistingSeq(t *testing.T) {
 	ctx := context.Background()
