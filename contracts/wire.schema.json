@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hx:contracts:wire:v1",
+  "title": "HX 어댑터 와이어 프로토콜",
+  "description": "§5.2 NDJSON over stdio. 한 줄이 메시지 하나다. 이 문서의 루트는 정의 라이브러리이며 검증 진입점은 방향별로 #/$defs/command(코어→어댑터)와 #/$defs/event(어댑터→코어)다. 픽스처를 통과하지 못하는 어댑터는 등록될 수 없다(MUST).",
+  "$comment": "루트 oneOf를 두지 않는 이유: command는 cmd, event는 kind로 판별되어 공통 판별 필드가 없고, schemagen 계약은 판별 const 없는 oneOf 분기를 금지한다. 방향은 채널(stdin/stdout)이 이미 결정하므로 루트 검증이 필요 없다.",
+  "$defs": {
+    "protocolVersion": {
+      "const": 1,
+      "$comment": "모든 메시지는 v 필드를 포함해야 한다(MUST). v0.1 프로토콜 버전 = 1"
+    },
+    "int64NonNeg": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "$comment": "생성 Go 타입과 SQLite의 실질 범위(int64)에 정합"
+    },
+    "base64": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+      "$comment": "표준 base64 (패딩 포함). 빈 문자열 허용"
+    },
+    "command": {
+      "type": "object",
+      "title": "코어 → 어댑터 (stdin)",
+      "properties": {
+        "v": { "$ref": "#/$defs/protocolVersion" },
+        "cmd": { "enum": ["task", "message", "stop"] },
+        "payload": { "type": "object" }
+      },
+      "required": ["v", "cmd", "payload"],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "cmd": { "const": "task" },
+            "payload": { "$ref": "#/$defs/taskPayload" }
+          }
+        },
+        {
+          "properties": {
+            "cmd": { "const": "message" },
+            "payload": { "$ref": "#/$defs/messagePayload" }
+          }
+        },
+        {
+          "properties": {
+            "cmd": { "const": "stop" },
+            "payload": { "$ref": "#/$defs/stopPayload" }
+          }
+        }
+      ]
+    },
+    "taskPayload": {
+      "type": "object",
+      "properties": {
+        "instruction": { "type": "string", "minLength": 1 },
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "description": "샌드박스 안에서 어댑터 대상 에이전트에게 보이는 워크스페이스 경로"
+        },
+        "budget": { "$ref": "#/$defs/budget" },
+        "depth": {
+          "$ref": "#/$defs/int64NonNeg",
+          "description": "이 서브에이전트가 위치한 현재 spawn 깊이(root의 직계 자식 = 0). 절대 한도는 budget.max_depth. 깊이·잔여 예산은 환경변수로도 자식에 전파된다 (FR-ADP-08)"
+        },
+        "extensions": {
+          "type": "array",
+          "description": "대상 에이전트의 네이티브 확장 선언 (FR-EXT-01). 옵셔널",
+          "items": { "$ref": "#/$defs/extension" }
+        }
+      },
+      "required": ["instruction", "workspace", "budget", "depth"],
+      "additionalProperties": false
+    },
+    "messagePayload": {
+      "type": "object",
+      "properties": {
+        "text": { "type": "string", "minLength": 1 }
+      },
+      "required": ["text"],
+      "additionalProperties": false
+    },
+    "stopPayload": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "enum": ["user", "budget_exceeded", "policy", "parent_done"]
+        }
+      },
+      "required": ["reason"],
+      "additionalProperties": false
+    },
+    "budget": {
+      "type": "object",
+      "description": "정책 병합(FR-POL-03)이 끝난 뒤의 실효 잔여 예산 — 어댑터는 프로파일·상속 의미를 알지 못하며, 받은 값이 곧 한도다. 세 축 모두 필수",
+      "properties": {
+        "tokens": { "$ref": "#/$defs/int64NonNeg" },
+        "time_ms": { "$ref": "#/$defs/int64NonNeg" },
+        "max_depth": {
+          "$ref": "#/$defs/int64NonNeg",
+          "description": "절대 spawn 깊이 한도. 어댑터는 taskPayload.depth >= max_depth이면 자식 spawn을 거부한다 (FR-ADP-08)"
+        }
+      },
+      "required": ["tokens", "time_ms", "max_depth"],
+      "additionalProperties": false
+    },
+    "extension": {
+      "type": "object",
+      "description": "확장 선언: 이름/버전/무결성 해시/출처/필요 egress 도메인 (FR-EXT-01/02/06)",
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "$comment": "버전 고정 필수(FR-EXT-02). latest 등 미고정 선언의 거부는 정책 평가의 몫(기본 거부)"
+        },
+        "integrity": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "출처 레지스트리 — HX는 저장소·큐레이션을 운영하지 않는다(FR-EXT-01)"
+        },
+        "egress": {
+          "type": "array",
+          "description": "실행 중 필요한 egress 도메인 선언(FR-EXT-06). 정책 통과분만 실행 프로파일에 편입",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "required": ["name", "version", "integrity", "source"],
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "title": "어댑터 → 코어 (stdout)",
+      "$comment": "어댑터가 방출하는 정규화 이벤트. 코어 writer가 envelope(seq, ts, trace_id, span_id, actor)을 입혀 events 스키마의 레코드로 기록한다",
+      "properties": {
+        "v": { "$ref": "#/$defs/protocolVersion" },
+        "kind": {
+          "enum": [
+            "subagent/ready",
+            "subagent/message",
+            "subagent/tool_call",
+            "subagent/tool_result",
+            "subagent/approval_request",
+            "subagent/usage",
+            "subagent/done"
+          ]
+        },
+        "payload": { "type": "object" },
+        "raw": {
+          "$ref": "#/$defs/base64",
+          "description": "대상 도구 원본 페이로드의 base64 (FR-ADP-04, MUST). upstream 원본이 없는 합성 이벤트는 빈 base64(\"\")를 명시한다 (2026-08-17 [H] 승인)"
+        }
+      },
+      "required": ["v", "kind", "payload", "raw"],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "kind": { "const": "subagent/ready" }
+          }
+        },
+        {
+          "properties": {
+            "kind": { "const": "subagent/message" }
+          }
+        },
+        {
+          "properties": {
+            "kind": { "const": "subagent/tool_call" }
+          }
+        },
+        {
+          "properties": {
+            "kind": { "const": "subagent/tool_result" }
+          }
+        },
+        {
+          "properties": {
+            "kind": { "const": "subagent/approval_request" }
+          }
+        },
+        {
+          "properties": {
+            "kind": { "const": "subagent/usage" },
+            "payload": { "$ref": "#/$defs/usagePayload" }
+          }
+        },
+        {
+          "properties": {
+            "kind": { "const": "subagent/done" },
+            "payload": { "$ref": "#/$defs/donePayload" }
+          }
+        }
+      ]
+    },
+    "donePayload": {
+      "type": "object",
+      "description": "urn:hx:contracts:events:v1#/$defs/subagentDonePayload의 거울 — 서브셋이 문서 간 $ref를 금지하므로 중복 정의. 두 정의의 canonical JSON 구조 동일성은 contracts 테스트로 고정한다(2026-08-17 [H] 승인). result는 문자열 고정",
+      "properties": {
+        "status": { "enum": ["ok", "error", "stopped"] },
+        "result": { "type": "string" }
+      },
+      "required": ["status", "result"],
+      "additionalProperties": false
+    },
+    "usagePayload": {
+      "type": "object",
+      "description": "토큰 사용량 보고 (FR-ADP-07, SHOULD — 방출한다면 두 필드 모두 필수). 미보고 시 코어가 시간·요금 기반 추정으로 폴백",
+      "properties": {
+        "input_tokens": { "$ref": "#/$defs/int64NonNeg" },
+        "output_tokens": { "$ref": "#/$defs/int64NonNeg" }
+      },
+      "required": ["input_tokens", "output_tokens"],
+      "additionalProperties": false
+    }
+  }
+}

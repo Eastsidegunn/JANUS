@@ -1,0 +1,340 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hx:contracts:events:v1",
+  "title": "HX 세션 이벤트 레코드",
+  "description": "§5.1 events 테이블의 한 행에 대응하는 정규화 이벤트. 필드 부재는 DB NULL에 대응한다(널 값 대신 필드 생략).",
+  "$comment": "스키마 확장 규칙(§5.1): 새 모델 가시 입력은 반드시 새 kind 추가로 처리한다. kind의 제거·의미 변경은 메이저 버전($id의 :vN)에서만 허용한다.",
+  "type": "object",
+  "properties": {
+    "seq": {
+      "$ref": "#/$defs/int64Pos",
+      "description": "writer 발급, 세션 내 전순서 (FR-LOG-02)"
+    },
+    "ts": {
+      "$ref": "#/$defs/int64NonNeg",
+      "description": "unix epoch 밀리초"
+    },
+    "trace_id": { "$ref": "#/$defs/traceId" },
+    "span_id": { "$ref": "#/$defs/spanId" },
+    "parent_span_id": { "$ref": "#/$defs/spanId" },
+    "kind": { "$ref": "#/$defs/kind" },
+    "actor": {
+      "type": "string",
+      "pattern": "^(parent|collector|subagent:[a-z0-9._-]+:[0-9]+)$",
+      "description": "의도 평면(parent, subagent:{adapter}:{n})과 효과 평면(collector)의 구분 (FR-COL-06)"
+    },
+    "payload": {
+      "type": "object",
+      "description": "정규화 JSON. kind별 형태는 oneOf 분기 참조"
+    },
+    "raw": {
+      "$ref": "#/$defs/base64",
+      "description": "원본 페이로드 passthrough의 base64 (FR-LOG-07). 압축 여부·포맷은 저장 계층 소관(부록 A 미결)"
+    },
+    "usage_in": { "$ref": "#/$defs/int64NonNeg" },
+    "usage_out": { "$ref": "#/$defs/int64NonNeg" }
+  },
+  "required": ["seq", "ts", "trace_id", "span_id", "kind", "actor", "payload"],
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "properties": {
+        "kind": { "const": "session/start" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "session/fork" },
+        "payload": { "$ref": "#/$defs/sessionForkPayload" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "session/end" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "turn/start" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "turn/end" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "step/start" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "step/end" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "user/message" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "assistant/chunk" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "assistant/message" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "tool/call" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "tool/result" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "hook/verdict" },
+        "payload": { "$ref": "#/$defs/hookVerdictPayload" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/spawn" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/ready" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/message" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/tool_call" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/tool_result" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/approval_request" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/usage" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/done" },
+        "payload": { "$ref": "#/$defs/subagentDonePayload" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "collector/fs_changed" },
+        "payload": { "$ref": "#/$defs/fsChangedPayload" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "collector/egress" },
+        "payload": { "$ref": "#/$defs/egressPayload" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "policy/decision" },
+        "payload": { "$ref": "#/$defs/policyDecisionPayload" }
+      }
+    }
+  ],
+  "$defs": {
+    "int64NonNeg": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "$comment": "생성 Go 타입과 SQLite의 실질 범위(int64)에 정합"
+    },
+    "int64Pos": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "base64": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+      "$comment": "표준 base64 (패딩 포함). 빈 문자열 허용"
+    },
+    "traceId": {
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 32,
+      "pattern": "^0*[1-9a-f][0-9a-f]*$",
+      "$comment": "OTel SpanContext 규격: 32자리 소문자 hex이며 최소 한 바이트가 non-zero여야 유효 — all-zero ID는 스키마 수준에서 거부(FR-OBS-01). all-zero 거부는 contracts 영구 테스트 대상"
+    },
+    "spanId": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 16,
+      "pattern": "^0*[1-9a-f][0-9a-f]*$",
+      "$comment": "OTel SpanContext 규격: 16자리 소문자 hex이며 최소 한 바이트가 non-zero여야 유효 — all-zero ID는 스키마 수준에서 거부(FR-OBS-01). all-zero 거부는 contracts 영구 테스트 대상"
+    },
+    "kind": {
+      "description": "§5.1 kind 어휘 전체 (v0.1). payload 형태가 명세에 정의되지 않은 kind는 열린 객체이며, 필드 확정은 해당 태스크(T5 루프, T7/T9 어댑터, T10 샌드박스, T13 확장)에서 additive로 진행",
+      "enum": [
+        "session/start",
+        "session/fork",
+        "session/end",
+        "turn/start",
+        "turn/end",
+        "step/start",
+        "step/end",
+        "user/message",
+        "assistant/chunk",
+        "assistant/message",
+        "tool/call",
+        "tool/result",
+        "hook/verdict",
+        "subagent/spawn",
+        "subagent/ready",
+        "subagent/message",
+        "subagent/tool_call",
+        "subagent/tool_result",
+        "subagent/approval_request",
+        "subagent/usage",
+        "subagent/done",
+        "collector/fs_changed",
+        "collector/egress",
+        "policy/decision"
+      ]
+    },
+    "hookPoint": {
+      "enum": ["pre_step", "pre_tool", "post_tool", "turn_stopping"]
+    },
+    "hookVerdictPayload": {
+      "type": "object",
+      "description": "훅 판정: 지점, 판정, 사유 (FR-LOOP-02/03/06). verdict별 폐쇄 분기 — rewrite는 대체값 필수(로그에서 재구성 가능해야 함, FR-LOG-03), reject는 비어 있지 않은 사유 필수",
+      "required": ["point", "verdict"],
+      "oneOf": [
+        {
+          "properties": {
+            "verdict": { "const": "continue" },
+            "point": { "$ref": "#/$defs/hookPoint" },
+            "reason": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "properties": {
+            "verdict": { "const": "rewrite" },
+            "point": { "$ref": "#/$defs/hookPoint" },
+            "rewrite": {
+              "type": "object",
+              "description": "rewrite(x)의 실제 대체값 — 이것 없이는 로그에서 모델 입력을 재구성할 수 없다",
+              "$comment": "지점별 구체 형태(모델 요청/툴 콜/툴 결과)는 T5에서 additive로 확정"
+            },
+            "reason": { "type": "string" }
+          },
+          "required": ["rewrite"],
+          "additionalProperties": false
+        },
+        {
+          "properties": {
+            "verdict": { "const": "reject" },
+            "point": { "$ref": "#/$defs/hookPoint" },
+            "reason": { "type": "string", "minLength": 1 }
+          },
+          "required": ["reason"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "sessionForkPayload": {
+      "type": "object",
+      "description": "포크 세션의 원본 참조 (FR-LOG-05)",
+      "properties": {
+        "origin_trace_id": { "$ref": "#/$defs/traceId" },
+        "origin_seq": { "$ref": "#/$defs/int64Pos" }
+      },
+      "required": ["origin_trace_id", "origin_seq"],
+      "additionalProperties": false
+    },
+    "subagentDonePayload": {
+      "type": "object",
+      "description": "서브에이전트 종료 (§5.2 subagent/done). result는 문자열 고정(2026-08-17 [H] 승인) — 구조화된 원본은 raw에 보존하고 부모 컨텍스트에는 정규화 텍스트만 진입(FR-LOG-10)",
+      "properties": {
+        "status": { "enum": ["ok", "error", "stopped"] },
+        "result": { "type": "string" }
+      },
+      "required": ["status", "result"],
+      "additionalProperties": false
+    },
+    "policyDecisionPayload": {
+      "type": "object",
+      "description": "정책 판정: 허용/거부, 적용 프로파일 (§5.1 policy/decision)",
+      "properties": {
+        "decision": { "enum": ["allow", "deny"] },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string" }
+      },
+      "required": ["decision", "profile_id"],
+      "additionalProperties": false
+    },
+    "fsChangedPayload": {
+      "type": "object",
+      "description": "fs diff: 변경 파일 목록 — 경로, 해시, 변경 유형 (FR-COL-02)",
+      "properties": {
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "hash": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "$comment": "삭제된 파일은 삭제 전 lower 해시"
+              },
+              "change_type": { "enum": ["added", "modified", "deleted"] }
+            },
+            "required": ["path", "hash", "change_type"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["changes"],
+      "additionalProperties": false
+    },
+    "egressPayload": {
+      "type": "object",
+      "description": "egress 관측 메타데이터 — 도메인, 메서드, 크기, 시각 (FR-COL-03). 페이로드 본문은 기록 금지(MUST NOT)",
+      "properties": {
+        "domain": { "type": "string", "minLength": 1 },
+        "method": { "type": "string", "minLength": 1 },
+        "size_bytes": { "$ref": "#/$defs/int64NonNeg" },
+        "at_ms": {
+          "$ref": "#/$defs/int64NonNeg",
+          "$comment": "요청 시각. 이벤트 envelope ts는 기록 시각이므로 별도 유지"
+        }
+      },
+      "required": ["domain", "method", "size_bytes", "at_ms"],
+      "additionalProperties": false
+    }
+  }
+}
