@@ -3,6 +3,8 @@ package logd
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"math"
 	"strings"
 	"testing"
 
@@ -217,6 +219,126 @@ func TestForkPreservesStateAndOrigin(t *testing.T) {
 			string(fs.Messages[i].Content) != string(os.Messages[i].Content) {
 			t.Fatalf("히스토리 %d 불일치", i)
 		}
+	}
+}
+
+// T4 재리뷰 차단 2의 회귀: usage 합산은 fail-closed다 —
+// int64 overflow(음수 래핑)와 음수 usage를 조용히 통과시키지 않는다.
+func TestReplayUsageOverflowRejected(t *testing.T) {
+	root := strings.Repeat("b", 16)
+	e1 := mkEvent(1, gen.KindAssistantMessage, "parent", root, `{"text":"x"}`)
+	e1.UsageIn = ptr(int64(math.MaxInt64))
+	e2 := mkEvent(2, gen.KindAssistantMessage, "parent", root, `{"text":"y"}`)
+	e2.UsageIn = ptr(int64(1))
+	if _, err := Replay([]gen.EventRecord{e1, e2}); err == nil {
+		t.Fatal("MaxInt64+1 합산이 통과함 — overflow 미검출")
+	}
+
+	// actor별 합산만 overflow하는 경우도 잡힌다 (다른 actor로 분산 시 전체는 안전)
+	e3 := mkEvent(1, gen.KindSubagentUsage, "subagent:null:1", root, `{}`)
+	e3.UsageOut = ptr(int64(math.MaxInt64))
+	e4 := mkEvent(2, gen.KindSubagentUsage, "subagent:null:1", root, `{}`)
+	e4.UsageOut = ptr(int64(math.MaxInt64))
+	if _, err := Replay([]gen.EventRecord{e3, e4}); err == nil {
+		t.Fatal("actor별 overflow가 통과함")
+	}
+
+	neg := mkEvent(1, gen.KindAssistantMessage, "parent", root, `{"text":"z"}`)
+	neg.UsageIn = ptr(int64(-1))
+	if _, err := Replay([]gen.EventRecord{neg}); err == nil {
+		t.Fatal("음수 usage가 통과함")
+	}
+}
+
+// T4 재리뷰 차단 1의 회귀: 포크 목적지는 반드시 비어 있어야 한다.
+func TestForkDestinationMustBeEmpty(t *testing.T) {
+	ctx := context.Background()
+	root := strings.Repeat("b", 16)
+
+	src := &FakeStore{}
+	sw, _ := NewWriter(ctx, src)
+	sw.Submit(ctx, mkEvent(0, gen.KindSessionStart, "parent", root, `{}`))
+	sw.Submit(ctx, mkEvent(0, gen.KindUserMessage, "parent", root, `{"text":"x"}`))
+	sw.Close()
+	srcBefore, _ := src.ReadFrom(ctx, 1)
+
+	t.Run("자기 자신으로의 포크", func(t *testing.T) {
+		// 같은 store의 Reader/Writer — 원본이 비어 있지 않으므로 거부
+		selfW, _ := NewWriter(ctx, src)
+		defer selfW.Close()
+		err := Fork(ctx, src, 1, strings.Repeat("f", 32), selfW)
+		if !errors.Is(err, ErrDestinationNotEmpty) {
+			t.Fatalf("자기 포크 = %v (ErrDestinationNotEmpty 기대)", err)
+		}
+		after, _ := src.ReadFrom(ctx, 1)
+		if len(after) != len(srcBefore) {
+			t.Fatalf("자기 포크 거부 후 원본 %d건 (%d건 기대) — 오염", len(after), len(srcBefore))
+		}
+	})
+
+	t.Run("비어 있지 않은 별도 목적지", func(t *testing.T) {
+		dst := &FakeStore{}
+		dw, _ := NewWriter(ctx, dst)
+		defer dw.Close()
+		if _, err := dw.Submit(ctx, mkEvent(0, gen.KindSessionStart, "parent", root, `{}`)); err != nil {
+			t.Fatal(err)
+		}
+		dstBefore, _ := dst.ReadFrom(ctx, 1)
+		err := Fork(ctx, src, 1, strings.Repeat("f", 32), dw)
+		if !errors.Is(err, ErrDestinationNotEmpty) {
+			t.Fatalf("비공백 목적지 포크 = %v (ErrDestinationNotEmpty 기대)", err)
+		}
+		dstAfter, _ := dst.ReadFrom(ctx, 1)
+		if len(dstAfter) != len(dstBefore) {
+			t.Fatal("거부된 포크가 목적지를 변형함")
+		}
+	})
+
+	t.Run("배치보다 먼저 admission된 제출과의 직렬화", func(t *testing.T) {
+		// 빈 목적지라도 배치 처리 전에 다른 제출이 커밋되면 거부된다 —
+		// LastSeq 사전 검사 방식의 TOCTOU가 루프 직렬화로 닫혀 있음을 확인.
+		dst := &FakeStore{}
+		dw, _ := NewWriter(ctx, dst)
+		defer dw.Close()
+		if _, err := dw.Submit(ctx, mkEvent(0, gen.KindSessionStart, "parent", root, `{}`)); err != nil {
+			t.Fatal(err)
+		}
+		if err := Fork(ctx, src, 1, strings.Repeat("f", 32), dw); !errors.Is(err, ErrDestinationNotEmpty) {
+			t.Fatalf("선행 커밋 후 포크 = %v", err)
+		}
+	})
+}
+
+// 비차단 권고의 회귀: atSeq는 원본에 실제 존재하는 seq여야 한다.
+func TestForkRequiresExistingSeq(t *testing.T) {
+	ctx := context.Background()
+	root := strings.Repeat("b", 16)
+	// seq gap이 있는 store (2, 4만 존재)
+	gapStore := &FakeStore{
+		events: []gen.EventRecord{
+			mkEvent(2, gen.KindSessionStart, "parent", root, `{}`),
+			mkEvent(4, gen.KindUserMessage, "parent", root, `{"text":"x"}`),
+		},
+		lastSeq: 4,
+	}
+	dst := &FakeStore{}
+	dw, _ := NewWriter(ctx, dst)
+	defer dw.Close()
+
+	// 첫 이벤트 seq(2)보다 앞선 지점 — cut이 비는 경우 (panic 회귀)
+	if err := Fork(ctx, gapStore, 1, strings.Repeat("f", 32), dw); err == nil {
+		t.Error("첫 seq 이전 지점 포크가 성공함")
+	}
+	// gap 내부의 존재하지 않는 seq
+	if err := Fork(ctx, gapStore, 3, strings.Repeat("f", 32), dw); err == nil {
+		t.Error("존재하지 않는 seq로의 포크가 성공함")
+	}
+	if got, _ := dst.ReadFrom(ctx, 1); len(got) != 0 {
+		t.Errorf("거부된 포크가 이벤트를 남김: %d건", len(got))
+	}
+	// 존재하는 seq(2)로는 성공
+	if err := Fork(ctx, gapStore, 2, strings.Repeat("f", 32), dw); err != nil {
+		t.Errorf("존재하는 seq 포크 실패: %v", err)
 	}
 }
 

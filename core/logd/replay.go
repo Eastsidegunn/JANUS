@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 )
@@ -77,15 +78,23 @@ func Replay(events []gen.EventRecord) (*DerivedState, error) {
 		s.LastSeq = e.Seq
 
 		if e.UsageIn != nil {
-			s.UsageIn += *e.UsageIn
 			u := s.UsageByActor[e.Actor]
-			u.In += *e.UsageIn
+			if err := addUsage(&s.UsageIn, *e.UsageIn); err != nil {
+				return nil, fmt.Errorf("logd: seq %d usage_in: %w", e.Seq, err)
+			}
+			if err := addUsage(&u.In, *e.UsageIn); err != nil {
+				return nil, fmt.Errorf("logd: seq %d actor %s usage_in: %w", e.Seq, e.Actor, err)
+			}
 			s.UsageByActor[e.Actor] = u
 		}
 		if e.UsageOut != nil {
-			s.UsageOut += *e.UsageOut
 			u := s.UsageByActor[e.Actor]
-			u.Out += *e.UsageOut
+			if err := addUsage(&s.UsageOut, *e.UsageOut); err != nil {
+				return nil, fmt.Errorf("logd: seq %d usage_out: %w", e.Seq, err)
+			}
+			if err := addUsage(&u.Out, *e.UsageOut); err != nil {
+				return nil, fmt.Errorf("logd: seq %d actor %s usage_out: %w", e.Seq, e.Actor, err)
+			}
 			s.UsageByActor[e.Actor] = u
 		}
 
@@ -139,6 +148,19 @@ func (s *DerivedState) appendMessage(e gen.EventRecord, role Role) {
 	s.Messages = append(s.Messages, Message{
 		Seq: e.Seq, Role: role, SpanID: e.SpanID, Content: content,
 	})
+}
+
+// addUsage는 checked addition이다 — 비용·예산 프로젝션은 fail-closed여야
+// 하므로 음수 usage와 int64 overflow(음수 래핑)를 조용히 통과시키지 않는다.
+func addUsage(total *int64, v int64) error {
+	if v < 0 {
+		return fmt.Errorf("음수 usage %d", v)
+	}
+	if *total > math.MaxInt64-v {
+		return fmt.Errorf("usage 합산 int64 overflow (%d + %d)", *total, v)
+	}
+	*total += v
+	return nil
 }
 
 // DeriveMessages는 모델 가시 히스토리 프로젝션이다 (FR-LOG-03/04).

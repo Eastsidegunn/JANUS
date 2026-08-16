@@ -29,3 +29,4 @@
 | NFR-04 — CGO_ENABLED=0 네이티브 smoke (race와 분리) | `make smoke` (CI 편입) | T3 | green |
 | FR-LOG-03/04/10 — 모델 가시 히스토리·usage 프로젝션, 자식 중간 이벤트 제외·subagent/done만 진입, 재계산 가능성 | `core/logd/replay_test.go` (TestReplayMessagesProjection, TestReplayChildSpanConversationExcluded, TestReplayUsageAggregation, TestReplayDoesNotMutateInput) | T4 | green |
 | FR-LOG-05 — 포크: 새 trace_id·원본 참조·포크 지점 상태 동일·원본 불변·불량 지점 거부 | `core/logd/replay_test.go` (TestForkPreservesStateAndOrigin, TestForkRejectsBadPoints) + `seams/store/sqlite/fork_test.go` (TestForkAcrossFiles — 실파일 독립 진행) | T4 | green |
+| T4 재리뷰 — 포크 목적지 안전(자기 포크·비공백 목적지 거부, writer 루프 내 원자적 공백 확인, 정확한 atSeq 존재), usage 합산 fail-closed(overflow·음수 거부) | `core/logd/replay_test.go` (TestForkDestinationMustBeEmpty, TestForkRequiresExistingSeq, TestReplayUsageOverflowRejected) + `seams/store/sqlite/fork_test.go` (TestForkDestinationSafetyE2E — 공개 API 실파일) | T4 | green |
