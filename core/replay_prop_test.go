@@ -1,10 +1,8 @@
-//go:build xfail
-
 package core
 
-// FR-LOG-06 리플레이 결정론 속성 테스트 (T2: 구현 전 — 실패가 기대 상태).
-// T4가 replayFn을 실제 구현으로 배선하면 green으로 전환되며, 그 시점에
-// xfail 태그를 제거해 본 스위트로 편입한다. 반복 횟수 축소는 금지(CLAUDE.md).
+// FR-LOG-06 리플레이 결정론 속성 테스트.
+// T2에서 xfail(구현 전 실패 기대)로 커밋됐고, T4에서 core/logd.Replay가
+// 배선되며 본 스위트로 편입됐다. 반복 횟수 축소는 금지(CLAUDE.md).
 
 import (
 	"math/rand"
@@ -12,13 +10,16 @@ import (
 	"testing"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
+	"github.com/Eastsidegunn/JANUS/core/logd"
 )
 
 const replayPropIterations = 300
 
 // replayFn은 동일 이벤트 시퀀스로부터 파생 상태를 재계산한다.
-// T4에서 core의 실제 replay 구현으로 배선된다.
-var replayFn func(events []gen.EventRecord) (derived any, err error)
+// T4에서 core/logd.Replay로 배선됐다.
+var replayFn = func(events []gen.EventRecord) (derived any, err error) {
+	return logd.Replay(events)
+}
 
 func TestPropertyReplayDeterminism(t *testing.T) {
 	if replayFn == nil {

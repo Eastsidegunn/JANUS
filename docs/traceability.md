@@ -13,7 +13,7 @@
 | schemagen fail-closed·결정성·병합 규칙 | `tools/schemagen/gen_test.go` | T1 | green |
 | codegen drift 게이트 (미추적 신규 파일 포함) | `tools/schemagen/drift_test.go` + `make codegen-drift` (CI 편입) | T1 | green |
 | donePayload 거울 정의 동일성 | `contracts/schema_test.go` | T1 | green |
-| FR-LOG-06 — 리플레이 결정론 속성 (300회) | `core/replay_prop_test.go` (xfail 태그, T4에서 배선·편입) | T2 | **expected-fail** |
+| FR-LOG-06 — 리플레이 결정론 속성 (300회, 입력 불변성 포함) | `core/replay_prop_test.go` — **T4에서 logd.Replay 배선, xfail 태그 제거 후 본 스위트 편입** | T2→T4 | green |
 | FR-POL-03 — 병합 협소성 속성 (300회, 체인·교환·자기병합 포함) | `core/policy_prop_test.go` (xfail 태그, T6에서 배선·편입) | T2 | **expected-fail** |
 | T2 완료 기준 — 생성기가 스키마 유효·다양·결정적 입력을 실제 생성 | `core/propgen_test.go` (TestGenerator*) | T2 | green |
 | FR-LOG-01 — append-only 저장소 수준 물리 차단 (직접 연결 UPDATE/DELETE 거부) | `seams/store/sqlite/store_test.go` (TestAppendOnlyTriggers) | T3 | green |
@@ -27,3 +27,5 @@
 | busy_timeout↔취소 충돌 회귀 (잠금 상태 50ms deadline 즉시 반환) + BUSY 재시도 | `seams/store/sqlite/store_test.go` (TestBusyReturnsPromptly…, TestBusyRetry…) | T3 | green |
 | 외부 모듈 import 한정 (modernc→seams/store/sqlite, jsonschema→contracts/validate) | `tools/boundarylint/rules_test.go` (TestCheckExternalRestrictions) + `make lint` 실그래프 | T3 | green |
 | NFR-04 — CGO_ENABLED=0 네이티브 smoke (race와 분리) | `make smoke` (CI 편입) | T3 | green |
+| FR-LOG-03/04/10 — 모델 가시 히스토리·usage 프로젝션, 자식 중간 이벤트 제외·subagent/done만 진입, 재계산 가능성 | `core/logd/replay_test.go` (TestReplayMessagesProjection, TestReplayChildSpanConversationExcluded, TestReplayUsageAggregation, TestReplayDoesNotMutateInput) | T4 | green |
+| FR-LOG-05 — 포크: 새 trace_id·원본 참조·포크 지점 상태 동일·원본 불변·불량 지점 거부 | `core/logd/replay_test.go` (TestForkPreservesStateAndOrigin, TestForkRejectsBadPoints) + `seams/store/sqlite/fork_test.go` (TestForkAcrossFiles — 실파일 독립 진행) | T4 | green |
