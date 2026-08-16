@@ -32,18 +32,33 @@ lint:
 test:
 	$(GO) test -race ./...
 
-# T2: 구현 전 속성 테스트(FR-LOG-06, FR-POL-03) — 실패가 기대 상태다.
-# vet이 먼저 도는 이유: 컴파일 오류로 인한 실패를 "예상된 실패"로
-# 오인하지 않기 위해. 테스트가 통과로 뒤집히면 이 타깃이 실패한다 —
-# xfail 태그를 떼어 본 스위트로 편입하라는 신호다.
+# T2/T2.1: 구현 전 속성 테스트(FR-LOG-06, FR-POL-03) — "미배선 sentinel로 인한
+# 실패"만 기대 상태다. 테스트별로 정확한 이름으로 각각 실행하고, (1) 통과,
+# (2) panic·timeout·환경 오류, (3) sentinel이 아닌 실제 속성 위반은 전부
+# 게이트 실패로 처리한다. 예상 밖 실패의 출력은 그대로 표시한다.
+# vet이 먼저 도는 이유: 컴파일 오류를 "예상된 실패"로 오인하지 않기 위해.
 test-xfail:
 	$(GO) vet -tags xfail ./core/...
-	@if $(GO) test -tags xfail -run 'TestProperty' ./core/... >/dev/null 2>&1; then \
-		echo "xfail 속성 테스트가 통과함 — 구현이 배선됐다면 xfail 태그를 제거해 본 스위트로 옮겨라"; \
-		exit 1; \
-	else \
-		echo "test-xfail: 예상대로 실패 (FR-LOG-06, FR-POL-03 구현 전)"; \
-	fi
+	@out="$$($(GO) test -tags xfail -timeout 120s -run '^TestPropertyReplayDeterminism$$' ./core/... 2>&1)"; rc=$$?; \
+	if [ $$rc -eq 0 ]; then \
+		echo "xfail 게이트: TestPropertyReplayDeterminism이 통과함 — 구현이 배선됐다면 xfail 태그를 제거해 본 스위트로 옮겨라"; \
+		echo "$$out"; exit 1; \
+	fi; \
+	if ! echo "$$out" | grep -qF "FR-LOG-06: replay 구현이 아직 배선되지 않음"; then \
+		echo "xfail 게이트: TestPropertyReplayDeterminism이 미배선 sentinel이 아닌 사유로 실패함 (panic/timeout/실제 속성 위반 의심):"; \
+		echo "$$out"; exit 1; \
+	fi; \
+	echo "test-xfail: TestPropertyReplayDeterminism 예상대로 미배선 실패 (FR-LOG-06, T4에서 배선)"
+	@out="$$($(GO) test -tags xfail -timeout 120s -run '^TestPropertyProfileMergeOnlyNarrows$$' ./core/... 2>&1)"; rc=$$?; \
+	if [ $$rc -eq 0 ]; then \
+		echo "xfail 게이트: TestPropertyProfileMergeOnlyNarrows가 통과함 — 구현이 배선됐다면 xfail 태그를 제거해 본 스위트로 옮겨라"; \
+		echo "$$out"; exit 1; \
+	fi; \
+	if ! echo "$$out" | grep -qF "FR-POL-03: 프로파일 병합 구현이 아직 배선되지 않음"; then \
+		echo "xfail 게이트: TestPropertyProfileMergeOnlyNarrows가 미배선 sentinel이 아닌 사유로 실패함 (panic/timeout/실제 속성 위반 의심):"; \
+		echo "$$out"; exit 1; \
+	fi; \
+	echo "test-xfail: TestPropertyProfileMergeOnlyNarrows 예상대로 미배선 실패 (FR-POL-03, T6에서 배선)"
 
 # T8/T9에서 어댑터 골든 픽스처가 생기면 실제 대조로 대체된다.
 fixtures:
