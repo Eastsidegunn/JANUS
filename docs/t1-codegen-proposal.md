@@ -1,6 +1,8 @@
 # T1 사전 제안 — JSON Schema → Go codegen 도구 선정
 
-상태: **승인 대기** (2026-08-16). 이 문서는 비교·제안만 담는다.
+상태: **방향 승인됨** (2026-08-16 리뷰) — 생성기 G1, 검증기 V1 v6.0.3, §9 해석,
+`contracts/validate` 단일 import 지점 모두 승인. 본 판은 리뷰 지적 4건(embed 배치,
+drift 게이트의 미추적 파일, 의존성 표 정밀화, 키워드 집합 확정)을 반영한 것이다.
 이 PR은 외부 의존성을 추가하지 않고 contracts/ 스키마·생성 코드도 구현하지 않는다.
 아래 수치(버전, 라이선스, 최근 push, 의존 수)는 2026-08-16 GitHub API 조회 결과다.
 
@@ -35,11 +37,26 @@ JSON Schema와 골든 픽스처"라고 명시하므로, 검증은 생성된 타�
 
 ## 2. JSON Schema draft 및 키워드 지원 (§요건 3)
 
-HX 스키마는 **draft 2020-12**로 작성하고, 사용 키워드를 아래 서브셋으로 제한할 것을
-전제한다(스키마를 우리가 저작하므로 제한 가능):
+HX 스키마는 **draft 2020-12**로 작성하고, 사용 키워드를 아래 서브셋으로 제한한다
+(스키마를 우리가 저작하므로 제한 가능). schemagen의 계약은 세 범주로 정확히 나뉜다.
 
-`type, properties, required, additionalProperties, $defs, $ref(파일 내부만), enum,
-const, oneOf(+판별 필드 const), items, format, minimum/maxLength 류 제약`
+**(a) 형태 결정 키워드** — Go 타입 형태에 반영된다:
+
+`$schema`(2020-12 고정, 다른 값은 실패), `$id`, `$defs`, `$ref`(같은 문서 내부만),
+`type`, `properties`, `required`, `additionalProperties`(false 또는 미지정만),
+`items`, `enum`, `const`, `oneOf`(각 분기가 판별 필드 `const`를 가질 때만)
+
+**(b) 검증 전용 키워드** — 수용하되 타입 형태에는 불참(검증기 V1이 런타임 강제):
+
+`format`, `pattern`, `minLength`, `maxLength`, `minimum`, `maximum`,
+`exclusiveMinimum`, `exclusiveMaximum`, `minItems`, `maxItems`
+
+**(c) 허용 annotation** — 주석으로만 전사:
+
+`title`, `description`, `examples`, `deprecated`, `$comment`
+
+**세 범주 밖의 모든 키워드는 생성 실패(fail-closed)**이며, 이 계약은 schemagen 골든
+테스트에 "목록 밖 키워드 → 생성 실패" 케이스로 고정한다.
 
 | | draft | $ref | enum | oneOf | required | additionalProperties | format |
 |---|---|---|---|---|---|---|---|
@@ -95,15 +112,21 @@ G2의 oneOf 미지원은 이 프로젝트에 치명적이다: §5.2 와이어 �
 ## 7. codegen drift 검출 (§요건 8)
 
 ```
-make codegen   # tools/schemagen이 contracts/*.schema.json → contracts/gen/*.go 재생성
-make ci        # lint → test → fixtures → codegen-drift
-# codegen-drift: make codegen 후 `git diff --exit-code contracts/gen`
+make codegen        # tools/schemagen이 contracts/*.schema.json → contracts/gen/*.go 재생성
+make ci             # lint → test → fixtures → codegen-drift
+# codegen-drift: make codegen 후
+#   git status --porcelain --untracked-files=all -- contracts/gen
+# 출력이 비어 있지 않으면 실패
 ```
 
+- `git diff --exit-code`가 아니라 `git status --porcelain --untracked-files=all`을
+  쓴다 — 전자는 새로 생성된 **미추적** 파일을 놓친다(수정·삭제·신규 전부 검출 필요).
 - 생성 파일 머리에 "생성물 — 손으로 수정 금지" 헤더와 `//go:generate` 마커.
 - CI에서 재생성 결과가 커밋과 다르면 실패 — 스키마만 고치고 재생성을 잊거나,
-  생성물을 손으로 고친 경우(CLAUDE.md 금지 행동) 모두 잡힌다.
-- 생성기 자체의 골든 테스트: 고정 입력 스키마 → 기대 출력 소스 비교.
+  생성물을 손으로 고치거나(CLAUDE.md 금지 행동), 신규 생성 파일을 커밋에서 빠뜨린
+  경우 모두 잡힌다.
+- 생성기 자체의 골든 테스트: 고정 입력 스키마 → 기대 출력 소스 비교. 회귀 테스트에
+  "새 생성 파일이 커밋되지 않은 경우 drift 게이트가 실패한다" 케이스를 포함한다.
 
 ## 8. 스키마 진화·도구 교체 비용 (§요건 9)
 
@@ -117,14 +140,27 @@ make ci        # lint → test → fixtures → codegen-drift
 ## 9. 결정 요청: contracts "의존성 없음"의 해석
 
 §3.1은 "층 0 contracts: 의존성 없음"이라 한다. 본 제안은 이를 **내부 층 의존
-없음**으로 해석한다(§3.1의 주제가 층 간 의존 방향이므로). 이 해석 하에:
+없음**으로 해석한다(§3.1의 주제가 층 간 의존 방향이므로). 이 해석 하의 구조:
 
-- `contracts/gen/` (생성 타입): 표준 라이브러리만 — 외부 의존 0 유지.
-- `contracts/validate/` (검증 헬퍼): 스키마를 `go:embed`하고 V1을 import하는 유일한 지점.
+```
+contracts/
+  events.schema.json
+  wire.schema.json
+  schema.go          # 두 스키마를 go:embed로 embed.FS 노출 (표준 라이브러리만)
+  gen/               # 생성 타입 — 표준 라이브러리만, 외부 의존 0
+  validate/
+    validate.go      # contracts의 embed.FS를 받아 V1으로 컴파일·검증
+```
+
+`go:embed`는 패턴에 `..`(상위 디렉토리 참조)을 허용하지 않으므로 embed 선언은
+스키마 파일과 같은 디렉토리인 contracts 루트(`schema.go`)에 둔다 — 스키마 원본을
+복제하지 않으면서 contracts 루트는 표준 라이브러리만 유지된다. V1을 import하는
+유일한 지점은 `contracts/validate/`다.
 
 만약 "외부 의존 포함 전면 금지"로 해석한다면 검증 헬퍼를 core로 내려야 하지만,
 §5.2가 "준수 기준은 contracts의 JSON Schema"라고 명시하므로 검증의 소유권은
-contracts에 두는 전자가 명세와 더 정합한다. **리뷰에서 해석 확정을 요청한다.**
+contracts에 두는 전자가 명세와 더 정합한다.
+**→ 2026-08-16 리뷰에서 이 해석("상위 내부 계층 의존 금지")으로 확정됐다.**
 
 ---
 
@@ -153,9 +189,12 @@ contracts에 두는 전자가 명세와 더 정합한다. **리뷰에서 해석 
 | 모듈 | 버전 | 라이선스 | 성격 |
 |---|---|---|---|
 | `github.com/santhosh-tekuri/jsonschema/v6` | **v6.0.3** | Apache-2.0 | 직접, 런타임 (import 지점: `contracts/validate` 한정) |
-| `golang.org/x/text` | v6.0.3이 요구하는 버전(go.sum 고정) | BSD-3 | 간접 |
+| `golang.org/x/text` | v0.14.0 (V1 go.mod 요구, go.sum 고정) | BSD-3 | 간접, 런타임 링크 |
+| `github.com/dlclark/regexp2` | v1.11.0 | MIT | 간접 — upstream 테스트 전용이지만 모듈 그래프(go.sum)에는 존재 |
 
-이외 외부 의존성 없음. 생성기는 표준 라이브러리만 사용.
+**런타임에 링크되는 외부 의존은 V1과 `golang.org/x/text`뿐이다.** regexp2는 우리
+바이너리에 링크되지 않으나 모듈 그래프에 편입되므로 공급망 검토 대상에 포함해 기록한다.
+생성기는 표준 라이브러리만 사용.
 
 ### Makefile·CI 흐름 (구현 PR에서 반영 예정)
 
@@ -169,8 +208,9 @@ contracts에 두는 전자가 명세와 더 정합한다. **리뷰에서 해석 
 |---|---|
 | `contracts/events.schema.json` | §5.1 이벤트 스키마 (kind 어휘 전체) — [H] 리뷰 대상 |
 | `contracts/wire.schema.json` | §5.2 와이어 프로토콜 스키마 — [H] 리뷰 대상 |
+| `contracts/schema.go` | 스키마 `go:embed` → `embed.FS` 노출 (표준 라이브러리만) |
 | `contracts/gen/*.go` | 생성 타입 (커밋되는 생성물, 수정 금지 헤더) |
-| `contracts/validate/` | `go:embed` 스키마 + V1 기반 검증 헬퍼, 위반 샘플 거부 테스트 |
+| `contracts/validate/` | contracts의 embed.FS + V1 기반 검증 헬퍼, 위반 샘플 거부 테스트 |
 | `tools/schemagen/` | 자체 제너레이터 + 골든 테스트 (§2 서브셋, fail-closed) |
 | `Makefile` | `codegen`, `codegen-drift` |
 | `go.mod` / `go.sum` | V1 v6.0.3 추가 |
