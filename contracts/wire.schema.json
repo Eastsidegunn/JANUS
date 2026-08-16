@@ -1,16 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:hx:contracts:wire",
+  "$id": "urn:hx:contracts:wire:v1",
   "title": "HX 어댑터 와이어 프로토콜",
-  "description": "§5.2 NDJSON over stdio. 한 줄이 메시지 하나이며, 코어→어댑터는 #/$defs/command, 어댑터→코어는 #/$defs/event로 검증한다. 픽스처를 통과하지 못하는 어댑터는 등록될 수 없다(MUST).",
-  "oneOf": [
-    { "$ref": "#/$defs/command" },
-    { "$ref": "#/$defs/event" }
-  ],
+  "description": "§5.2 NDJSON over stdio. 한 줄이 메시지 하나다. 이 문서의 루트는 정의 라이브러리이며 검증 진입점은 방향별로 #/$defs/command(코어→어댑터)와 #/$defs/event(어댑터→코어)다. 픽스처를 통과하지 못하는 어댑터는 등록될 수 없다(MUST).",
+  "$comment": "루트 oneOf를 두지 않는 이유: command는 cmd, event는 kind로 판별되어 공통 판별 필드가 없고, schemagen 계약은 판별 const 없는 oneOf 분기를 금지한다. 방향은 채널(stdin/stdout)이 이미 결정하므로 루트 검증이 필요 없다.",
   "$defs": {
     "protocolVersion": {
       "const": 1,
       "$comment": "모든 메시지는 v 필드를 포함해야 한다(MUST). v0.1 프로토콜 버전 = 1"
+    },
+    "int64NonNeg": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "$comment": "생성 Go 타입과 SQLite의 실질 범위(int64)에 정합"
+    },
+    "base64": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+      "$comment": "표준 base64 (패딩 포함). 빈 문자열 허용"
     },
     "command": {
       "type": "object",
@@ -54,9 +62,8 @@
         },
         "budget": { "$ref": "#/$defs/budget" },
         "depth": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "현재 spawn 깊이. 깊이 제한·잔여 예산은 환경변수로도 자식에 전파된다 (FR-ADP-08)"
+          "$ref": "#/$defs/int64NonNeg",
+          "description": "이 서브에이전트가 위치한 현재 spawn 깊이(root의 직계 자식 = 0). 절대 한도는 budget.max_depth. 깊이·잔여 예산은 환경변수로도 자식에 전파된다 (FR-ADP-08)"
         },
         "extensions": {
           "type": "array",
@@ -87,12 +94,16 @@
     },
     "budget": {
       "type": "object",
-      "description": "예산: 토큰/시간/spawn 깊이 (FR-POL-01). 필드 부재 = 해당 축 무제한이 아니라 상위 프로파일 값 상속 — 병합은 최솟값으로만 결합된다(FR-POL-03)",
+      "description": "정책 병합(FR-POL-03)이 끝난 뒤의 실효 잔여 예산 — 어댑터는 프로파일·상속 의미를 알지 못하며, 받은 값이 곧 한도다. 세 축 모두 필수",
       "properties": {
-        "tokens": { "type": "integer", "minimum": 0 },
-        "time_ms": { "type": "integer", "minimum": 0 },
-        "spawn_depth": { "type": "integer", "minimum": 0 }
+        "tokens": { "$ref": "#/$defs/int64NonNeg" },
+        "time_ms": { "$ref": "#/$defs/int64NonNeg" },
+        "max_depth": {
+          "$ref": "#/$defs/int64NonNeg",
+          "description": "절대 spawn 깊이 한도. 어댑터는 taskPayload.depth >= max_depth이면 자식 spawn을 거부한다 (FR-ADP-08)"
+        }
       },
+      "required": ["tokens", "time_ms", "max_depth"],
       "additionalProperties": false
     },
     "extension": {
@@ -126,7 +137,7 @@
     "event": {
       "type": "object",
       "title": "어댑터 → 코어 (stdout)",
-      "$comment": "어댑터가 방출하는 정규화 이벤트. 코어 writer가 envelope(seq, ts, trace_id, span_id, actor)을 입혀 events.schema의 레코드로 기록한다",
+      "$comment": "어댑터가 방출하는 정규화 이벤트. 코어 writer가 envelope(seq, ts, trace_id, span_id, actor)을 입혀 events 스키마의 레코드로 기록한다",
       "properties": {
         "v": { "$ref": "#/$defs/protocolVersion" },
         "kind": {
@@ -142,8 +153,8 @@
         },
         "payload": { "type": "object" },
         "raw": {
-          "type": "string",
-          "description": "대상 도구 원본 페이로드의 base64 (FR-ADP-04, MUST)"
+          "$ref": "#/$defs/base64",
+          "description": "대상 도구 원본 페이로드의 base64 (FR-ADP-04, MUST). upstream 원본이 없는 합성 이벤트는 빈 base64(\"\")를 명시한다 (2026-08-17 [H] 승인)"
         }
       },
       "required": ["v", "kind", "payload", "raw"],
@@ -151,8 +162,27 @@
       "oneOf": [
         {
           "properties": {
-            "kind": { "const": "subagent/done" },
-            "payload": { "$ref": "#/$defs/donePayload" }
+            "kind": { "const": "subagent/ready" }
+          }
+        },
+        {
+          "properties": {
+            "kind": { "const": "subagent/message" }
+          }
+        },
+        {
+          "properties": {
+            "kind": { "const": "subagent/tool_call" }
+          }
+        },
+        {
+          "properties": {
+            "kind": { "const": "subagent/tool_result" }
+          }
+        },
+        {
+          "properties": {
+            "kind": { "const": "subagent/approval_request" }
           }
         },
         {
@@ -163,22 +193,15 @@
         },
         {
           "properties": {
-            "kind": {
-              "enum": [
-                "subagent/ready",
-                "subagent/message",
-                "subagent/tool_call",
-                "subagent/tool_result",
-                "subagent/approval_request"
-              ]
-            }
+            "kind": { "const": "subagent/done" },
+            "payload": { "$ref": "#/$defs/donePayload" }
           }
         }
       ]
     },
     "donePayload": {
       "type": "object",
-      "description": "events.schema.json#/$defs/subagentDonePayload의 거울 — 서브셋이 문서 간 $ref를 금지하므로 중복 정의. 두 정의의 일치는 contracts 테스트로 고정한다",
+      "description": "urn:hx:contracts:events:v1#/$defs/subagentDonePayload의 거울 — 서브셋이 문서 간 $ref를 금지하므로 중복 정의. 두 정의의 canonical JSON 구조 동일성은 contracts 테스트로 고정한다(2026-08-17 [H] 승인). result는 문자열 고정",
       "properties": {
         "status": { "enum": ["ok", "error", "stopped"] },
         "result": { "type": "string" }
@@ -188,11 +211,12 @@
     },
     "usagePayload": {
       "type": "object",
-      "description": "토큰 사용량 보고 (FR-ADP-07, SHOULD). 미보고 시 코어가 시간·요금 기반 추정으로 폴백",
+      "description": "토큰 사용량 보고 (FR-ADP-07, SHOULD — 방출한다면 두 필드 모두 필수). 미보고 시 코어가 시간·요금 기반 추정으로 폴백",
       "properties": {
-        "input_tokens": { "type": "integer", "minimum": 0 },
-        "output_tokens": { "type": "integer", "minimum": 0 }
+        "input_tokens": { "$ref": "#/$defs/int64NonNeg" },
+        "output_tokens": { "$ref": "#/$defs/int64NonNeg" }
       },
+      "required": ["input_tokens", "output_tokens"],
       "additionalProperties": false
     }
   }

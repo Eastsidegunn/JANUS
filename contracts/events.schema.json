@@ -1,19 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:hx:contracts:events",
+  "$id": "urn:hx:contracts:events:v1",
   "title": "HX 세션 이벤트 레코드",
   "description": "§5.1 events 테이블의 한 행에 대응하는 정규화 이벤트. 필드 부재는 DB NULL에 대응한다(널 값 대신 필드 생략).",
-  "$comment": "스키마 확장 규칙(§5.1): 새 모델 가시 입력은 반드시 새 kind 추가로 처리한다. kind의 제거·의미 변경은 메이저 버전에서만 허용한다.",
+  "$comment": "스키마 확장 규칙(§5.1): 새 모델 가시 입력은 반드시 새 kind 추가로 처리한다. kind의 제거·의미 변경은 메이저 버전($id의 :vN)에서만 허용한다.",
   "type": "object",
   "properties": {
     "seq": {
-      "type": "integer",
-      "minimum": 1,
+      "$ref": "#/$defs/int64Pos",
       "description": "writer 발급, 세션 내 전순서 (FR-LOG-02)"
     },
     "ts": {
-      "type": "integer",
-      "minimum": 0,
+      "$ref": "#/$defs/int64NonNeg",
       "description": "unix epoch 밀리초"
     },
     "trace_id": { "$ref": "#/$defs/traceId" },
@@ -30,19 +28,74 @@
       "description": "정규화 JSON. kind별 형태는 oneOf 분기 참조"
     },
     "raw": {
-      "type": "string",
+      "$ref": "#/$defs/base64",
       "description": "원본 페이로드 passthrough의 base64 (FR-LOG-07). 압축 여부·포맷은 저장 계층 소관(부록 A 미결)"
     },
-    "usage_in": { "type": "integer", "minimum": 0 },
-    "usage_out": { "type": "integer", "minimum": 0 }
+    "usage_in": { "$ref": "#/$defs/int64NonNeg" },
+    "usage_out": { "$ref": "#/$defs/int64NonNeg" }
   },
   "required": ["seq", "ts", "trace_id", "span_id", "kind", "actor", "payload"],
   "additionalProperties": false,
   "oneOf": [
     {
       "properties": {
+        "kind": { "const": "session/start" }
+      }
+    },
+    {
+      "properties": {
         "kind": { "const": "session/fork" },
         "payload": { "$ref": "#/$defs/sessionForkPayload" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "session/end" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "turn/start" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "turn/end" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "step/start" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "step/end" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "user/message" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "assistant/chunk" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "assistant/message" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "tool/call" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "tool/result" }
       }
     },
     {
@@ -53,14 +106,43 @@
     },
     {
       "properties": {
-        "kind": { "const": "subagent/done" },
-        "payload": { "$ref": "#/$defs/subagentDonePayload" }
+        "kind": { "const": "subagent/spawn" }
       }
     },
     {
       "properties": {
-        "kind": { "const": "policy/decision" },
-        "payload": { "$ref": "#/$defs/policyDecisionPayload" }
+        "kind": { "const": "subagent/ready" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/message" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/tool_call" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/tool_result" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/approval_request" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/usage" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "subagent/done" },
+        "payload": { "$ref": "#/$defs/subagentDonePayload" }
       }
     },
     {
@@ -76,34 +158,29 @@
       }
     },
     {
-      "$comment": "명세가 payload 필드를 정의하지 않은 kind — v0.1에서는 열린 객체. 필드 확정은 해당 태스크(T5 루프, T7/T9 어댑터, T10 샌드박스, T13 확장)에서 additive로 진행",
       "properties": {
-        "kind": {
-          "enum": [
-            "session/start",
-            "session/end",
-            "turn/start",
-            "turn/end",
-            "step/start",
-            "step/end",
-            "user/message",
-            "assistant/chunk",
-            "assistant/message",
-            "tool/call",
-            "tool/result",
-            "subagent/spawn",
-            "subagent/ready",
-            "subagent/message",
-            "subagent/tool_call",
-            "subagent/tool_result",
-            "subagent/approval_request",
-            "subagent/usage"
-          ]
-        }
+        "kind": { "const": "policy/decision" },
+        "payload": { "$ref": "#/$defs/policyDecisionPayload" }
       }
     }
   ],
   "$defs": {
+    "int64NonNeg": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807,
+      "$comment": "생성 Go 타입과 SQLite의 실질 범위(int64)에 정합"
+    },
+    "int64Pos": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "base64": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+      "$comment": "표준 base64 (패딩 포함). 빈 문자열 허용"
+    },
     "traceId": {
       "type": "string",
       "pattern": "^[0-9a-f]{32}$",
@@ -115,7 +192,7 @@
       "$comment": "OTel 호환 (FR-OBS-01). 전부 0인 값의 금지는 런타임 발급기가 보장"
     },
     "kind": {
-      "description": "§5.1 kind 어휘 전체 (v0.1)",
+      "description": "§5.1 kind 어휘 전체 (v0.1). payload 형태가 명세에 정의되지 않은 kind는 열린 객체이며, 필드 확정은 해당 태스크(T5 루프, T7/T9 어댑터, T10 샌드박스, T13 확장)에서 additive로 진행",
       "enum": [
         "session/start",
         "session/fork",
@@ -143,38 +220,63 @@
         "policy/decision"
       ]
     },
+    "hookPoint": {
+      "enum": ["pre_step", "pre_tool", "post_tool", "turn_stopping"]
+    },
+    "hookVerdictPayload": {
+      "type": "object",
+      "description": "훅 판정: 지점, 판정, 사유 (FR-LOOP-02/03/06). verdict별 폐쇄 분기 — rewrite는 대체값 필수(로그에서 재구성 가능해야 함, FR-LOG-03), reject는 비어 있지 않은 사유 필수",
+      "required": ["point", "verdict"],
+      "oneOf": [
+        {
+          "properties": {
+            "verdict": { "const": "continue" },
+            "point": { "$ref": "#/$defs/hookPoint" },
+            "reason": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "properties": {
+            "verdict": { "const": "rewrite" },
+            "point": { "$ref": "#/$defs/hookPoint" },
+            "rewrite": {
+              "type": "object",
+              "description": "rewrite(x)의 실제 대체값 — 이것 없이는 로그에서 모델 입력을 재구성할 수 없다",
+              "$comment": "지점별 구체 형태(모델 요청/툴 콜/툴 결과)는 T5에서 additive로 확정"
+            },
+            "reason": { "type": "string" }
+          },
+          "required": ["rewrite"],
+          "additionalProperties": false
+        },
+        {
+          "properties": {
+            "verdict": { "const": "reject" },
+            "point": { "$ref": "#/$defs/hookPoint" },
+            "reason": { "type": "string", "minLength": 1 }
+          },
+          "required": ["reason"],
+          "additionalProperties": false
+        }
+      ]
+    },
     "sessionForkPayload": {
       "type": "object",
       "description": "포크 세션의 원본 참조 (FR-LOG-05)",
       "properties": {
         "origin_trace_id": { "$ref": "#/$defs/traceId" },
-        "origin_seq": { "type": "integer", "minimum": 1 }
+        "origin_seq": { "$ref": "#/$defs/int64Pos" }
       },
       "required": ["origin_trace_id", "origin_seq"],
       "additionalProperties": false
     },
-    "hookVerdictPayload": {
-      "type": "object",
-      "description": "훅 판정: 지점, 판정, 사유 (FR-LOOP-02/03/06)",
-      "properties": {
-        "point": {
-          "enum": ["pre_step", "pre_tool", "post_tool", "turn_stopping"]
-        },
-        "verdict": { "enum": ["continue", "rewrite", "reject"] },
-        "reason": { "type": "string" }
-      },
-      "required": ["point", "verdict"],
-      "additionalProperties": false
-    },
     "subagentDonePayload": {
       "type": "object",
-      "description": "서브에이전트 종료 (§5.2 subagent/done)",
+      "description": "서브에이전트 종료 (§5.2 subagent/done). result는 문자열 고정(2026-08-17 [H] 승인) — 구조화된 원본은 raw에 보존하고 부모 컨텍스트에는 정규화 텍스트만 진입(FR-LOG-10)",
       "properties": {
         "status": { "enum": ["ok", "error", "stopped"] },
-        "result": {
-          "type": "string",
-          "$comment": "리뷰 포인트: 부모 컨텍스트에 진입하는 최종 결과·요약(FR-LOG-10)이므로 문자열로 고정할지, 구조화 객체를 허용할지"
-        }
+        "result": { "type": "string" }
       },
       "required": ["status", "result"],
       "additionalProperties": false
@@ -221,10 +323,9 @@
       "properties": {
         "domain": { "type": "string", "minLength": 1 },
         "method": { "type": "string", "minLength": 1 },
-        "size_bytes": { "type": "integer", "minimum": 0 },
+        "size_bytes": { "$ref": "#/$defs/int64NonNeg" },
         "at_ms": {
-          "type": "integer",
-          "minimum": 0,
+          "$ref": "#/$defs/int64NonNeg",
           "$comment": "요청 시각. 이벤트 envelope ts는 기록 시각이므로 별도 유지"
         }
       },
