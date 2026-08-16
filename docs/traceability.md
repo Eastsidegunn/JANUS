@@ -16,3 +16,14 @@
 | FR-LOG-06 — 리플레이 결정론 속성 (300회) | `core/replay_prop_test.go` (xfail 태그, T4에서 배선·편입) | T2 | **expected-fail** |
 | FR-POL-03 — 병합 협소성 속성 (300회, 체인·교환·자기병합 포함) | `core/policy_prop_test.go` (xfail 태그, T6에서 배선·편입) | T2 | **expected-fail** |
 | T2 완료 기준 — 생성기가 스키마 유효·다양·결정적 입력을 실제 생성 | `core/propgen_test.go` (TestGenerator*) | T2 | green |
+| FR-LOG-01 — append-only 저장소 수준 물리 차단 (직접 연결 UPDATE/DELETE 거부) | `seams/store/sqlite/store_test.go` (TestAppendOnlyTriggers) | T3 | green |
+| FR-LOG-02 — 단일 writer seq 전순서 + mutation 비노출 (동시 제출·store 도달 순서, Reader 동적 타입의 Append/Close 미노출, 파일 직접 INSERT는 PK 최후 방어) | `core/logd/writer_test.go` (TestWriterSeqTotalOrder) + `seams/store/sqlite/store_test.go` (TestSingleWriterOverSQLite) + `seams/store/sqlite/bypass_test.go` (외부 패키지 assertion 검사) | T3 | green |
+| T3 재리뷰 — contracts 위반 저장 거부, admission-only ctx, terminal 전파(원인 체인 포함), 백프레셔 cap 직접 단정, 특수문자 DSN | `core/logd/writer_test.go` (TestWriterRejectsContractViolations, TestSubmitAckDespiteCtxCancelAfterAdmission, TestWriterTerminalOnStoreFailure) + `seams/store/sqlite/store_test.go` (TestWeirdFilenames, TestLogPathEnforcesRedactionAndContract) | T3 | green |
+| FR-LOG-07 — raw 원본 보존 (NULL/빈 base64 구분 왕복) | `seams/store/sqlite/store_test.go` (TestRoundTrip) | T3 | green |
+| FR-LOG-08 — 기록 전 redaction (기본 패턴 + 설정 확장, payload·raw) | `core/logd/writer_test.go` (TestWriterRedaction) | T3 | green |
+| FR-LOG-09 — 백프레셔 (큐 포화 시 입력 중단→재개, 수락분 전량 저장, 유실 0) | `core/logd/writer_test.go` (TestWriterBackpressure) | T3 | green |
+| NFR-02 — 크래시 복구 (SIGKILL helper 후 마지막 ack seq까지 복원) | `seams/store/sqlite/crash_test.go` (TestCrashRecovery) | T3 | green |
+| NFR-02/03 — WAL + synchronous=FULL 실적용, 재기동 seq 승계 | `seams/store/sqlite/store_test.go` (TestDurabilityPragmas, TestLastSeqAcrossReopen) | T3 | green |
+| busy_timeout↔취소 충돌 회귀 (잠금 상태 50ms deadline 즉시 반환) + BUSY 재시도 | `seams/store/sqlite/store_test.go` (TestBusyReturnsPromptly…, TestBusyRetry…) | T3 | green |
+| 외부 모듈 import 한정 (modernc→seams/store/sqlite, jsonschema→contracts/validate) | `tools/boundarylint/rules_test.go` (TestCheckExternalRestrictions) + `make lint` 실그래프 | T3 | green |
+| NFR-04 — CGO_ENABLED=0 네이티브 smoke (race와 분리) | `make smoke` (CI 편입) | T3 | green |

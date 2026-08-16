@@ -27,6 +27,14 @@ var validLayers = map[string]bool{
 	"tools":     true,
 }
 
+// externalRestrictions는 특정 외부 모듈의 import를 지정 내부 패키지로
+// 한정한다 — 문서 선언이 아니라 린트로 강제한다 (T3 [H] 승인 조건).
+// 키는 import 경로 접두사, 값은 허용되는 내부 패키지(및 그 하위) 목록.
+var externalRestrictions = map[string][]string{
+	"modernc.org/":                          {"seams/store/sqlite"}, // SQLite 드라이버 (T3 제안서)
+	"github.com/santhosh-tekuri/jsonschema": {"contracts/validate"}, // 스키마 검증기 (T1 제안서 §6)
+}
+
 // Check는 패키지 그래프가 §3.1의 의존 방향 규칙을 지키는지 검사한다.
 // 위반 목록을 중복 제거·정렬해 반환한다(같은 패키지가 여러 GOOS 순회로
 // 중복 전달돼도 동일 위반은 한 번만 나온다). 비어 있으면 통과다.
@@ -52,6 +60,9 @@ func Check(module string, pkgs []Pkg) []string {
 		for _, imp := range allImports(p) {
 			to, ok := rel(module, imp)
 			if !ok {
+				if v := checkExternal(from, imp); v != "" {
+					add(v)
+				}
 				continue
 			}
 			if !allowed(from, to) {
@@ -69,6 +80,24 @@ func allImports(p Pkg) []string {
 	out = append(out, p.TestImports...)
 	out = append(out, p.XTestImports...)
 	return out
+}
+
+// checkExternal은 제한된 외부 모듈 import가 허용 패키지 밖에서 일어나면
+// 위반 문자열을, 아니면 빈 문자열을 반환한다.
+func checkExternal(from, imp string) string {
+	for prefix, allowedPkgs := range externalRestrictions {
+		if !strings.HasPrefix(imp, prefix) {
+			continue
+		}
+		for _, a := range allowedPkgs {
+			if from == a || strings.HasPrefix(from, a+"/") {
+				return ""
+			}
+		}
+		return fmt.Sprintf("%s → %s (외부 모듈 %s*는 %s에서만 import 가능)",
+			from, imp, prefix, strings.Join(allowedPkgs, ", "))
+	}
+	return ""
 }
 
 // rel은 모듈 내부 패키지 경로를 모듈 기준 상대 경로로 바꾼다.
