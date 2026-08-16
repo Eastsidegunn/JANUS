@@ -38,7 +38,7 @@ func TestRejectedTurnDurableOverSQLite(t *testing.T) {
 	}
 
 	var tick int64
-	lp := loop.New(l.Writer, l.Reader, nullModel{}, nullTools{},
+	lp := loop.New(l.Writer, nullModel{}, nullTools{},
 		strings.Repeat("a", 32), strings.Repeat("b", 16),
 		loop.WithClock(func() int64 { tick++; return tick }))
 	if err := lp.RegisterHook(gen.HookPointPreStep, func(ctx context.Context, hc loop.HookContext) loop.Decision {

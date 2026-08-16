@@ -94,7 +94,7 @@ func newLoop(t *testing.T, model Model, tools Tools) (*Loop, *FakeStore) {
 	}
 	t.Cleanup(func() { w.Close() })
 	var tick int64
-	l := New(w, store, model, tools,
+	l := New(w, model, tools,
 		strings.Repeat("a", 32), strings.Repeat("b", 16),
 		WithClock(func() int64 { tick++; return tick }))
 	return l, store
@@ -354,7 +354,7 @@ func TestMaxStepsGuard(t *testing.T) {
 	w, _ := logd.NewWriter(context.Background(), store)
 	defer w.Close()
 	var tick int64
-	l := New(w, store, model, &FakeTools{},
+	l := New(w, model, &FakeTools{},
 		strings.Repeat("a", 32), strings.Repeat("b", 16),
 		WithClock(func() int64 { tick++; return tick }), WithMaxSteps(2))
 	l.RegisterHook(gen.HookPointTurnStopping, func(ctx context.Context, hc HookContext) Decision {
@@ -379,6 +379,151 @@ func TestInvalidHookDecisionFails(t *testing.T) {
 	})
 	if err := l.RunTurn(context.Background(), "x"); err == nil {
 		t.Fatal("위반 판정이 통과함")
+	}
+}
+
+// ---- T5 재리뷰 회귀 (차단 2: 오류·취소 경로의 경계 보존) ----
+
+// blockingModel은 진입을 알리고 ctx 취소까지 블록하는 모델 fake다.
+type blockingModel struct {
+	entered chan struct{}
+}
+
+func (m blockingModel) Complete(ctx context.Context, req ModelRequest) (ModelResponse, error) {
+	close(m.entered)
+	<-ctx.Done()
+	return ModelResponse{}, ctx.Err()
+}
+
+// 모델 호출 중 context 취소 — step/end와 turn/end가 유실되지 않는다.
+// 취소는 모델 진입 이후에만 발화시켜 경합을 제거한다.
+func TestModelCancellationKeepsBoundaries(t *testing.T) {
+	model := blockingModel{entered: make(chan struct{})}
+	l, store := newLoop(t, model, &FakeTools{})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-model.entered
+		cancel()
+	}()
+	if err := l.RunTurn(ctx, "x"); err == nil {
+		t.Fatal("취소가 오류로 전파되지 않음")
+	}
+	events, _ := store.ReadFrom(context.Background(), 1)
+	assertKinds(t, kinds(events),
+		gen.KindTurnStart, gen.KindUserMessage,
+		gen.KindStepStart, gen.KindStepEnd, gen.KindTurnEnd)
+}
+
+// 스키마 위반 usage를 반환한 모델 — assistant 기록은 거부되지만
+// step/turn 경계는 결정적으로 닫힌다 (리뷰 실증의 결정적 케이스).
+func TestSchemaViolatingUsageKeepsBoundaries(t *testing.T) {
+	model := &FakeModel{script: []ModelResponse{{Text: "x", UsageIn: -5}}}
+	l, store := newLoop(t, model, &FakeTools{})
+	if err := l.RunTurn(context.Background(), "x"); err == nil {
+		t.Fatal("스키마 위반 usage가 통과함")
+	}
+	events, _ := store.ReadFrom(context.Background(), 1)
+	assertKinds(t, kinds(events),
+		gen.KindTurnStart, gen.KindUserMessage,
+		gen.KindStepStart, gen.KindStepEnd, gen.KindTurnEnd)
+}
+
+// ---- T5 재리뷰 회귀 (차단 3: rewrite 전체 교체 의미론) ----
+
+// pre_tool Rewrite({}): 로그에 {}가 대체값으로 남는 이상 실행도 그에
+// 정합해야 한다 — 빈 대체는 실행 불가로 fail-closed, 원래 콜은 실행 안 됨.
+func TestPreToolRewriteEmptyIsFailClosed(t *testing.T) {
+	model := &FakeModel{script: []ModelResponse{
+		{ToolCalls: []ToolCall{{Name: "bash", Args: json.RawMessage(`{"cmd":"ls"}`)}}},
+	}}
+	tools := &FakeTools{}
+	l, store := newLoop(t, model, tools)
+	l.RegisterHook(gen.HookPointPreTool, func(ctx context.Context, hc HookContext) Decision {
+		return Rewrite(json.RawMessage(`{}`), "전부 제거")
+	})
+	if err := l.RunTurn(context.Background(), "x"); err == nil {
+		t.Fatal("빈 대체값 rewrite가 통과함")
+	}
+	if len(tools.calls) != 0 {
+		t.Fatal("빈 대체값인데 원래 툴이 실행됨 — merge 의미론 잔존")
+	}
+	// 오류 경로에서도 경계는 닫힌다
+	events, _ := store.ReadFrom(context.Background(), 1)
+	ks := kinds(events)
+	if ks[len(ks)-1] != gen.KindTurnEnd || ks[len(ks)-2] != gen.KindStepEnd {
+		t.Fatalf("오류 경로 경계 누락: %v", ks)
+	}
+}
+
+// 부분 rewrite는 merge가 아니라 전체 교체다: args를 생략한 대체값이면
+// 원래 args가 살아남지 않고 nil로 실행된다.
+func TestPreToolRewriteIsFullReplacementNotMerge(t *testing.T) {
+	model := &FakeModel{script: []ModelResponse{
+		{ToolCalls: []ToolCall{{Name: "bash", Args: json.RawMessage(`{"cmd":"rm -rf /"}`)}}},
+		{Text: "끝"},
+	}}
+	tools := &FakeTools{}
+	l, _ := newLoop(t, model, tools)
+	l.RegisterHook(gen.HookPointPreTool, func(ctx context.Context, hc HookContext) Decision {
+		return Rewrite(json.RawMessage(`{"name":"noop"}`), "무해화")
+	})
+	if err := l.RunTurn(context.Background(), "x"); err != nil {
+		t.Fatal(err)
+	}
+	if len(tools.calls) != 1 || tools.calls[0].Name != "noop" || tools.calls[0].Args != nil {
+		t.Fatalf("전체 교체가 아님: %+v (원래 args가 merge로 살아남았는가?)", tools.calls)
+	}
+}
+
+// 미지 필드가 든 rewrite는 strict decode에서 거부된다.
+func TestPreToolRewriteUnknownFieldRejected(t *testing.T) {
+	model := &FakeModel{script: []ModelResponse{
+		{ToolCalls: []ToolCall{{Name: "bash", Args: json.RawMessage(`{}`)}}},
+	}}
+	tools := &FakeTools{}
+	l, _ := newLoop(t, model, tools)
+	l.RegisterHook(gen.HookPointPreTool, func(ctx context.Context, hc HookContext) Decision {
+		return Rewrite(json.RawMessage(`{"name":"x","bogus":1}`), "")
+	})
+	if err := l.RunTurn(context.Background(), "x"); err == nil {
+		t.Fatal("미지 필드 rewrite가 통과함")
+	}
+	if len(tools.calls) != 0 {
+		t.Fatal("거부된 rewrite인데 툴이 실행됨")
+	}
+}
+
+// pre_step rewrite도 전체 교체: 빈 히스토리 대체 → 모델이 0개 메시지를 받는다.
+func TestPreStepRewriteIsFullReplacement(t *testing.T) {
+	model := &FakeModel{script: []ModelResponse{{Text: "끝"}}}
+	l, _ := newLoop(t, model, &FakeTools{})
+	l.RegisterHook(gen.HookPointPreStep, func(ctx context.Context, hc HookContext) Decision {
+		return Rewrite(json.RawMessage(`{"messages":[]}`), "컨텍스트 비우기")
+	})
+	if err := l.RunTurn(context.Background(), "x"); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.requests) != 1 || len(model.requests[0].Messages) != 0 {
+		t.Fatalf("전체 교체가 아님: 모델이 %d개 메시지를 받음 (0 기대)", len(model.requests[0].Messages))
+	}
+}
+
+// post_tool rewrite가 객체가 아니면 실패하고 경계는 닫힌다.
+func TestPostToolRewriteNonObjectFailsWithBoundaries(t *testing.T) {
+	model := &FakeModel{script: []ModelResponse{
+		{ToolCalls: []ToolCall{{Name: "t", Args: json.RawMessage(`{}`)}}},
+	}}
+	l, store := newLoop(t, model, &FakeTools{})
+	l.RegisterHook(gen.HookPointPostTool, func(ctx context.Context, hc HookContext) Decision {
+		return Rewrite(json.RawMessage(`[1,2]`), "")
+	})
+	if err := l.RunTurn(context.Background(), "x"); err == nil {
+		t.Fatal("비객체 post_tool rewrite가 통과함")
+	}
+	events, _ := store.ReadFrom(context.Background(), 1)
+	ks := kinds(events)
+	if ks[len(ks)-1] != gen.KindTurnEnd || ks[len(ks)-2] != gen.KindStepEnd {
+		t.Fatalf("오류 경로 경계 누락: %v", ks)
 	}
 }
 

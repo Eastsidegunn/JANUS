@@ -186,6 +186,13 @@ func (w *Writer) submitInitBatch(ctx context.Context, events []gen.EventRecord) 
 	return err
 }
 
+// Replay는 이 writer가 기록하는 바로 그 로그의 파생 상태를 재계산한다.
+// 프로젝션이 쓰기 대상 로그에 결속되므로, 다른 로그를 읽어 모델 히스토리를
+// 만드는 Writer/Reader 혼합(FR-LOG-03 우회)이 타입 수준에서 표현 불가능하다.
+func (w *Writer) Replay(ctx context.Context) (*DerivedState, error) {
+	return ReplayReader(ctx, w.store)
+}
+
 // Close는 새 Submit을 차단하고, 이미 수락된 큐를 전부 처리한 뒤 반환한다.
 // writer가 종료 상태면 그 원인을 반환한다. store의 Close는 소유자
 // (조립 지점)가 별도로 한다.

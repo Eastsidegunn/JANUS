@@ -1,8 +1,10 @@
 package loop
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -56,7 +58,6 @@ const DefaultMaxSteps = 32
 // 모든 경계·판정·대화는 writer를 경유해 세션 이벤트로 기록된다(FR-LOOP-06).
 type Loop struct {
 	writer   *logd.Writer
-	reader   logd.Reader
 	model    Model
 	tools    Tools
 	hooks    map[gen.HookPoint][]Hook
@@ -79,10 +80,12 @@ func WithMaxSteps(n int) LoopOption {
 	return func(l *Loop) { l.maxSteps = n }
 }
 
-// New는 세션 하나의 루프를 만든다. writer/reader는 같은 세션 로그여야 한다.
-func New(w *logd.Writer, r logd.Reader, model Model, tools Tools, traceID, rootSpan string, opts ...LoopOption) *Loop {
+// New는 세션 하나의 루프를 만든다. 모델 히스토리는 이 writer에 결속된
+// 프로젝션(Writer.Replay)에서만 재구성된다 — 다른 로그를 읽는 혼합은
+// 표현 불가능하다(FR-LOG-03).
+func New(w *logd.Writer, model Model, tools Tools, traceID, rootSpan string, opts ...LoopOption) *Loop {
 	l := &Loop{
-		writer: w, reader: r, model: model, tools: tools,
+		writer: w, model: model, tools: tools,
 		hooks:   map[gen.HookPoint][]Hook{},
 		traceID: traceID, rootSpan: rootSpan,
 		now:      func() int64 { return time.Now().UnixMilli() },
@@ -119,11 +122,11 @@ func (l *Loop) RunTurn(ctx context.Context, input string) (err error) {
 	if err := l.emit(ctx, gen.KindTurnStart, struct{}{}, nil, nil); err != nil {
 		return err
 	}
-	// turn 경계는 어떤 경로로 끝나도 durable하게 닫힌다 (FR-LOOP-05/06)
+	// turn 경계는 오류·취소를 포함한 어떤 경로로 끝나도 durable하게 닫힌다
+	// (FR-LOOP-05/06). 종료 기록은 취소된 ctx로 유실되면 안 되므로
+	// durable admission context를 쓰고, 원래 오류와 함께 보존한다.
 	defer func() {
-		if endErr := l.emit(ctx, gen.KindTurnEnd, struct{}{}, nil, nil); endErr != nil && err == nil {
-			err = endErr
-		}
+		err = errors.Join(err, l.emitBoundary(ctx, gen.KindTurnEnd))
 	}()
 	if err := l.emit(ctx, gen.KindUserMessage, map[string]string{"text": input}, nil, nil); err != nil {
 		return err
@@ -150,33 +153,19 @@ func (l *Loop) RunTurn(ctx context.Context, input string) (err error) {
 		if rejected != nil {
 			return nil // step 없이 turn 종료 (FR-LOOP-05)
 		}
-		if err := json.Unmarshal(finalReq, &req); err != nil {
+		// rewrite는 전체 교체다 — 기존 값에 merge되면 로그의 대체값과 실제
+		// 실행이 어긋난다. 반드시 zero-value에 strict decode 후 교체한다.
+		var nextReq ModelRequest
+		if err := strictDecode(finalReq, &nextReq); err != nil {
 			return fmt.Errorf("loop: pre_step rewrite 결과가 모델 요청 형태가 아님: %w", err)
 		}
+		req = nextReq
 
-		if err := l.emit(ctx, gen.KindStepStart, struct{}{}, nil, nil); err != nil {
-			return err
-		}
-		resp, err := l.model.Complete(ctx, req)
+		toolCalls, err := l.runStep(ctx, req)
 		if err != nil {
-			l.emit(ctx, gen.KindStepEnd, struct{}{}, nil, nil)
-			return fmt.Errorf("loop: 모델 요청: %w", err)
-		}
-		if err := l.emit(ctx, gen.KindAssistantMessage, map[string]string{"text": resp.Text},
-			&resp.UsageIn, &resp.UsageOut); err != nil {
 			return err
 		}
-
-		for _, tc := range resp.ToolCalls {
-			if err := l.runTool(ctx, tc); err != nil {
-				return err
-			}
-		}
-		if err := l.emit(ctx, gen.KindStepEnd, struct{}{}, nil, nil); err != nil {
-			return err
-		}
-
-		if len(resp.ToolCalls) > 0 {
+		if toolCalls > 0 {
 			continue // 툴 결과를 소화할 다음 step
 		}
 
@@ -206,11 +195,37 @@ func (l *Loop) RunTurn(ctx context.Context, input string) (err error) {
 // "모델이 본 것은 로그에 있다"(불변식 3)를 구조로 강제하는 지점이다 —
 // 로그를 거치지 않은 내용은 여기로 들어올 경로가 없다.
 func (l *Loop) buildRequest(ctx context.Context) (ModelRequest, error) {
-	state, err := logd.ReplayReader(ctx, l.reader)
+	state, err := l.writer.Replay(ctx)
 	if err != nil {
 		return ModelRequest{}, fmt.Errorf("loop: 모델 요청 재구성: %w", err)
 	}
 	return ModelRequest{Messages: state.Messages}, nil
+}
+
+// runStep은 step 하나의 실행 scope다. step/start가 성공하면 step/end는
+// 오류·취소를 포함한 모든 경로에서 defer로 보장된다.
+func (l *Loop) runStep(ctx context.Context, req ModelRequest) (toolCalls int, err error) {
+	if err := l.emit(ctx, gen.KindStepStart, struct{}{}, nil, nil); err != nil {
+		return 0, err
+	}
+	defer func() {
+		err = errors.Join(err, l.emitBoundary(ctx, gen.KindStepEnd))
+	}()
+
+	resp, err := l.model.Complete(ctx, req)
+	if err != nil {
+		return 0, fmt.Errorf("loop: 모델 요청: %w", err)
+	}
+	if err := l.emit(ctx, gen.KindAssistantMessage, map[string]string{"text": resp.Text},
+		&resp.UsageIn, &resp.UsageOut); err != nil {
+		return 0, err
+	}
+	for _, tc := range resp.ToolCalls {
+		if err := l.runTool(ctx, tc); err != nil {
+			return 0, err
+		}
+	}
+	return len(resp.ToolCalls), nil
 }
 
 func (l *Loop) runTool(ctx context.Context, tc ToolCall) error {
@@ -232,9 +247,16 @@ func (l *Loop) runTool(ctx context.Context, tc ToolCall) error {
 		return l.emit(ctx, gen.KindToolResult,
 			map[string]any{"rejected": true, "reason": rejected.Reason}, nil, nil)
 	}
-	if err := json.Unmarshal(finalTC, &tc); err != nil {
+	// 전체 교체 의미론: zero-value에 strict decode — 누락 필드가 원래 콜의
+	// 값으로 살아남으면 로그의 대체값과 실제 실행이 어긋난다.
+	var nextTC ToolCall
+	if err := strictDecode(finalTC, &nextTC); err != nil {
 		return fmt.Errorf("loop: pre_tool rewrite 결과가 툴 콜 형태가 아님: %w", err)
 	}
+	if nextTC.Name == "" {
+		return fmt.Errorf("loop: pre_tool rewrite 결과에 툴 이름이 없음 (빈/부분 대체는 실행 불가)")
+	}
+	tc = nextTC
 
 	result, invokeErr := l.tools.Invoke(ctx, tc)
 	if invokeErr != nil {
@@ -287,6 +309,27 @@ func (l *Loop) runHooks(ctx context.Context, point gen.HookPoint, payload json.R
 	}
 	rejected, final, rewrote = resolveDecisions(decisions, payload)
 	return rejected, final, rewrote, nil
+}
+
+// strictDecode는 rewrite 대체값의 전체 교체 디코드다: zero-value 대상,
+// 미지 필드 거부, 후행 데이터 거부.
+func strictDecode(data []byte, dst any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	if dec.More() {
+		return fmt.Errorf("후행 데이터가 있음")
+	}
+	return nil
+}
+
+// emitBoundary는 turn/step 종료 경계의 durable 기록이다 — 취소된 ctx로
+// 경계 이벤트가 유실되면 로그의 구조 재구성이 깨지므로, admission에
+// 취소가 전파되지 않는 context를 쓴다.
+func (l *Loop) emitBoundary(ctx context.Context, kind gen.Kind) error {
+	return l.emit(context.WithoutCancel(ctx), kind, struct{}{}, nil, nil)
 }
 
 func (l *Loop) emit(ctx context.Context, kind gen.Kind, payload any, usageIn, usageOut *int64) error {
