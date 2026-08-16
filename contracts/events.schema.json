@@ -183,13 +183,17 @@
     },
     "traceId": {
       "type": "string",
-      "pattern": "^[0-9a-f]{32}$",
-      "$comment": "OTel 호환 (FR-OBS-01). 전부 0인 값의 금지는 런타임 발급기가 보장"
+      "minLength": 32,
+      "maxLength": 32,
+      "pattern": "^0*[1-9a-f][0-9a-f]*$",
+      "$comment": "OTel SpanContext 규격: 32자리 소문자 hex이며 최소 한 바이트가 non-zero여야 유효 — all-zero ID는 스키마 수준에서 거부(FR-OBS-01). all-zero 거부는 contracts 영구 테스트 대상"
     },
     "spanId": {
       "type": "string",
-      "pattern": "^[0-9a-f]{16}$",
-      "$comment": "OTel 호환 (FR-OBS-01). 전부 0인 값의 금지는 런타임 발급기가 보장"
+      "minLength": 16,
+      "maxLength": 16,
+      "pattern": "^0*[1-9a-f][0-9a-f]*$",
+      "$comment": "OTel SpanContext 규격: 16자리 소문자 hex이며 최소 한 바이트가 non-zero여야 유효 — all-zero ID는 스키마 수준에서 거부(FR-OBS-01). all-zero 거부는 contracts 영구 테스트 대상"
     },
     "kind": {
       "description": "§5.1 kind 어휘 전체 (v0.1). payload 형태가 명세에 정의되지 않은 kind는 열린 객체이며, 필드 확정은 해당 태스크(T5 루프, T7/T9 어댑터, T10 샌드박스, T13 확장)에서 additive로 진행",
