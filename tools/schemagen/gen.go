@@ -79,23 +79,7 @@ func checkContract(node any, path string, errs *[]error) {
 				}
 			}
 		case k == "oneOf":
-			branches, ok := v.([]any)
-			if !ok {
-				addErr("oneOf는 배열이어야 함")
-				continue
-			}
-			for i, b := range branches {
-				bp := fmt.Sprintf("%s/oneOf[%d]", path, i)
-				bm, ok := b.(map[string]any)
-				if !ok {
-					*errs = append(*errs, fmt.Errorf("%s: 분기는 객체여야 함", bp))
-					continue
-				}
-				if !branchHasConst(bm) {
-					*errs = append(*errs, fmt.Errorf("%s: 판별 필드 const 없는 분기", bp))
-				}
-				checkContract(bm, bp, errs)
-			}
+			checkOneOf(m, v, path, errs)
 		case k == "properties" || k == "$defs":
 			sub, ok := v.(map[string]any)
 			if !ok {
@@ -111,16 +95,84 @@ func checkContract(node any, path string, errs *[]error) {
 	}
 }
 
-func branchHasConst(branch map[string]any) bool {
-	props, _ := branch["properties"].(map[string]any)
-	for _, p := range props {
-		if pm, ok := p.(map[string]any); ok {
-			if _, has := pm["const"]; has {
-				return true
-			}
+// checkOneOf는 판별 union의 구조 규칙을 강제한다:
+// 비어 있지 않음, 분기당 판별 const 정확히 하나, 전 분기 동일 판별 필드,
+// 판별 값 중복 없음, 판별 필드는 base required이거나 모든 분기에서 required.
+// parent는 oneOf를 담은 스키마 객체다(base required 확인용).
+func checkOneOf(parent map[string]any, v any, path string, errs *[]error) {
+	addErr := func(format string, a ...any) {
+		*errs = append(*errs, fmt.Errorf("%s: %s", path, fmt.Sprintf(format, a...)))
+	}
+	branches, ok := v.([]any)
+	if !ok || len(branches) == 0 {
+		addErr("oneOf는 비어 있지 않은 배열이어야 함")
+		return
+	}
+	discName := ""
+	seenValues := map[string]bool{}
+	discRequiredInAll := true
+	structureOK := true
+	for i, b := range branches {
+		bp := fmt.Sprintf("%s/oneOf[%d]", path, i)
+		bm, ok := b.(map[string]any)
+		if !ok {
+			*errs = append(*errs, fmt.Errorf("%s: 분기는 객체여야 함", bp))
+			structureOK = false
+			continue
+		}
+		checkContract(bm, bp, errs)
+		consts := branchConstFields(bm)
+		switch {
+		case len(consts) == 0:
+			*errs = append(*errs, fmt.Errorf("%s: 판별 필드 const 없는 분기", bp))
+			structureOK = false
+			continue
+		case len(consts) > 1:
+			*errs = append(*errs, fmt.Errorf("%s: 판별 const는 분기당 정확히 하나여야 함 (%d개: %v)", bp, len(consts), sortedKeys(consts)))
+			structureOK = false
+			continue
+		}
+		name := sortedKeys(consts)[0]
+		value := consts[name]
+		if discName == "" {
+			discName = name
+		} else if name != discName {
+			*errs = append(*errs, fmt.Errorf("%s: 분기 간 판별 필드 불일치 (%q vs %q)", bp, name, discName))
+			structureOK = false
+			continue
+		}
+		if seenValues[value] {
+			*errs = append(*errs, fmt.Errorf("%s: 판별 const 값 중복 %q", bp, value))
+		}
+		seenValues[value] = true
+		if !stringSet(bm["required"])[name] {
+			discRequiredInAll = false
 		}
 	}
-	return false
+	if structureOK && discName != "" {
+		if !stringSet(parent["required"])[discName] && !discRequiredInAll {
+			addErr("판별 필드 %q는 base required 또는 모든 분기에서 required여야 함", discName)
+		}
+	}
+}
+
+// branchConstFields는 분기 properties 중 const를 가진 필드의 이름→값 표다.
+func branchConstFields(branch map[string]any) map[string]string {
+	out := map[string]string{}
+	props, _ := branch["properties"].(map[string]any)
+	for name, p := range props {
+		pm, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch c := pm["const"].(type) {
+		case string:
+			out[name] = c
+		case json.Number:
+			out[name] = c.String()
+		}
+	}
+	return out
 }
 
 // ---- 이름 규칙 ----
@@ -152,9 +204,9 @@ func camel(s string, upperFirst bool) string {
 // ---- 타입 해석과 생성 ----
 
 type generator struct {
-	defs    map[string]any
-	out     strings.Builder
-	emitted []string // 방출된 최상위 타입·상수 이름 (파일 간 충돌 검사용)
+	defs     map[string]any
+	out      strings.Builder
+	emitted  []string // 방출된 최상위 타입·상수 이름 (파일 간 충돌 검사용)
 	needJSON bool
 }
 
@@ -294,11 +346,11 @@ func (g *generator) mergedFields(typeName string, schema map[string]any) ([]fiel
 
 	// 분기 전용 프로퍼티 수집
 	type branchProp struct {
-		schemas   []map[string]any
-		inAll     bool
-		consts    []string
-		allConst  bool
-		reqCount  int
+		schemas  []map[string]any
+		inAll    bool
+		consts   []string
+		allConst bool
+		reqCount int
 	}
 	branchProps := map[string]*branchProp{}
 	for _, b := range branches {
@@ -445,6 +497,10 @@ func (g *generator) emitConst(name string, schema map[string]any) error {
 // rootTypeName이 비어 있지 않으면 루트 객체도 그 이름의 struct로 생성한다.
 func Generate(root map[string]any, sourceName, rootTypeName string) (src []byte, emitted []string, err error) {
 	var errs []error
+	const draft2020 = "https://json-schema.org/draft/2020-12/schema"
+	if s, _ := root["$schema"].(string); s != draft2020 {
+		errs = append(errs, fmt.Errorf("%s: 루트 $schema는 정확히 %q여야 함 (현재: %v)", sourceName, draft2020, root["$schema"]))
+	}
 	checkContract(root, sourceName, &errs)
 	if len(errs) > 0 {
 		msgs := make([]string, len(errs))
@@ -537,7 +593,7 @@ func canonical(node any) string {
 var nonShapeKeywords = map[string]bool{
 	"description": true, "$comment": true, "title": true, "examples": true,
 	"deprecated": true,
-	"format": true, "pattern": true, "minLength": true, "maxLength": true,
+	"format":     true, "pattern": true, "minLength": true, "maxLength": true,
 	"minimum": true, "maximum": true, "exclusiveMinimum": true,
 	"exclusiveMaximum": true, "minItems": true, "maxItems": true,
 }

@@ -119,6 +119,7 @@ type Root struct {
 // 결정성: 같은 입력의 반복 생성은 바이트 단위로 동일하다.
 func TestGenerateDeterministic(t *testing.T) {
 	const schema = `{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"type": "object",
 		"properties": {"b": {"enum": ["1"]}, "a": {"enum": ["2"]}, "c": {"enum": ["3"]}},
 		"additionalProperties": false,
@@ -139,43 +140,92 @@ func TestGenerateDeterministic(t *testing.T) {
 
 // fail-closed: 계약 밖 스키마는 전부 생성 실패해야 한다.
 func TestGenerateFailClosed(t *testing.T) {
+	const d = `"$schema": "https://json-schema.org/draft/2020-12/schema",`
 	cases := []struct {
 		name, schema, wantErr string
 	}{
 		{
 			"서브셋 밖 키워드",
-			`{"type": "object", "properties": {"x": {"type": "string", "anyOf": []}}}`,
+			`{` + d + `"type": "object", "properties": {"x": {"type": "string", "anyOf": []}}}`,
 			"서브셋 밖 키워드",
 		},
 		{
 			"if-then 키워드",
-			`{"type": "object", "if": {"type": "object"}}`,
+			`{` + d + `"type": "object", "if": {"type": "object"}}`,
 			"서브셋 밖 키워드",
 		},
 		{
 			"판별 const 없는 oneOf 분기",
-			`{"type": "object", "oneOf": [{"properties": {"k": {"enum": ["a", "b"]}}}]}`,
+			`{` + d + `"type": "object", "oneOf": [{"properties": {"k": {"enum": ["a", "b"]}}}]}`,
 			"판별 필드 const 없는 분기",
 		},
 		{
 			"additionalProperties true",
-			`{"type": "object", "properties": {"x": {"type": "object", "additionalProperties": true}}}`,
+			`{` + d + `"type": "object", "properties": {"x": {"type": "object", "additionalProperties": true}}}`,
 			"additionalProperties",
 		},
 		{
 			"문서 밖 $ref",
-			`{"type": "object", "properties": {"x": {"$ref": "other.json#/$defs/y"}}}`,
+			`{` + d + `"type": "object", "properties": {"x": {"$ref": "other.json#/$defs/y"}}}`,
 			"#/$defs/",
 		},
 		{
 			"type 배열",
-			`{"type": "object", "properties": {"x": {"type": ["string", "null"]}}}`,
+			`{` + d + `"type": "object", "properties": {"x": {"type": ["string", "null"]}}}`,
 			"단일 문자열만",
 		},
 		{
 			"미해석 $ref",
-			`{"type": "object", "properties": {"x": {"$ref": "#/$defs/none"}}}`,
+			`{` + d + `"type": "object", "properties": {"x": {"$ref": "#/$defs/none"}}}`,
 			"해석 불가 $ref",
+		},
+
+		// [H] 리뷰 재현 우회의 회귀 고정
+		{
+			"$schema 누락",
+			`{"type": "object"}`,
+			"루트 $schema는 정확히",
+		},
+		{
+			"다른 draft",
+			`{"$schema": "https://json-schema.org/draft/2019-09/schema", "type": "object"}`,
+			"루트 $schema는 정확히",
+		},
+		{
+			"빈 oneOf",
+			`{` + d + `"type": "object", "oneOf": []}`,
+			"비어 있지 않은 배열",
+		},
+		{
+			"분기 간 판별 필드 불일치",
+			`{` + d + `"type": "object", "required": ["kind", "other"], "oneOf": [
+				{"properties": {"kind": {"const": "a"}}},
+				{"properties": {"other": {"const": "b"}}}
+			]}`,
+			"판별 필드 불일치",
+		},
+		{
+			"판별 const 값 중복",
+			`{` + d + `"type": "object", "required": ["kind"], "oneOf": [
+				{"properties": {"kind": {"const": "a"}}},
+				{"properties": {"kind": {"const": "a"}}}
+			]}`,
+			"판별 const 값 중복",
+		},
+		{
+			"분기당 판별 const 복수",
+			`{` + d + `"type": "object", "required": ["kind"], "oneOf": [
+				{"properties": {"kind": {"const": "a"}, "sub": {"const": "x"}}}
+			]}`,
+			"정확히 하나여야 함",
+		},
+		{
+			"판별 필드 미required",
+			`{` + d + `"type": "object", "oneOf": [
+				{"properties": {"kind": {"const": "a"}}},
+				{"properties": {"kind": {"const": "b"}}}
+			]}`,
+			"base required 또는 모든 분기에서 required",
 		},
 	}
 	for _, c := range cases {
@@ -194,6 +244,7 @@ func TestGenerateFailClosed(t *testing.T) {
 // 분기 간 같은 필드의 정의가 다르면(const 합집합도 아니면) 병합 불가로 실패한다.
 func TestGenerateBranchConflict(t *testing.T) {
 	root := parse(t, `{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"type": "object",
 		"required": ["k"],
 		"oneOf": [
