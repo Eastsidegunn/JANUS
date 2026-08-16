@@ -13,3 +13,6 @@
 | schemagen fail-closed·결정성·병합 규칙 | `tools/schemagen/gen_test.go` | T1 | green |
 | codegen drift 게이트 (미추적 신규 파일 포함) | `tools/schemagen/drift_test.go` + `make codegen-drift` (CI 편입) | T1 | green |
 | donePayload 거울 정의 동일성 | `contracts/schema_test.go` | T1 | green |
+| FR-LOG-06 — 리플레이 결정론 속성 (300회) | `core/replay_prop_test.go` (xfail 태그, T4에서 배선·편입) | T2 | **expected-fail** |
+| FR-POL-03 — 병합 협소성 속성 (300회, 체인·교환·자기병합 포함) | `core/policy_prop_test.go` (xfail 태그, T6에서 배선·편입) | T2 | **expected-fail** |
+| T2 완료 기준 — 생성기가 스키마 유효·다양·결정적 입력을 실제 생성 | `core/propgen_test.go` (TestGenerator*) | T2 | green |
