@@ -40,6 +40,21 @@ type Log struct {
 	st     *store
 }
 
+// reader는 읽기 전용 wrapper다. Log.Reader에 *store를 직접 넣으면 동적
+// 타입이 Append를 구현하므로 `l.Reader.(logd.Store)` assertion으로 mutation
+// capability가 복원된다(재리뷰 실증) — 별도 동적 타입으로 이를 차단한다.
+type reader struct {
+	st *store
+}
+
+func (r *reader) LastSeq(ctx context.Context) (int64, error) {
+	return r.st.LastSeq(ctx)
+}
+
+func (r *reader) ReadFrom(ctx context.Context, fromSeq int64) ([]gen.EventRecord, error) {
+	return r.st.ReadFrom(ctx, fromSeq)
+}
+
 // Open은 세션 로그 파일을 열고(없으면 생성) 조립된 Log를 반환한다.
 func Open(ctx context.Context, path string, opts ...logd.Option) (*Log, error) {
 	st, err := openStore(ctx, path)
@@ -51,7 +66,7 @@ func Open(ctx context.Context, path string, opts ...logd.Option) (*Log, error) {
 		st.Close()
 		return nil, err
 	}
-	return &Log{Writer: w, Reader: st, st: st}, nil
+	return &Log{Writer: w, Reader: &reader{st: st}, st: st}, nil
 }
 
 // Close는 writer를 드레인한 뒤 store를 닫는다.

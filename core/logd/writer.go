@@ -160,7 +160,20 @@ func (w *Writer) terminal() error {
 	if w.terminalErr == nil {
 		return nil
 	}
-	return fmt.Errorf("%w: %v", ErrTerminal, w.terminalErr)
+	return &terminalError{cause: w.terminalErr}
+}
+
+// terminalError는 ErrTerminal과 원인 양쪽으로 errors.Is/As 체인을 유지한다.
+type terminalError struct {
+	cause error
+}
+
+func (e *terminalError) Error() string {
+	return ErrTerminal.Error() + ": " + e.cause.Error()
+}
+
+func (e *terminalError) Unwrap() []error {
+	return []error{ErrTerminal, e.cause}
 }
 
 func (w *Writer) setTerminal(err error) {

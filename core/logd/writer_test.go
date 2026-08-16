@@ -358,9 +358,12 @@ func TestWriterTerminalOnStoreFailure(t *testing.T) {
 	if _, err := w.Submit(context.Background(), sampleEvent(`{"i":1}`)); err != nil {
 		t.Fatal(err)
 	}
-	// seq 2에서 store 실패 → 제출자에게 terminal 오류
+	// seq 2에서 store 실패 → 제출자에게 terminal 오류.
+	// errors.Is 체인은 ErrTerminal과 원인(store 오류) 양쪽으로 유지되어야 한다.
 	if _, err := w.Submit(context.Background(), sampleEvent(`{"i":2}`)); !errors.Is(err, ErrTerminal) {
 		t.Fatalf("실패 커밋의 오류 = %v (ErrTerminal 기대)", err)
+	} else if !errors.Is(err, store.failErr) {
+		t.Fatalf("terminal 오류에서 원인 체인이 끊김: %v", err)
 	}
 	callsAtFailure := storeAppendCalls(store)
 	// 이후 제출은 store에 닿지 않고 terminal로 거부
