@@ -24,6 +24,11 @@ type Store interface {
 	Reader
 	// Append는 rec을 seq 순서대로 영속화한다. rec.Seq는 writer가 발급한다.
 	Append(ctx context.Context, rec gen.EventRecord) error
+	// AppendBatch는 recs 전체를 all-or-nothing으로 영속화한다(저장소
+	// 트랜잭션). 하나라도 실패하면 아무것도 커밋되지 않아야 한다 —
+	// 포크의 배타적 초기화 배치가 부분 저장되면 존재하지 않는 상태를
+	// 가리키는 session/fork만 남는 손상이 생긴다.
+	AppendBatch(ctx context.Context, recs []gen.EventRecord) error
 	Close() error
 }
 

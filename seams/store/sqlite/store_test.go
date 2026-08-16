@@ -240,6 +240,36 @@ func TestLogPathEnforcesRedactionAndContract(t *testing.T) {
 	}
 }
 
+// AppendBatch는 저장소 수준 all-or-nothing이다: 배치 내부의 실패(중복 seq의
+// PK 위반)가 트랜잭션 전체를 rollback시켜 아무것도 남지 않는다.
+func TestAppendBatchAtomic(t *testing.T) {
+	s, _ := openTestStore(t)
+	ctx := context.Background()
+
+	// 2번째 insert에서 PK 위반이 나는 배치 — 1번째도 남으면 안 된다
+	bad := []gen.EventRecord{rec(1, `{"a":1}`), rec(1, `{"a":2}`)}
+	if err := s.AppendBatch(ctx, bad); err == nil {
+		t.Fatal("중복 seq 배치가 성공함")
+	}
+	got, err := s.ReadFrom(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("실패 배치 후 %d건 잔존 — rollback 미동작", len(got))
+	}
+
+	// 정상 배치는 전건 커밋
+	good := []gen.EventRecord{rec(1, `{"a":1}`), rec(2, `{"a":2}`), rec(3, `{"a":3}`)}
+	if err := s.AppendBatch(ctx, good); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.ReadFrom(ctx, 1)
+	if len(got) != 3 {
+		t.Fatalf("정상 배치 %d건 저장 (3건 기대)", len(got))
+	}
+}
+
 // 제안서 §5 실증 2번의 회귀 고정: 다른 연결이 write lock을 잡은 상태에서
 // 50ms deadline의 Append는 SQLite busy handler의 5초 블록 없이 짧게 반환된다.
 func TestBusyReturnsPromptlyOnShortDeadline(t *testing.T) {

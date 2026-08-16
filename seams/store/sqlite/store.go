@@ -192,6 +192,17 @@ func (s *store) LastSeq(ctx context.Context) (int64, error) {
 	return last, err
 }
 
+const insertEventSQL = `INSERT INTO events (seq, ts, trace_id, span_id, parent_span_id, kind, actor, payload, raw, usage_in, usage_out)
+	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+func insertArgs(rec gen.EventRecord, raw []byte) []any {
+	return []any{
+		rec.Seq, rec.Ts, rec.TraceID, rec.SpanID, rec.ParentSpanID,
+		string(rec.Kind), rec.Actor, string(rec.Payload), raw,
+		rec.UsageIn, rec.UsageOut,
+	}
+}
+
 // Append는 rec을 내구 커밋한다 — synchronous=FULL이므로 반환 시점에
 // WAL이 fsync되어 있다(NFR-02). raw는 base64를 디코드해 BLOB으로 보존한다
 // (FR-LOG-07 — 정규화 이벤트와 원본 페이로드 동시 보존).
@@ -201,13 +212,36 @@ func (s *store) Append(ctx context.Context, rec gen.EventRecord) error {
 		return fmt.Errorf("sqlite: raw 디코드: %w", err)
 	}
 	return retryBusy(ctx, func() error {
-		_, err := s.write.ExecContext(ctx,
-			`INSERT INTO events (seq, ts, trace_id, span_id, parent_span_id, kind, actor, payload, raw, usage_in, usage_out)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			rec.Seq, rec.Ts, rec.TraceID, rec.SpanID, rec.ParentSpanID,
-			string(rec.Kind), rec.Actor, string(rec.Payload), raw,
-			rec.UsageIn, rec.UsageOut)
+		_, err := s.write.ExecContext(ctx, insertEventSQL, insertArgs(rec, raw)...)
 		return err
+	})
+}
+
+// AppendBatch는 recs 전체를 단일 트랜잭션으로 커밋한다 — 하나라도
+// 실패하면 rollback되어 아무것도 남지 않는다(all-or-nothing). 커밋 시점에
+// synchronous=FULL fsync가 이루어지므로 배치 중간 크래시에도 부분 상태가
+// 내구화되지 않는다.
+func (s *store) AppendBatch(ctx context.Context, recs []gen.EventRecord) error {
+	raws := make([][]byte, len(recs))
+	for i, rec := range recs {
+		raw, err := decodeRaw(rec.Raw)
+		if err != nil {
+			return fmt.Errorf("sqlite: 배치 %d번째 raw 디코드: %w", i+1, err)
+		}
+		raws[i] = raw
+	}
+	return retryBusy(ctx, func() error {
+		tx, err := s.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		for i, rec := range recs {
+			if _, err := tx.ExecContext(ctx, insertEventSQL, insertArgs(rec, raws[i])...); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("sqlite: 배치 %d번째 insert: %w", i+1, err)
+			}
+		}
+		return tx.Commit()
 	})
 }
 
