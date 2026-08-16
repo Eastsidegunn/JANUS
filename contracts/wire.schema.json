@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hx:contracts:wire",
+  "title": "HX 어댑터 와이어 프로토콜",
+  "description": "§5.2 NDJSON over stdio. 한 줄이 메시지 하나이며, 코어→어댑터는 #/$defs/command, 어댑터→코어는 #/$defs/event로 검증한다. 픽스처를 통과하지 못하는 어댑터는 등록될 수 없다(MUST).",
+  "oneOf": [
+    { "$ref": "#/$defs/command" },
+    { "$ref": "#/$defs/event" }
+  ],
+  "$defs": {
+    "protocolVersion": {
+      "const": 1,
+      "$comment": "모든 메시지는 v 필드를 포함해야 한다(MUST). v0.1 프로토콜 버전 = 1"
+    },
+    "command": {
+      "type": "object",
+      "title": "코어 → 어댑터 (stdin)",
+      "properties": {
+        "v": { "$ref": "#/$defs/protocolVersion" },
+        "cmd": { "enum": ["task", "message", "stop"] },
+        "payload": { "type": "object" }
+      },
+      "required": ["v", "cmd", "payload"],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "cmd": { "const": "task" },
+            "payload": { "$ref": "#/$defs/taskPayload" }
+          }
+        },
+        {
+          "properties": {
+            "cmd": { "const": "message" },
+            "payload": { "$ref": "#/$defs/messagePayload" }
+          }
+        },
+        {
+          "properties": {
+            "cmd": { "const": "stop" },
+            "payload": { "$ref": "#/$defs/stopPayload" }
+          }
+        }
+      ]
+    },
+    "taskPayload": {
+      "type": "object",
+      "properties": {
+        "instruction": { "type": "string", "minLength": 1 },
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "description": "샌드박스 안에서 어댑터 대상 에이전트에게 보이는 워크스페이스 경로"
+        },
+        "budget": { "$ref": "#/$defs/budget" },
+        "depth": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "현재 spawn 깊이. 깊이 제한·잔여 예산은 환경변수로도 자식에 전파된다 (FR-ADP-08)"
+        },
+        "extensions": {
+          "type": "array",
+          "description": "대상 에이전트의 네이티브 확장 선언 (FR-EXT-01). 옵셔널",
+          "items": { "$ref": "#/$defs/extension" }
+        }
+      },
+      "required": ["instruction", "workspace", "budget", "depth"],
+      "additionalProperties": false
+    },
+    "messagePayload": {
+      "type": "object",
+      "properties": {
+        "text": { "type": "string", "minLength": 1 }
+      },
+      "required": ["text"],
+      "additionalProperties": false
+    },
+    "stopPayload": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "enum": ["user", "budget_exceeded", "policy", "parent_done"]
+        }
+      },
+      "required": ["reason"],
+      "additionalProperties": false
+    },
+    "budget": {
+      "type": "object",
+      "description": "예산: 토큰/시간/spawn 깊이 (FR-POL-01). 필드 부재 = 해당 축 무제한이 아니라 상위 프로파일 값 상속 — 병합은 최솟값으로만 결합된다(FR-POL-03)",
+      "properties": {
+        "tokens": { "type": "integer", "minimum": 0 },
+        "time_ms": { "type": "integer", "minimum": 0 },
+        "spawn_depth": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "extension": {
+      "type": "object",
+      "description": "확장 선언: 이름/버전/무결성 해시/출처/필요 egress 도메인 (FR-EXT-01/02/06)",
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "$comment": "버전 고정 필수(FR-EXT-02). latest 등 미고정 선언의 거부는 정책 평가의 몫(기본 거부)"
+        },
+        "integrity": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "출처 레지스트리 — HX는 저장소·큐레이션을 운영하지 않는다(FR-EXT-01)"
+        },
+        "egress": {
+          "type": "array",
+          "description": "실행 중 필요한 egress 도메인 선언(FR-EXT-06). 정책 통과분만 실행 프로파일에 편입",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "required": ["name", "version", "integrity", "source"],
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "title": "어댑터 → 코어 (stdout)",
+      "$comment": "어댑터가 방출하는 정규화 이벤트. 코어 writer가 envelope(seq, ts, trace_id, span_id, actor)을 입혀 events.schema의 레코드로 기록한다",
+      "properties": {
+        "v": { "$ref": "#/$defs/protocolVersion" },
+        "kind": {
+          "enum": [
+            "subagent/ready",
+            "subagent/message",
+            "subagent/tool_call",
+            "subagent/tool_result",
+            "subagent/approval_request",
+            "subagent/usage",
+            "subagent/done"
+          ]
+        },
+        "payload": { "type": "object" },
+        "raw": {
+          "type": "string",
+          "description": "대상 도구 원본 페이로드의 base64 (FR-ADP-04, MUST)"
+        }
+      },
+      "required": ["v", "kind", "payload", "raw"],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "kind": { "const": "subagent/done" },
+            "payload": { "$ref": "#/$defs/donePayload" }
+          }
+        },
+        {
+          "properties": {
+            "kind": { "const": "subagent/usage" },
+            "payload": { "$ref": "#/$defs/usagePayload" }
+          }
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "subagent/ready",
+                "subagent/message",
+                "subagent/tool_call",
+                "subagent/tool_result",
+                "subagent/approval_request"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "donePayload": {
+      "type": "object",
+      "description": "events.schema.json#/$defs/subagentDonePayload의 거울 — 서브셋이 문서 간 $ref를 금지하므로 중복 정의. 두 정의의 일치는 contracts 테스트로 고정한다",
+      "properties": {
+        "status": { "enum": ["ok", "error", "stopped"] },
+        "result": { "type": "string" }
+      },
+      "required": ["status", "result"],
+      "additionalProperties": false
+    },
+    "usagePayload": {
+      "type": "object",
+      "description": "토큰 사용량 보고 (FR-ADP-07, SHOULD). 미보고 시 코어가 시간·요금 기반 추정으로 폴백",
+      "properties": {
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  }
+}
