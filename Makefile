@@ -7,7 +7,7 @@ lint:
 	$(GO) run ./tools/boundarylint
 
 test:
-	$(GO) test ./...
+	$(GO) test -race ./...
 
 # T8/T9에서 어댑터 골든 픽스처가 생기면 실제 대조로 대체된다.
 fixtures:
