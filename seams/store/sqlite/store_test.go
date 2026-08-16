@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -10,13 +11,15 @@ import (
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
-	"github.com/Eastsidegunn/JANUS/core/logd"
 )
 
-func openStore(t *testing.T) (*Store, string) {
+// openTestStore는 화이트박스 테스트용 내부 store다. 공개 표면(Log)은
+// mutation 객체를 노출하지 않으므로, 저장 계층 자체의 성질(트리거, BUSY,
+// 내구성)은 패키지 내부에서만 검증할 수 있다.
+func openTestStore(t *testing.T) (*store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "session.db")
-	s, err := Open(path)
+	s, err := openStore(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,13 +40,13 @@ func ptr[T any](v T) *T { return &v }
 // FR-LOG-01: UPDATE/DELETE는 저장소 수준(트리거)에서 물리적으로 차단된다.
 // writer 경유가 아닌 직접 연결로 시도해도 막혀야 "물리적" 차단이다.
 func TestAppendOnlyTriggers(t *testing.T) {
-	s, path := openStore(t)
+	s, path := openTestStore(t)
 	ctx := context.Background()
 	if err := s.Append(ctx, rec(1, `{"a":1}`)); err != nil {
 		t.Fatal(err)
 	}
 
-	direct, err := sql.Open("sqlite", "file:"+path+"?_busy_timeout=0")
+	direct, err := sql.Open("sqlite", fileDSN(path, "_busy_timeout=0"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +70,7 @@ func TestAppendOnlyTriggers(t *testing.T) {
 
 // NFR-02/03: WAL + synchronous=FULL이 쓰기 풀 커넥션에 실제 적용된다.
 func TestDurabilityPragmas(t *testing.T) {
-	s, _ := openStore(t)
+	s, _ := openTestStore(t)
 	var jm string
 	var syn, bt int
 	if err := s.write.QueryRow("PRAGMA journal_mode").Scan(&jm); err != nil {
@@ -82,7 +85,7 @@ func TestDurabilityPragmas(t *testing.T) {
 
 // raw(FR-LOG-07)와 옵셔널 필드의 왕복 보존.
 func TestRoundTrip(t *testing.T) {
-	s, _ := openStore(t)
+	s, _ := openTestStore(t)
 	ctx := context.Background()
 	e := rec(1, `{"x":"y"}`)
 	e.ParentSpanID = ptr(strings.Repeat("c", 16))
@@ -113,32 +116,72 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
-// FR-LOG-02: 실제 SQLite store 위에서 logd.Writer 경유 동시 쓰기 —
-// seq 전순서와 유실 0. writer를 경유하지 않은 동일 seq 삽입은
-// PRIMARY KEY 충돌로 거부된다(단일 writer 강제의 저장소 측 방어).
-func TestSingleWriterOverSQLite(t *testing.T) {
-	s, _ := openStore(t)
+// 리뷰 차단 5의 회귀: URI 특수문자(?, #, %, 공백)가 든 합법적 파일명이
+// DSN 옵션으로 해석되지 않고 정확히 그 이름의 파일로 열린다.
+func TestWeirdFilenames(t *testing.T) {
+	names := []string{
+		"session?mode=memory", // 리뷰 실증 — 인코딩 없으면 in-memory로 열림
+		"a b#c%d.db",
+		"100%?done#1 .db",
+	}
 	ctx := context.Background()
-	w, err := logd.NewWriter(ctx, s)
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, name)
+			l, err := Open(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := l.Writer.Submit(ctx, rec(0, `{"n":1}`)); err != nil {
+				t.Fatal(err)
+			}
+			if err := l.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("정확한 이름의 파일이 없음: %v", err)
+			}
+			// 재오픈 후 내용 확인
+			l2, err := Open(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l2.Close()
+			last, err := l2.Reader.LastSeq(ctx)
+			if err != nil || last != 1 {
+				t.Fatalf("재오픈 LastSeq=%d err=%v", last, err)
+			}
+		})
+	}
+}
+
+// FR-LOG-02: 공개 표면(Log) 경유 동시 쓰기 — seq 전순서와 유실 0.
+// mutation 객체는 노출되지 않으므로 임의 seq의 직접 Append는 컴파일
+// 수준에서 불가능하다. 저장소 측 최후 방어(중복 seq PRIMARY KEY 거부)는
+// 직접 파일 연결로 확인한다.
+func TestSingleWriterOverSQLite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.db")
+	ctx := context.Background()
+	l, err := Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer l.Close()
 	const n = 50
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := w.Submit(ctx, rec(0, `{"c":1}`)); err != nil {
+			if _, err := l.Writer.Submit(ctx, rec(0, `{"c":1}`)); err != nil {
 				t.Error(err)
 			}
 		}()
 	}
 	wg.Wait()
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	got, err := s.ReadFrom(ctx, 1)
+	got, err := l.Reader.ReadFrom(ctx, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,18 +193,59 @@ func TestSingleWriterOverSQLite(t *testing.T) {
 			t.Fatalf("seq 구멍/역전: index %d에 %d", i, e.Seq)
 		}
 	}
-	// writer 우회 시도: 이미 발급된 seq로의 직접 Append는 거부
-	if err := s.Append(ctx, rec(int64(n), `{"우회":1}`)); err == nil {
-		t.Fatal("중복 seq Append가 성공함 — 단일 writer 방어 실패")
+	// 저장소 최후 방어: 파일 직접 연결로 기존 seq에 INSERT → PK 거부
+	direct, err := sql.Open("sqlite", fileDSN(path, "_busy_timeout=0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer direct.Close()
+	if _, err := direct.Exec(`INSERT INTO events (seq, ts, trace_id, span_id, kind, actor, payload)
+		VALUES (1, 1, 'x', 'y', 'user/message', 'parent', '{}')`); err == nil {
+		t.Fatal("중복 seq 직접 INSERT가 성공함")
+	}
+}
+
+// 공개 표면 경유 시 redaction·contracts 검증이 우회 불가능함을 고정한다
+// (리뷰 차단 1·2의 공개 API 측 회귀).
+func TestLogPathEnforcesRedactionAndContract(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	l, err := Open(ctx, filepath.Join(dir, "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// redaction: 토큰이 저장 전에 마스킹된다
+	ev := rec(0, `{"token":"sk-abcdefghijklmnopqrstuvwxyz"}`)
+	if _, err := l.Writer.Submit(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
+	got, err := l.Reader.ReadFrom(ctx, 1)
+	if err != nil || len(got) != 1 {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got[0].Payload), "sk-abcdefghijklmnop") {
+		t.Fatal("미마스킹 토큰이 저장됨 — redaction 우회")
+	}
+
+	// contracts 위반: 미지의 kind는 거부되고 저장되지 않는다
+	bad := rec(0, `{}`)
+	bad.Kind = gen.Kind("session/pause")
+	if _, err := l.Writer.Submit(ctx, bad); err == nil {
+		t.Fatal("계약 위반 이벤트가 ack됨")
+	}
+	if last, _ := l.Reader.LastSeq(ctx); last != 1 {
+		t.Fatalf("위반 이벤트가 저장됨 (LastSeq=%d)", last)
 	}
 }
 
 // 제안서 §5 실증 2번의 회귀 고정: 다른 연결이 write lock을 잡은 상태에서
 // 50ms deadline의 Append는 SQLite busy handler의 5초 블록 없이 짧게 반환된다.
 func TestBusyReturnsPromptlyOnShortDeadline(t *testing.T) {
-	s, path := openStore(t)
+	s, path := openTestStore(t)
 
-	locker, err := sql.Open("sqlite", "file:"+path+"?_busy_timeout=0")
+	locker, err := sql.Open("sqlite", fileDSN(path, "_busy_timeout=0"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,8 +286,8 @@ func TestBusyReturnsPromptlyOnShortDeadline(t *testing.T) {
 
 // 짧은 잠금은 재시도로 흡수된다 — BUSY는 오류로 새지 않는다.
 func TestBusyRetrySucceedsAfterUnlock(t *testing.T) {
-	s, path := openStore(t)
-	locker, err := sql.Open("sqlite", "file:"+path+"?_busy_timeout=0")
+	s, path := openTestStore(t)
+	locker, err := sql.Open("sqlite", fileDSN(path, "_busy_timeout=0"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,11 +311,11 @@ func TestBusyRetrySucceedsAfterUnlock(t *testing.T) {
 
 func TestLastSeqAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.db")
-	s, err := Open(path)
+	ctx := context.Background()
+	s, err := openStore(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
 	for i := int64(1); i <= 3; i++ {
 		if err := s.Append(ctx, rec(i, `{}`)); err != nil {
 			t.Fatal(err)
@@ -240,7 +324,7 @@ func TestLastSeqAcrossReopen(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s2, err := Open(path)
+	s2, err := openStore(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -23,6 +23,7 @@ codegen-drift:
 
 lint:
 	$(GO) vet ./...
+	$(GO) mod tidy -diff
 	@unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt 필요:"; echo "$$unformatted"; exit 1; \

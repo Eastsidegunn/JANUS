@@ -11,8 +11,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-
-	"github.com/Eastsidegunn/JANUS/core/logd"
 )
 
 // NFR-02 크래시 복구: helper 프로세스가 커밋 acknowledge 직후 Close 없이
@@ -28,8 +26,8 @@ func TestCrashRecovery(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "crash.db")
 	cmd := exec.Command(os.Args[0], "-test.run", "^TestCrashRecovery$")
 	cmd.Env = append(os.Environ(), "HX_CRASH_HELPER=1", "HX_CRASH_DB="+path)
-	out, err := cmd.Output()
-	if err == nil {
+	out, runErr := cmd.Output()
+	if runErr == nil {
 		t.Fatal("helper가 정상 종료함 — SIGKILL 크래시가 일어나지 않았다")
 	}
 	var lastAcked int64
@@ -46,19 +44,19 @@ func TestCrashRecovery(t *testing.T) {
 		t.Fatalf("helper가 ack를 보고하지 않음. 출력:\n%s", out)
 	}
 
-	s, err := Open(path)
+	l, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatalf("크래시 후 reopen 실패: %v", err)
 	}
-	defer s.Close()
-	last, err := s.LastSeq(context.Background())
+	defer l.Close()
+	last, err := l.Reader.LastSeq(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if last < lastAcked {
 		t.Fatalf("복원 seq %d < 마지막 ack %d — acknowledge된 커밋이 유실됨 (NFR-02 위반)", last, lastAcked)
 	}
-	events, err := s.ReadFrom(context.Background(), 1)
+	events, err := l.Reader.ReadFrom(context.Background(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,19 +70,14 @@ func TestCrashRecovery(t *testing.T) {
 // ack된 seq를 stdout에 기록한 뒤 스스로 SIGKILL한다 — defer/Close 없음.
 func crashHelper() {
 	path := os.Getenv("HX_CRASH_DB")
-	s, err := Open(path)
-	if err != nil {
-		fmt.Println("HELPER_ERR", err)
-		os.Exit(3)
-	}
-	w, err := logd.NewWriter(context.Background(), s)
+	l, err := Open(context.Background(), path)
 	if err != nil {
 		fmt.Println("HELPER_ERR", err)
 		os.Exit(3)
 	}
 	out := bufio.NewWriter(os.Stdout)
 	for i := 0; i < 5; i++ {
-		seq, err := w.Submit(context.Background(), rec(0, fmt.Sprintf(`{"i":%d}`, i)))
+		seq, err := l.Writer.Submit(context.Background(), rec(0, fmt.Sprintf(`{"i":%d}`, i)))
 		if err != nil {
 			fmt.Fprintln(out, "HELPER_ERR", err)
 			out.Flush()

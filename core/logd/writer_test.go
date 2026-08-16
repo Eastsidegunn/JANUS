@@ -3,6 +3,7 @@ package logd
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,12 @@ type FakeStore struct {
 	lastSeq int64
 	// gate가 non-nil이면 Append는 gate 수신까지 블록된다(백프레셔 테스트용).
 	gate chan struct{}
+	// started가 non-nil이면 Append 진입 시 신호를 보낸다(순서 결정용).
+	started chan struct{}
+	// failOn과 seq가 일치하면 Append가 failErr를 반환한다(terminal 테스트용).
+	failOn      int64
+	failErr     error
+	appendCalls int
 }
 
 func (s *FakeStore) LastSeq(ctx context.Context) (int64, error) {
@@ -27,11 +34,21 @@ func (s *FakeStore) LastSeq(ctx context.Context) (int64, error) {
 }
 
 func (s *FakeStore) Append(ctx context.Context, rec gen.EventRecord) error {
+	if s.started != nil {
+		select {
+		case s.started <- struct{}{}:
+		default:
+		}
+	}
 	if s.gate != nil {
 		<-s.gate
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.appendCalls++
+	if s.failOn != 0 && rec.Seq == s.failOn {
+		return s.failErr
+	}
 	s.events = append(s.events, rec)
 	s.lastSeq = rec.Seq
 	return nil
@@ -171,6 +188,16 @@ func TestWriterBackpressure(t *testing.T) {
 		t.Fatal("큐 포화 상태에서 Submit이 블록되지 않음 — 백프레셔 부재")
 	case <-time.After(100 * time.Millisecond):
 	}
+	// 핵심 회귀 검사: 4번은 큐에 admission되지 않았어야 한다. Submit은 ack까지
+	// 기다리므로 "블록됨"만으로는 cap 회귀를 못 잡는다 — 큐 길이가 cap을
+	// 넘지 않았음을 직접 고정한다. (cap이 사라지면 여기서 3이 관측된다.)
+	if n := len(w.queue); n != 2 {
+		t.Fatalf("큐 길이 %d (cap 2 기대) — bounded queue 회귀", n)
+	}
+	// gate를 잠근 채로는 저장도 admission분(1 in-flight + 큐 2)뿐이다
+	if got := len(store.snapshot()); got != 0 {
+		t.Fatalf("gate 잠금 중 저장 %d건 (0 기대)", got)
+	}
 
 	// 공간 확보 → 재개
 	close(gate)
@@ -213,6 +240,142 @@ func TestWriterCloseDrains(t *testing.T) {
 	}
 	if len(store.snapshot()) != 1 {
 		t.Fatal("Close 전 수락분이 커밋되지 않음")
+	}
+}
+
+// T3 재리뷰 차단 2의 회귀: contracts 위반 이벤트는 저장 직전 검증에서
+// 거부되고, seq를 소비하지 않으며, store에 도달하지 않는다.
+func TestWriterRejectsContractViolations(t *testing.T) {
+	store := &FakeStore{}
+	w, err := NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	bad := []struct {
+		name string
+		mut  func(*gen.EventRecord)
+	}{
+		{"미지의 kind", func(e *gen.EventRecord) { e.Kind = gen.Kind("session/pause") }},
+		{"깨진 payload JSON", func(e *gen.EventRecord) { e.Payload = []byte(`{"broken":`) }},
+		{"잘못된 actor", func(e *gen.EventRecord) { e.Actor = "observer" }},
+		{"all-zero trace_id", func(e *gen.EventRecord) { e.TraceID = strings.Repeat("0", 32) }},
+		{"짧은 span_id", func(e *gen.EventRecord) { e.SpanID = "abc" }},
+		{"비base64 raw", func(e *gen.EventRecord) { r := "@@@"; e.Raw = &r }},
+	}
+	for _, c := range bad {
+		ev := sampleEvent(`{"ok":true}`)
+		c.mut(&ev)
+		if _, err := w.Submit(context.Background(), ev); err == nil {
+			t.Errorf("%s: 위반 이벤트가 ack됨", c.name)
+		}
+	}
+	if calls := storeAppendCalls(store); calls != 0 {
+		t.Fatalf("위반 이벤트가 store에 %d회 도달", calls)
+	}
+	// 거부는 seq를 소비하지 않는다 — 다음 유효 제출이 1번을 받는다
+	seq, err := w.Submit(context.Background(), sampleEvent(`{"ok":true}`))
+	if err != nil || seq != 1 {
+		t.Fatalf("유효 제출 seq=%d err=%v (1 기대)", seq, err)
+	}
+}
+
+func storeAppendCalls(s *FakeStore) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.appendCalls
+}
+
+// T3 재리뷰 차단 3의 회귀 (1): ctx는 admission까지만 적용된다 — 큐에
+// 수락된 제출은 호출자 ctx가 취소돼도 커밋 결과(seq)를 확정적으로 받는다.
+func TestSubmitAckDespiteCtxCancelAfterAdmission(t *testing.T) {
+	gate := make(chan struct{})
+	store := &FakeStore{gate: gate, started: make(chan struct{}, 8)}
+	w, err := NewWriter(context.Background(), store, WithQueueCap(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1번이 Append에 진입해 블록된 것을 확인한 뒤에야 2번을 제출한다 —
+	// 이후 큐에 보이는 1건은 반드시 2번이다(순서 결정).
+	go w.Submit(context.Background(), sampleEvent(`{"i":1}`))
+	select {
+	case <-store.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("1번이 Append에 진입하지 않음")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	type result struct {
+		seq int64
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		seq, err := w.Submit(ctx, sampleEvent(`{"i":2}`))
+		done <- result{seq, err}
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(w.queue) < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("2번이 admission되지 않음")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel() // admission 이후 취소
+	select {
+	case r := <-done:
+		t.Fatalf("취소 직후 모호한 반환: %+v — admission 후에는 ack를 기다려야 함", r)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(gate)
+	select {
+	case r := <-done:
+		// 두 제출의 admission 순서는 비결정적이므로 seq 값(1 또는 2)이 아니라
+		// 속성만 단정한다: ctx 취소에도 커밋 결과(성공 ack)가 반환됐는가.
+		if r.err != nil || r.seq < 1 {
+			t.Fatalf("커밋 결과 대신 %+v — 커밋 여부가 모호해짐", r)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ack가 반환되지 않음")
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.snapshot()) != 2 {
+		t.Fatal("수락분 유실")
+	}
+}
+
+// T3 재리뷰 차단 3의 회귀 (2): store 커밋 실패는 terminal — 실패 이후
+// 어떤 이벤트도 커밋되지 않고, Submit과 Close 모두 원인을 반환한다.
+func TestWriterTerminalOnStoreFailure(t *testing.T) {
+	store := &FakeStore{failOn: 2, failErr: errors.New("디스크 사망")}
+	w, err := NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Submit(context.Background(), sampleEvent(`{"i":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	// seq 2에서 store 실패 → 제출자에게 terminal 오류
+	if _, err := w.Submit(context.Background(), sampleEvent(`{"i":2}`)); !errors.Is(err, ErrTerminal) {
+		t.Fatalf("실패 커밋의 오류 = %v (ErrTerminal 기대)", err)
+	}
+	callsAtFailure := storeAppendCalls(store)
+	// 이후 제출은 store에 닿지 않고 terminal로 거부
+	if _, err := w.Submit(context.Background(), sampleEvent(`{"i":3}`)); !errors.Is(err, ErrTerminal) {
+		t.Fatalf("terminal 이후 Submit = %v (ErrTerminal 기대)", err)
+	}
+	if storeAppendCalls(store) != callsAtFailure {
+		t.Fatal("terminal 이후에도 store 커밋을 시도함")
+	}
+	// Close도 원인을 전달한다
+	if err := w.Close(); !errors.Is(err, ErrTerminal) {
+		t.Fatalf("Close = %v (ErrTerminal 기대)", err)
+	}
+	if len(store.snapshot()) != 1 {
+		t.Fatalf("저장 %d건 (1건 기대)", len(store.snapshot()))
 	}
 }
 
