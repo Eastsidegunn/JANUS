@@ -157,7 +157,7 @@ func TestWriterResumesFromLastSeq(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer w.Close()
-	seq, err := w.Submit(context.Background(), sampleEvent(`{}`))
+	seq, err := w.Submit(context.Background(), sampleEvent(`{"text":""}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestWriterBackpressure(t *testing.T) {
 
 	acked := make(chan int64, 8)
 	submit := func(i int) {
-		seq, err := w.Submit(context.Background(), sampleEvent(`{"i":`+string(rune('0'+i))+`}`))
+		seq, err := w.Submit(context.Background(), sampleEvent(`{"text":"`+string(rune('0'+i))+`"}`))
 		if err != nil {
 			t.Error(err)
 			return
@@ -250,13 +250,13 @@ func TestWriterCloseDrains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Submit(context.Background(), sampleEvent(`{}`)); err != nil {
+	if _, err := w.Submit(context.Background(), sampleEvent(`{"text":""}`)); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Submit(context.Background(), sampleEvent(`{}`)); err != ErrClosed {
+	if _, err := w.Submit(context.Background(), sampleEvent(`{"text":""}`)); err != ErrClosed {
 		t.Fatalf("닫힌 writer의 Submit = %v, ErrClosed 기대", err)
 	}
 	if len(store.snapshot()) != 1 {
@@ -286,7 +286,7 @@ func TestWriterRejectsContractViolations(t *testing.T) {
 		{"비base64 raw", func(e *gen.EventRecord) { r := "@@@"; e.Raw = &r }},
 	}
 	for _, c := range bad {
-		ev := sampleEvent(`{"ok":true}`)
+		ev := sampleEvent(`{"text":"ok"}`)
 		c.mut(&ev)
 		if _, err := w.Submit(context.Background(), ev); err == nil {
 			t.Errorf("%s: 위반 이벤트가 ack됨", c.name)
@@ -296,7 +296,7 @@ func TestWriterRejectsContractViolations(t *testing.T) {
 		t.Fatalf("위반 이벤트가 store에 %d회 도달", calls)
 	}
 	// 거부는 seq를 소비하지 않는다 — 다음 유효 제출이 1번을 받는다
-	seq, err := w.Submit(context.Background(), sampleEvent(`{"ok":true}`))
+	seq, err := w.Submit(context.Background(), sampleEvent(`{"text":"ok"}`))
 	if err != nil || seq != 1 {
 		t.Fatalf("유효 제출 seq=%d err=%v (1 기대)", seq, err)
 	}
@@ -320,7 +320,7 @@ func TestSubmitAckDespiteCtxCancelAfterAdmission(t *testing.T) {
 
 	// 1번이 Append에 진입해 블록된 것을 확인한 뒤에야 2번을 제출한다 —
 	// 이후 큐에 보이는 1건은 반드시 2번이다(순서 결정).
-	go w.Submit(context.Background(), sampleEvent(`{"i":1}`))
+	go w.Submit(context.Background(), sampleEvent(`{"text":"1"}`))
 	select {
 	case <-store.started:
 	case <-time.After(2 * time.Second):
@@ -333,7 +333,7 @@ func TestSubmitAckDespiteCtxCancelAfterAdmission(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		seq, err := w.Submit(ctx, sampleEvent(`{"i":2}`))
+		seq, err := w.Submit(ctx, sampleEvent(`{"text":"2"}`))
 		done <- result{seq, err}
 	}()
 	deadline := time.Now().Add(2 * time.Second)
@@ -376,19 +376,19 @@ func TestWriterTerminalOnStoreFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Submit(context.Background(), sampleEvent(`{"i":1}`)); err != nil {
+	if _, err := w.Submit(context.Background(), sampleEvent(`{"text":"1"}`)); err != nil {
 		t.Fatal(err)
 	}
 	// seq 2에서 store 실패 → 제출자에게 terminal 오류.
 	// errors.Is 체인은 ErrTerminal과 원인(store 오류) 양쪽으로 유지되어야 한다.
-	if _, err := w.Submit(context.Background(), sampleEvent(`{"i":2}`)); !errors.Is(err, ErrTerminal) {
+	if _, err := w.Submit(context.Background(), sampleEvent(`{"text":"2"}`)); !errors.Is(err, ErrTerminal) {
 		t.Fatalf("실패 커밋의 오류 = %v (ErrTerminal 기대)", err)
 	} else if !errors.Is(err, store.failErr) {
 		t.Fatalf("terminal 오류에서 원인 체인이 끊김: %v", err)
 	}
 	callsAtFailure := storeAppendCalls(store)
 	// 이후 제출은 store에 닿지 않고 terminal로 거부
-	if _, err := w.Submit(context.Background(), sampleEvent(`{"i":3}`)); !errors.Is(err, ErrTerminal) {
+	if _, err := w.Submit(context.Background(), sampleEvent(`{"text":"3"}`)); !errors.Is(err, ErrTerminal) {
 		t.Fatalf("terminal 이후 Submit = %v (ErrTerminal 기대)", err)
 	}
 	if storeAppendCalls(store) != callsAtFailure {

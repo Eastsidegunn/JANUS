@@ -455,8 +455,26 @@ func TestPreToolRewriteEmptyIsFailClosed(t *testing.T) {
 	}
 }
 
-// 부분 rewrite는 merge가 아니라 전체 교체다: args를 생략한 대체값이면
-// 원래 args가 살아남지 않고 nil로 실행된다.
+// 부분 rewrite(args 생략)는 [H] 승인 조건대로 "불완전한 전체 교체"로 거부된다
+// — {}·nil args로 실행되지 않고, 원래 args가 merge로 살아남지도 않는다.
+func TestPreToolRewritePartialIsRejected(t *testing.T) {
+	model := &FakeModel{script: []ModelResponse{
+		{ToolCalls: []ToolCall{{Name: "bash", Args: json.RawMessage(`{"cmd":"rm -rf /"}`)}}},
+	}}
+	tools := &FakeTools{}
+	l, _ := newLoop(t, model, tools)
+	l.RegisterHook(gen.HookPointPreTool, func(ctx context.Context, hc HookContext) Decision {
+		return Rewrite(json.RawMessage(`{"name":"noop"}`), "무해화") // args 생략
+	})
+	if err := l.RunTurn(context.Background(), "x"); err == nil {
+		t.Fatal("args 없는 부분 대체가 통과함")
+	}
+	if len(tools.calls) != 0 {
+		t.Fatalf("불완전 대체인데 툴이 실행됨: %+v", tools.calls)
+	}
+}
+
+// 완전한 전체 교체({name, args})는 원래 콜의 흔적 없이 그대로 실행된다.
 func TestPreToolRewriteIsFullReplacementNotMerge(t *testing.T) {
 	model := &FakeModel{script: []ModelResponse{
 		{ToolCalls: []ToolCall{{Name: "bash", Args: json.RawMessage(`{"cmd":"rm -rf /"}`)}}},
@@ -465,13 +483,78 @@ func TestPreToolRewriteIsFullReplacementNotMerge(t *testing.T) {
 	tools := &FakeTools{}
 	l, _ := newLoop(t, model, tools)
 	l.RegisterHook(gen.HookPointPreTool, func(ctx context.Context, hc HookContext) Decision {
-		return Rewrite(json.RawMessage(`{"name":"noop"}`), "무해화")
+		return Rewrite(json.RawMessage(`{"name":"noop","args":{}}`), "무해화")
 	})
 	if err := l.RunTurn(context.Background(), "x"); err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.calls) != 1 || tools.calls[0].Name != "noop" || tools.calls[0].Args != nil {
+	if len(tools.calls) != 1 || tools.calls[0].Name != "noop" || string(tools.calls[0].Args) != `{}` {
 		t.Fatalf("전체 교체가 아님: %+v (원래 args가 merge로 살아남았는가?)", tools.calls)
+	}
+}
+
+// T5 재재리뷰 차단의 회귀: 훅이 ctx를 취소하고 Reject를 반환해도
+// hook/verdict와 turn/end는 durable하게 남는다 (FR-LOOP-06).
+func TestHookCancellationKeepsVerdictDurable(t *testing.T) {
+	l, store := newLoop(t, &FakeModel{}, &FakeTools{})
+	ctx, cancel := context.WithCancel(context.Background())
+	l.RegisterHook(gen.HookPointPreStep, func(_ context.Context, hc HookContext) Decision {
+		cancel() // 훅이 호출자 ctx를 취소
+		return Reject("취소 후 거부")
+	})
+	if err := l.RunTurn(ctx, "x"); err != nil {
+		t.Fatalf("reject 경로는 오류가 아니어야 함: %v", err)
+	}
+	events, _ := store.ReadFrom(context.Background(), 1)
+	assertKinds(t, kinds(events),
+		gen.KindTurnStart, gen.KindUserMessage, gen.KindHookVerdict, gen.KindTurnEnd)
+	var p gen.HookVerdictPayload
+	json.Unmarshal(events[2].Payload, &p)
+	if p.Reason == nil || *p.Reason != "취소 후 거부" {
+		t.Fatalf("판정 유실/훼손: %+v", p)
+	}
+}
+
+// 부분 기록 방지: 뒤쪽 훅의 판정이 잘못되면 앞쪽의 유효 판정도 기록되지
+// 않는다 — 검증이 기록보다 먼저다.
+func TestInvalidLaterDecisionPreventsPartialVerdictRecord(t *testing.T) {
+	model := &FakeModel{script: []ModelResponse{{Text: "x"}}}
+	l, store := newLoop(t, model, &FakeTools{})
+	l.RegisterHook(gen.HookPointPreStep, func(ctx context.Context, hc HookContext) Decision {
+		return Continue() // 유효
+	})
+	l.RegisterHook(gen.HookPointPreStep, func(ctx context.Context, hc HookContext) Decision {
+		return Decision{Verdict: gen.HookVerdictPayloadVerdictReject} // 사유 없음 — 위반
+	})
+	if err := l.RunTurn(context.Background(), "x"); err == nil {
+		t.Fatal("위반 판정이 통과함")
+	}
+	events, _ := store.ReadFrom(context.Background(), 1)
+	for _, e := range events {
+		if e.Kind == gen.KindHookVerdict {
+			t.Fatal("부분 기록 발생 — 검증 전에 verdict가 기록됨")
+		}
+	}
+}
+
+// rewrite 대상 검증은 기록보다 먼저다: 지점 형태에 안 맞는 rewrite가 있으면
+// verdict가 하나도 남지 않는다.
+func TestInvalidRewriteTargetPreventsVerdictRecord(t *testing.T) {
+	model := &FakeModel{script: []ModelResponse{
+		{ToolCalls: []ToolCall{{Name: "t", Args: json.RawMessage(`{}`)}}},
+	}}
+	l, store := newLoop(t, model, &FakeTools{})
+	l.RegisterHook(gen.HookPointPreTool, func(ctx context.Context, hc HookContext) Decision {
+		return Rewrite(json.RawMessage(`{"bogus":1}`), "") // toolCallPayload 아님
+	})
+	if err := l.RunTurn(context.Background(), "x"); err == nil {
+		t.Fatal("지점 형태 위반 rewrite가 통과함")
+	}
+	events, _ := store.ReadFrom(context.Background(), 1)
+	for _, e := range events {
+		if e.Kind == gen.KindHookVerdict {
+			t.Fatal("검증 전 verdict 기록 발생")
+		}
 	}
 }
 

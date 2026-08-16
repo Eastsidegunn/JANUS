@@ -89,8 +89,13 @@ func genEventSequence(r *rand.Rand) []gen.EventRecord {
 				e.UsageOut = ptr(r.Int63n(10_000))
 			})
 		case 5:
-			add(gen.KindToolCall, "parent", rootSpan, nil, map[string]any{"name": "bash", "args": map[string]any{"cmd": "ls"}}, nil)
-			add(gen.KindToolResult, "parent", rootSpan, nil, map[string]any{"output": "ok"}, func(e *gen.EventRecord) {
+			add(gen.KindToolCall, "parent", rootSpan, nil, gen.ToolCallPayload{
+				Name: "bash", Args: mustJSON(map[string]any{"cmd": "ls"}),
+			}, nil)
+			add(gen.KindToolResult, "parent", rootSpan, nil, gen.ToolResultPayload{
+				Status: gen.ToolResultPayloadStatusOk,
+				Output: mustJSON(map[string]any{"stdout": "ok"}),
+			}, func(e *gen.EventRecord) {
 				e.Raw = ptr("aGVsbG8=")
 			})
 		case 6:

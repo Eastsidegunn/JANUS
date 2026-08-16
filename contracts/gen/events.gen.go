@@ -5,6 +5,10 @@ package gen
 
 import "encoding/json"
 
+type AssistantMessagePayload struct {
+	Text string `json:"text"`
+}
+
 type EgressPayload struct {
 	AtMs      int64  `json:"at_ms"`
 	Domain    string `json:"domain"`
@@ -112,6 +116,33 @@ const (
 type SubagentDonePayload struct {
 	Result string                    `json:"result"`
 	Status SubagentDonePayloadStatus `json:"status"`
+}
+
+type ToolCallPayload struct {
+	Args json.RawMessage `json:"args"`
+	Name string          `json:"name"`
+}
+
+type ToolResultPayloadStatus string
+
+const (
+	ToolResultPayloadStatusOk       ToolResultPayloadStatus = "ok"
+	ToolResultPayloadStatusRejected ToolResultPayloadStatus = "rejected"
+	ToolResultPayloadStatusError    ToolResultPayloadStatus = "error"
+)
+
+type ToolResultPayload struct {
+	Error  *string                 `json:"error,omitempty"`
+	Output json.RawMessage         `json:"output,omitempty"`
+	Reason *string                 `json:"reason,omitempty"`
+	Status ToolResultPayloadStatus `json:"status"`
+}
+
+type TurnBoundaryPayload struct {
+}
+
+type UserMessagePayload struct {
+	Text string `json:"text"`
 }
 
 type EventRecord struct {

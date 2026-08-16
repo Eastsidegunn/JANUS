@@ -133,7 +133,7 @@ func TestWeirdFilenames(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := l.Writer.Submit(ctx, rec(0, `{"n":1}`)); err != nil {
+			if _, err := l.Writer.Submit(ctx, rec(0, `{"text":"n"}`)); err != nil {
 				t.Fatal(err)
 			}
 			if err := l.Close(); err != nil {
@@ -175,7 +175,7 @@ func TestSingleWriterOverSQLite(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := l.Writer.Submit(ctx, rec(0, `{"c":1}`)); err != nil {
+			if _, err := l.Writer.Submit(ctx, rec(0, `{"text":"c"}`)); err != nil {
 				t.Error(err)
 			}
 		}()
@@ -217,7 +217,7 @@ func TestLogPathEnforcesRedactionAndContract(t *testing.T) {
 	defer l.Close()
 
 	// redaction: 토큰이 저장 전에 마스킹된다
-	ev := rec(0, `{"token":"sk-abcdefghijklmnopqrstuvwxyz"}`)
+	ev := rec(0, `{"text":"sk-abcdefghijklmnopqrstuvwxyz"}`)
 	if _, err := l.Writer.Submit(ctx, ev); err != nil {
 		t.Fatal(err)
 	}

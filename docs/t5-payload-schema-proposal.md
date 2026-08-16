@@ -1,10 +1,11 @@
 # T5 payload 스키마 확정 제안 — 대화·툴 kind와 지점별 rewrite 대상
 
-상태: **승인 대기** (2026-08-17). contracts/는 [H] 영역이므로 이 문서 승인 전에는
-수정하지 않는다. 승인 시 events.schema.json에 additive로 반영하고(§5.1 확장
-규칙 준수 — 기존 유효 인스턴스를 깨는 변경 없음… 단 아래 §3의 폐쇄화는 예외로
-명시 승인 필요), schemagen 재생성·validate 회귀·loop 방출 조정을 같은 커밋으로
-진행한다.
+상태: **승인됨** (2026-08-17 [H] 리뷰) — 폐쇄화, 8종 확정, status 판별 oneOf,
+output=object, $comment+런타임 강제 방식 모두 승인. 구현 조건: 스칼라·배열·null
+출력은 `{"value": <원본 JSON>}` 정규화, 모델이 생략한 args만 기록 전 `{}` 정규화,
+args 생략 rewrite는 불완전 대체로 거부, rewrite 대상은 생성 payload 타입으로
+decode(map 검증 금지), rewrite 검증은 verdict 기록 전 수행, 기존 열린 payload
+테스트 샘플 전면 갱신, 실제 schema/codegen diff는 머지 전 최종 [H] 리뷰.
 
 ## 1. 배경
 

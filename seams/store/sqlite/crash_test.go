@@ -77,7 +77,7 @@ func crashHelper() {
 	}
 	out := bufio.NewWriter(os.Stdout)
 	for i := 0; i < 5; i++ {
-		seq, err := l.Writer.Submit(context.Background(), rec(0, fmt.Sprintf(`{"i":%d}`, i)))
+		seq, err := l.Writer.Submit(context.Background(), rec(0, fmt.Sprintf(`{"text":"%d"}`, i)))
 		if err != nil {
 			fmt.Fprintln(out, "HELPER_ERR", err)
 			out.Flush()

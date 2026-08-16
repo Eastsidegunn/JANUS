@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
@@ -128,7 +129,7 @@ func (l *Loop) RunTurn(ctx context.Context, input string) (err error) {
 	defer func() {
 		err = errors.Join(err, l.emitBoundary(ctx, gen.KindTurnEnd))
 	}()
-	if err := l.emit(ctx, gen.KindUserMessage, map[string]string{"text": input}, nil, nil); err != nil {
+	if err := l.emit(ctx, gen.KindUserMessage, gen.UserMessagePayload{Text: input}, nil, nil); err != nil {
 		return err
 	}
 
@@ -153,8 +154,8 @@ func (l *Loop) RunTurn(ctx context.Context, input string) (err error) {
 		if rejected != nil {
 			return nil // step 없이 turn 종료 (FR-LOOP-05)
 		}
-		// rewrite는 전체 교체다 — 기존 값에 merge되면 로그의 대체값과 실제
-		// 실행이 어긋난다. 반드시 zero-value에 strict decode 후 교체한다.
+		// rewrite는 전체 교체다 — zero-value에 strict decode 후 교체
+		// (형태는 runHooks의 지점별 검증이 이미 보장).
 		var nextReq ModelRequest
 		if err := strictDecode(finalReq, &nextReq); err != nil {
 			return fmt.Errorf("loop: pre_step rewrite 결과가 모델 요청 형태가 아님: %w", err)
@@ -178,10 +179,11 @@ func (l *Loop) RunTurn(ctx context.Context, input string) (err error) {
 			return nil // turn 종료
 		}
 		if rewrote {
-			// rewrite(x): x를 추가 입력으로 주입하고 계속
-			var msg map[string]any
-			if err := json.Unmarshal(injected, &msg); err != nil {
-				return fmt.Errorf("loop: turn_stopping rewrite 결과가 객체가 아님: %w", err)
+			// rewrite(x): x(userMessagePayload)를 추가 입력으로 주입하고 계속.
+			// 형태는 runHooks의 지점별 검증이 이미 보장했다.
+			var msg gen.UserMessagePayload
+			if err := strictDecode(injected, &msg); err != nil {
+				return fmt.Errorf("loop: turn_stopping rewrite 결과가 userMessagePayload가 아님: %w", err)
 			}
 			if err := l.emit(ctx, gen.KindUserMessage, msg, nil, nil); err != nil {
 				return err
@@ -216,7 +218,7 @@ func (l *Loop) runStep(ctx context.Context, req ModelRequest) (toolCalls int, er
 	if err != nil {
 		return 0, fmt.Errorf("loop: 모델 요청: %w", err)
 	}
-	if err := l.emit(ctx, gen.KindAssistantMessage, map[string]string{"text": resp.Text},
+	if err := l.emit(ctx, gen.KindAssistantMessage, gen.AssistantMessagePayload{Text: resp.Text},
 		&resp.UsageIn, &resp.UsageOut); err != nil {
 		return 0, err
 	}
@@ -229,12 +231,19 @@ func (l *Loop) runStep(ctx context.Context, req ModelRequest) (toolCalls int, er
 }
 
 func (l *Loop) runTool(ctx context.Context, tc ToolCall) error {
+	// 모델이 args를 생략한 경우에만 {}로 정규화한다 ([H] 승인 조건) —
+	// toolCallPayload는 args를 필수 객체로 요구한다.
+	args := tc.Args
+	if len(args) == 0 {
+		args = json.RawMessage(`{}`)
+	}
+	callPayload := gen.ToolCallPayload{Name: tc.Name, Args: args}
 	// 모델의 원래 시도를 먼저 기록한다 — rewrite 체인은 hook/verdict의
 	// 대체값과 함께 로그에서 완전 재구성된다.
-	if err := l.emit(ctx, gen.KindToolCall, tc, nil, nil); err != nil {
+	if err := l.emit(ctx, gen.KindToolCall, callPayload, nil, nil); err != nil {
 		return err
 	}
-	tcPayload, err := json.Marshal(tc)
+	tcPayload, err := json.Marshal(callPayload)
 	if err != nil {
 		return err
 	}
@@ -244,26 +253,33 @@ func (l *Loop) runTool(ctx context.Context, tc ToolCall) error {
 	}
 	if rejected != nil {
 		// 툴은 실행되지 않는다. 모델 가시 결과로 거부 사실을 남긴다.
-		return l.emit(ctx, gen.KindToolResult,
-			map[string]any{"rejected": true, "reason": rejected.Reason}, nil, nil)
+		return l.emit(ctx, gen.KindToolResult, gen.ToolResultPayload{
+			Status: gen.ToolResultPayloadStatusRejected,
+			Reason: &rejected.Reason,
+		}, nil, nil)
 	}
-	// 전체 교체 의미론: zero-value에 strict decode — 누락 필드가 원래 콜의
-	// 값으로 살아남으면 로그의 대체값과 실제 실행이 어긋난다.
-	var nextTC ToolCall
-	if err := strictDecode(finalTC, &nextTC); err != nil {
-		return fmt.Errorf("loop: pre_tool rewrite 결과가 툴 콜 형태가 아님: %w", err)
+	// 전체 교체 의미론: zero-value에 strict decode(형태는 runHooks의 지점별
+	// 검증이 보장) — 누락 필드가 원래 콜의 값으로 살아남으면 로그의
+	// 대체값과 실제 실행이 어긋난다.
+	var nextCall gen.ToolCallPayload
+	if err := strictDecode(finalTC, &nextCall); err != nil {
+		return fmt.Errorf("loop: pre_tool rewrite 결과가 toolCallPayload가 아님: %w", err)
 	}
-	if nextTC.Name == "" {
-		return fmt.Errorf("loop: pre_tool rewrite 결과에 툴 이름이 없음 (빈/부분 대체는 실행 불가)")
-	}
-	tc = nextTC
+	tc = ToolCall{Name: nextCall.Name, Args: nextCall.Args}
 
 	result, invokeErr := l.tools.Invoke(ctx, tc)
 	if invokeErr != nil {
-		return l.emit(ctx, gen.KindToolResult,
-			map[string]any{"error": invokeErr.Error()}, nil, nil)
+		msg := invokeErr.Error()
+		return l.emit(ctx, gen.KindToolResult, gen.ToolResultPayload{
+			Status: gen.ToolResultPayloadStatusError,
+			Error:  &msg,
+		}, nil, nil)
 	}
-	resPayload, err := json.Marshal(map[string]any{"output": result.Output})
+	okResult := gen.ToolResultPayload{
+		Status: gen.ToolResultPayloadStatusOk,
+		Output: normalizeOutput(result.Output),
+	}
+	resPayload, err := json.Marshal(okResult)
 	if err != nil {
 		return err
 	}
@@ -273,29 +289,57 @@ func (l *Loop) runTool(ctx context.Context, tc ToolCall) error {
 	}
 	if rejectedPost != nil {
 		// 결과가 모델에 노출되지 않는다 — 거부 사실만 모델 가시로 남긴다.
-		return l.emit(ctx, gen.KindToolResult,
-			map[string]any{"rejected": true, "reason": rejectedPost.Reason}, nil, nil)
+		return l.emit(ctx, gen.KindToolResult, gen.ToolResultPayload{
+			Status: gen.ToolResultPayloadStatusRejected,
+			Reason: &rejectedPost.Reason,
+		}, nil, nil)
 	}
-	var out map[string]any
-	if err := json.Unmarshal(finalRes, &out); err != nil {
-		return fmt.Errorf("loop: post_tool rewrite 결과가 객체가 아님: %w", err)
+	var finalResult gen.ToolResultPayload
+	if err := strictDecode(finalRes, &finalResult); err != nil {
+		return fmt.Errorf("loop: post_tool rewrite 결과가 toolResultPayload가 아님: %w", err)
 	}
-	return l.emit(ctx, gen.KindToolResult, out, nil, nil)
+	return l.emit(ctx, gen.KindToolResult, finalResult, nil, nil)
+}
+
+// normalizeOutput은 툴 출력의 객체 정규화다 ([H] 승인 조건): 객체는 그대로,
+// 스칼라·배열·null은 {"value": <원본 JSON>}으로 감싼다.
+func normalizeOutput(out json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		return trimmed
+	}
+	if len(trimmed) == 0 {
+		trimmed = json.RawMessage(`null`)
+	}
+	wrapped, _ := json.Marshal(map[string]json.RawMessage{"value": trimmed})
+	return wrapped
 }
 
 // runHooks는 지점의 훅 전부를 독립 호출하고(전원 원본 payload 수신, 체이닝
-// 없음), 판정을 각각 hook/verdict 이벤트로 기록한 뒤(FR-LOOP-06),
-// FR-LOOP-04 규칙으로 해소한다.
+// 없음), 모든 판정을 형태·지점별로 먼저 검증한 뒤에만 각각 hook/verdict
+// 이벤트로 기록한다(FR-LOOP-06) — 뒤쪽의 잘못된 판정 때문에 앞쪽 verdict만
+// 남는 부분 기록이 없다. 기록은 durable admission context를 쓴다: 훅이 ctx를
+// 취소해도 생성된 판정은 유실되지 않는다. 이후 FR-LOOP-04 규칙으로 해소한다.
 func (l *Loop) runHooks(ctx context.Context, point gen.HookPoint, payload json.RawMessage) (rejected *Decision, final json.RawMessage, rewrote bool, err error) {
 	hooks := l.hooks[point]
 	decisions := make([]Decision, len(hooks))
 	for i, h := range hooks {
 		decisions[i] = h(ctx, HookContext{Point: point, Payload: payload})
 	}
+	// 1단계: 전건 검증 — 형태 계약 + rewrite 대체값의 지점별 형태
 	for _, d := range decisions {
 		if err := validateDecision(d); err != nil {
 			return nil, nil, false, err
 		}
+		if d.Verdict == gen.HookVerdictPayloadVerdictRewrite {
+			if err := validateRewriteTarget(point, d.Rewrite); err != nil {
+				return nil, nil, false, fmt.Errorf("loop: %s rewrite 대체값 검증: %w", point, err)
+			}
+		}
+	}
+	// 2단계: 전건 durable 기록
+	durableCtx := context.WithoutCancel(ctx)
+	for _, d := range decisions {
 		p := gen.HookVerdictPayload{Point: point, Verdict: d.Verdict}
 		if d.Reason != "" {
 			p.Reason = &d.Reason
@@ -303,7 +347,7 @@ func (l *Loop) runHooks(ctx context.Context, point gen.HookPoint, payload json.R
 		if d.Verdict == gen.HookVerdictPayloadVerdictRewrite {
 			p.Rewrite = d.Rewrite
 		}
-		if err := l.emit(ctx, gen.KindHookVerdict, p, nil, nil); err != nil {
+		if err := l.emit(durableCtx, gen.KindHookVerdict, p, nil, nil); err != nil {
 			return nil, nil, false, err
 		}
 	}
@@ -311,7 +355,49 @@ func (l *Loop) runHooks(ctx context.Context, point gen.HookPoint, payload json.R
 	return rejected, final, rewrote, nil
 }
 
-// strictDecode는 rewrite 대체값의 전체 교체 디코드다: zero-value 대상,
+// validateRewriteTarget은 지점별 rewrite 대체값의 형태 계약이다
+// (2026-08-17 [H] 승인 — 생성 payload 타입으로 strict decode).
+func validateRewriteTarget(point gen.HookPoint, x json.RawMessage) error {
+	switch point {
+	case gen.HookPointPreStep:
+		var req ModelRequest // 모델 요청 형태는 코어 소유
+		return strictDecode(x, &req)
+	case gen.HookPointPreTool:
+		var call gen.ToolCallPayload
+		if err := strictDecode(x, &call); err != nil {
+			return err
+		}
+		if call.Name == "" {
+			return fmt.Errorf("툴 이름이 없음 (빈/부분 대체는 실행 불가)")
+		}
+		if call.Args == nil {
+			return fmt.Errorf("args가 없음 — 불완전한 전체 교체는 거부한다")
+		}
+		return nil
+	case gen.HookPointPostTool:
+		var res gen.ToolResultPayload
+		if err := strictDecode(x, &res); err != nil {
+			return err
+		}
+		if res.Status != gen.ToolResultPayloadStatusOk {
+			return fmt.Errorf("post_tool rewrite는 status:ok 분기만 허용 (%q)", res.Status)
+		}
+		if len(res.Output) == 0 {
+			return fmt.Errorf("output이 없음")
+		}
+		if res.Reason != nil || res.Error != nil {
+			return fmt.Errorf("ok 분기에 reason/error가 있음")
+		}
+		return nil
+	case gen.HookPointTurnStopping:
+		var msg gen.UserMessagePayload
+		return strictDecode(x, &msg)
+	default:
+		return fmt.Errorf("알 수 없는 지점 %q", point)
+	}
+}
+
+// strictDecode는// strictDecode는 rewrite 대체값의 전체 교체 디코드다: zero-value 대상,
 // 미지 필드 거부, 후행 데이터 거부.
 func strictDecode(data []byte, dst any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -319,7 +405,7 @@ func strictDecode(data []byte, dst any) error {
 	if err := dec.Decode(dst); err != nil {
 		return err
 	}
-	if dec.More() {
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
 		return fmt.Errorf("후행 데이터가 있음")
 	}
 	return nil
