@@ -7,33 +7,68 @@ import (
 )
 
 // Pkg는 `go list -json` 출력 중 린트에 필요한 최소 단면이다.
+// 테스트 전용 import(TestImports, XTestImports)도 검사 대상이다.
 type Pkg struct {
-	ImportPath string
-	Imports    []string
+	ImportPath   string
+	Imports      []string
+	TestImports  []string
+	XTestImports []string
 }
 
-// Check는 모듈 내부 import가 §3.1의 의존 방향 규칙을 지키는지 검사한다.
-// 위반 목록을 정렬해 반환한다. 비어 있으면 통과다.
+// validLayers는 §3.1이 허용하는 최상위 디렉토리 전부다.
+// 이 집합 밖의 패키지는 import 여부와 무관하게 존재만으로 위반이다 —
+// 미분류 패키지가 경계 검사를 우회하는 것을 막는다.
+var validLayers = map[string]bool{
+	"contracts": true,
+	"core":      true,
+	"seams":     true,
+	"collector": true,
+	"surfaces":  true,
+	"tools":     true,
+}
+
+// Check는 패키지 그래프가 §3.1의 의존 방향 규칙을 지키는지 검사한다.
+// 위반 목록을 중복 제거·정렬해 반환한다(같은 패키지가 여러 GOOS 순회로
+// 중복 전달돼도 동일 위반은 한 번만 나온다). 비어 있으면 통과다.
 func Check(module string, pkgs []Pkg) []string {
+	seen := map[string]bool{}
 	var violations []string
+	add := func(v string) {
+		if !seen[v] {
+			seen[v] = true
+			violations = append(violations, v)
+		}
+	}
 	for _, p := range pkgs {
 		from, ok := rel(module, p.ImportPath)
 		if !ok {
 			continue
 		}
-		for _, imp := range p.Imports {
+		fromLayer, _ := classify(from)
+		if !validLayers[fromLayer] {
+			add(fmt.Sprintf("미분류 최상위 디렉토리: %s (허용: contracts|core|seams|collector|surfaces|tools)", from))
+			continue
+		}
+		for _, imp := range allImports(p) {
 			to, ok := rel(module, imp)
 			if !ok {
 				continue
 			}
 			if !allowed(from, to) {
-				violations = append(violations,
-					fmt.Sprintf("%s → %s", from, to))
+				add(fmt.Sprintf("%s → %s", from, to))
 			}
 		}
 	}
 	sort.Strings(violations)
 	return violations
+}
+
+func allImports(p Pkg) []string {
+	out := make([]string, 0, len(p.Imports)+len(p.TestImports)+len(p.XTestImports))
+	out = append(out, p.Imports...)
+	out = append(out, p.TestImports...)
+	out = append(out, p.XTestImports...)
+	return out
 }
 
 // rel은 모듈 내부 패키지 경로를 모듈 기준 상대 경로로 바꾼다.
@@ -67,9 +102,10 @@ func classify(relPath string) (layer, seam string) {
 //   - seams/<x>: contracts, core, 그리고 같은 seam(<x>) 내부만.
 //     다른 seam·seams 루트 패키지로의 수평 import 금지.
 //   - collector: contracts만 — core와 코드 경로를 공유하지 않는다.
-//   - surfaces: 조립 지점. tools를 제외한 모든 층 허용.
+//   - surfaces: 조립 지점. 명시된 층(contracts, core, seams, collector,
+//     surfaces)만 허용 — 미분류 대상은 허용되지 않는다.
 //   - tools: 개발 도구. 내부 층 import 금지 (tools 내부만).
-//   - 그 외 알 수 없는 최상위 디렉토리의 내부 import는 전부 위반.
+//   - 그 외 알 수 없는 최상위 디렉토리는 어느 방향으로도 허용되지 않는다.
 func allowed(from, to string) bool {
 	fromLayer, fromSeam := classify(from)
 	toLayer, toSeam := classify(to)
@@ -86,7 +122,8 @@ func allowed(from, to string) bool {
 	case "collector":
 		return toLayer == "collector" || toLayer == "contracts"
 	case "surfaces":
-		return toLayer != "tools"
+		return toLayer == "contracts" || toLayer == "core" || toLayer == "seams" ||
+			toLayer == "collector" || toLayer == "surfaces"
 	case "tools":
 		return toLayer == "tools"
 	default:

@@ -40,7 +40,11 @@ func TestAllowed(t *testing.T) {
 		{"collector/fsdiff", "surfaces/cli", false},
 		{"surfaces/cli", "tools/boundarylint", false},
 		{"tools/boundarylint", "core", false},
-		{"unknown", "core", false}, // 미분류 최상위 디렉토리는 내부 import 불가
+
+		// 미분류 대상은 어느 방향으로도 불허 (T0.1 리뷰 발견 2)
+		{"unknown", "core", false},
+		{"surfaces/cli", "rogue", false},
+		{"core", "rogue", false},
 	}
 	for _, c := range cases {
 		if got := allowed(c.from, c.to); got != c.want {
@@ -52,10 +56,10 @@ func TestAllowed(t *testing.T) {
 func TestCheck(t *testing.T) {
 	pkgs := []Pkg{
 		{ImportPath: mod + "/core/logd", Imports: []string{
-			"fmt",                    // 외부(표준 라이브러리)는 무시
-			mod + "/contracts",       // 허용
-			mod + "/seams/store",     // 위반
-			mod + "/surfaces/cli",    // 위반
+			"fmt",                 // 외부(표준 라이브러리)는 무시
+			mod + "/contracts",    // 허용
+			mod + "/seams/store",  // 위반
+			mod + "/surfaces/cli", // 위반
 		}},
 		{ImportPath: mod + "/collector", Imports: []string{
 			mod + "/core", // 위반
@@ -64,20 +68,49 @@ func TestCheck(t *testing.T) {
 			mod + "/core", mod + "/collector", // 전부 허용
 		}},
 	}
-	got := Check(mod, pkgs)
-	want := []string{
+	assertViolations(t, Check(mod, pkgs), []string{
 		"collector → core",
 		"core/logd → seams/store",
 		"core/logd → surfaces/cli",
+	})
+}
+
+// 테스트 전용 import도 검사된다 (T0.1 리뷰 발견 1).
+func TestCheckTestImports(t *testing.T) {
+	pkgs := []Pkg{
+		{ImportPath: mod + "/core",
+			Imports:      []string{mod + "/contracts"},
+			TestImports:  []string{"testing", mod + "/surfaces"},
+			XTestImports: []string{mod + "/collector"},
+		},
 	}
-	if len(got) != len(want) {
-		t.Fatalf("Check() = %v, want %v", got, want)
+	assertViolations(t, Check(mod, pkgs), []string{
+		"core → collector",
+		"core → surfaces",
+	})
+}
+
+// 미분류 최상위 패키지는 import가 없어도 존재만으로 위반이다 (T0.1 리뷰 발견 2).
+func TestCheckRoguePackage(t *testing.T) {
+	pkgs := []Pkg{
+		{ImportPath: mod + "/rogue", Imports: []string{"fmt"}},
+		{ImportPath: mod + "/surfaces/cli", Imports: []string{mod + "/rogue"}},
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("Check()[%d] = %q, want %q", i, got[i], want[i])
-		}
+	assertViolations(t, Check(mod, pkgs), []string{
+		"surfaces/cli → rogue",
+		"미분류 최상위 디렉토리: rogue (허용: contracts|core|seams|collector|surfaces|tools)",
+	})
+}
+
+// GOOS 순회로 같은 패키지가 중복 전달돼도 동일 위반은 한 번만 나온다.
+func TestCheckDedup(t *testing.T) {
+	p := Pkg{ImportPath: mod + "/core",
+		Imports:     []string{mod + "/surfaces"},
+		TestImports: []string{mod + "/surfaces"}, // 같은 edge가 두 목록에
 	}
+	assertViolations(t, Check(mod, []Pkg{p, p}), []string{ // 같은 패키지가 두 번
+		"core → surfaces",
+	})
 }
 
 func TestCheckClean(t *testing.T) {
@@ -85,7 +118,17 @@ func TestCheckClean(t *testing.T) {
 		{ImportPath: mod + "/core", Imports: []string{mod + "/contracts", "os"}},
 		{ImportPath: mod + "/seams/store/sqlite", Imports: []string{mod + "/core"}},
 	}
-	if got := Check(mod, pkgs); len(got) != 0 {
-		t.Errorf("Check() = %v, want empty", got)
+	assertViolations(t, Check(mod, pkgs), nil)
+}
+
+func assertViolations(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("Check() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Check()[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
