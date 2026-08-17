@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -48,14 +47,12 @@ type Subagent struct {
 	childSpn   string
 
 	// exited는 reaper가 프로세스 종료를 관측하면 닫힌다 — 종료 관측은
-	// stdout EOF에 종속되지 않는다(자손이 파이프를 쥐어도 무관).
+	// stdout EOF에 종속되지 않는다. reaper는 리더 종료 즉시 잔여 프로세스
+	// 그룹을 종료하므로 파이프의 모든 writer가 사라져 EOF가 곧바로 오고,
+	// pump는 임의 유예 없이 진짜 EOF까지 전량 drain한다.
 	exited  chan struct{}
 	exitErr error // exited 닫기 전에만 기록
 }
-
-// drainGrace는 프로세스 종료 후 잔여 stdout 버퍼를 비우는 유예다.
-// 유예가 지나면 읽기 deadline으로 스트림을 마감한다.
-const drainGrace = 200 * time.Millisecond
 
 type waitResult struct {
 	done gen.DonePayload
@@ -101,17 +98,15 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 	if len(spec.Command) == 0 {
 		return nil, fmt.Errorf("subagent: 어댑터 명령이 비어 있음")
 	}
-	proc := exec.CommandContext(ctx, spec.Command[0], spec.Command[1:]...)
+	// exec.CommandContext가 아니라 exec.Command를 쓴다: Cmd.Wait를
+	// 호출하지 않는 이 설계에서 CommandContext의 watchCtx goroutine은
+	// 회수되지 못하고 누적된다(재재재리뷰 검출). context 감시·그룹 kill·
+	// 파이프 정리는 전부 이 패키지가 직접 소유한다.
+	proc := exec.Command(spec.Command[0], spec.Command[1:]...)
 	// 어댑터를 자체 프로세스 그룹으로 실행한다 — kill 시 어댑터의 자손까지
 	// 함께 종료해야 고아 자손이 stdout 파이프를 잡고 EOF를 지연시키는
 	// (= drain·reap이 늘어지는) 경로가 없다.
 	proc.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// Spawn context 취소도 리더만이 아니라 그룹 전체를 죽인다 —
-	// 기본 Cancel은 리더만 kill해 자손이 남는다.
-	proc.Cancel = func() error {
-		killGroup(proc)
-		return nil
-	}
 	stdin, err := proc.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -135,8 +130,11 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 		exited: make(chan struct{}),
 	}
 	// reaper: 프로세스 종료를 stdout과 독립적으로 관측하고 정확히 한 번
-	// 회수한다. 종료 후에는 drain 유예 deadline으로 읽기를 마감해, 자손이
-	// write end를 쥐고 있어도 pump가 EOF에 인질 잡히지 않는다.
+	// 회수한다(단일 reap — Cmd.Wait는 사용하지 않는다). 리더가 종료되면
+	// 잔여 프로세스 그룹을 즉시 종료한다: 파이프의 모든 writer가 사라져
+	// EOF가 곧바로 오므로 pump는 커널 버퍼를 유실 없이 진짜 EOF까지 읽고,
+	// done 이후 지연 출력을 만들 프로세스 자체가 남지 않는다 —
+	// 임의 유예 기반 마감(fail-open)이 아니다.
 	go func() {
 		ps, werr := proc.Process.Wait()
 		switch {
@@ -145,8 +143,17 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 		case !ps.Success():
 			s.exitErr = fmt.Errorf("exit: %s", ps.String())
 		}
+		killGroup(proc)
 		close(s.exited)
-		s.stdoutFile.SetReadDeadline(time.Now().Add(drainGrace))
+	}()
+	// context 감시: exec.Command 전환으로 취소 연결도 직접 소유 —
+	// 취소는 항상 그룹 kill이다(리더만 죽여 자손이 남는 경로 없음).
+	go func() {
+		select {
+		case <-ctx.Done():
+			killGroup(proc)
+		case <-s.exited:
+		}
 	}()
 	if err := s.sendCommand(gen.CommandCmdTask, gen.TaskPayload{
 		Instruction: spec.Instruction,
@@ -155,6 +162,8 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 		Depth:       spec.Depth,
 	}); err != nil {
 		killGroup(proc) // 회수는 reaper goroutine이 수행
+		stdin.Close()
+		stdoutFile.Close()
 		return nil, err
 	}
 	go s.pump(w, traceID, parentSpan, stdout)
@@ -172,8 +181,8 @@ func (s *Subagent) Stop(reason gen.StopPayloadReason) error {
 }
 
 // Wait는 subagent/done까지 기다려 최종 결과를 반환한다. ctx가 먼저
-// 끝나면 프로세스를 kill하고 즉시 반환한다 — 회수(reap)는 펌프 goroutine이
-// EOF 후 정확히 한 번 수행하므로 zombie가 남지 않는다.
+// 끝나면 프로세스 그룹을 kill하고 즉시 반환한다 — 회수(reap)는 reaper
+// goroutine이 정확히 한 번 수행하므로 zombie가 남지 않는다.
 func (s *Subagent) Wait(ctx context.Context) (gen.DonePayload, error) {
 	select {
 	case r := <-s.doneCh:
@@ -209,9 +218,10 @@ func (s *Subagent) sendCommand(cmd gen.CommandCmd, payload any) error {
 // writer 오류는 프로세스 종료(kill) 사유다 — 계약을 어기는 어댑터는
 // 등록될 수 없다(§5.2)의 런타임 판.
 //
-// 프로세스 수명 주기: kill 여부와 무관하게 stdout을 EOF까지 drain한 뒤
-// 이 goroutine이 proc.Wait()를 정확히 한 번 수행한다(단일 reap).
-// exit 오류는 결과에 보존된다.
+// 프로세스 수명 주기: 종료 관측·회수는 reaper goroutine의 몫이다. 리더
+// 종료 시 reaper가 잔여 그룹을 즉시 죽이므로 EOF는 항상 곧 도착하고,
+// pump는 진짜 EOF까지 전량 drain한 뒤 결과를 확정하고 부모 측 파이프를
+// 닫는다. exit 오류는 결과에 보존된다.
 func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string, stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -287,12 +297,11 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string, stdout io.Re
 		}
 	}
 	scanErr := scanner.Err()
-	// 프로세스 종료로 인한 파이프 마감(deadline·close)은 스트림의 정상 끝이다
-	if scanErr != nil && (errors.Is(scanErr, os.ErrClosed) || os.IsTimeout(scanErr)) {
-		scanErr = nil
-	}
 	<-s.exited // 종료 상태는 reaper가 관측 — EOF 비종속
 	waitErr := s.exitErr
+	// 결과 확정 전에 부모 측 파이프를 닫는다 — FD 누수 방지
+	s.stdin.Close()
+	s.stdoutFile.Close()
 
 	switch {
 	case pumpErr != nil:

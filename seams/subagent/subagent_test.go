@@ -2,8 +2,10 @@ package subagent
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -370,6 +372,142 @@ printf '\n'`,
 				t.Fatal("공백 줄이 §5.2 검사를 우회함")
 			}
 		})
+	}
+}
+
+// T7 재재재리뷰 차단 2의 회귀: 리더 종료 시 잔여 그룹이 즉시 종료된다 —
+// done 이후 0.4초 뒤에 출력하려던 자손은 실행 자체가 남지 않는다
+// (유예 기반 마감의 fail-open 소멸). 재현 스크립트 그대로.
+func TestLeaderExitTerminatesRemainingGroup(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "grandchild-ran")
+	script := `read line
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'
+( sleep 0.4; printf '%s\n' '{"v":1,"kind":"subagent/message","payload":{"text":"유령"},"raw":""}'; touch "` + marker + `" ) &
+exit 0`
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1,
+		spawnSpec([]string{"/bin/sh", "-c", script}, "지시"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	done, waitErr := sub.Wait(context.Background())
+	if waitErr != nil || done.Status != gen.DonePayloadStatusOk {
+		t.Fatalf("정상 결과 아님: %+v %v", done, waitErr)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("EOF 종속 잔존: %v 소요", time.Since(start))
+	}
+	// 자손이 살아남았다면 0.4초 뒤 마커를 만든다 — 만들어지면 안 된다
+	time.Sleep(700 * time.Millisecond)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("리더 종료 후에도 자손이 실행됨 — 그룹 종료 실패 (fail-open)")
+	}
+}
+
+// T7 재재재리뷰 차단 1의 회귀 (1): 정상 완료 후 부모 측 파이프가 닫힌다.
+func TestPipesClosedAfterCompletion(t *testing.T) {
+	bin := buildNullAdapter(t)
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1,
+		spawnSpec([]string{bin}, "요청"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sub.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sub.stdin.Write([]byte("x")); err == nil {
+		t.Fatal("완료 후 stdin 파이프가 열려 있음 — FD 누수")
+	}
+	buf := make([]byte, 1)
+	if _, err := sub.stdoutFile.Read(buf); err == nil {
+		t.Fatal("완료 후 stdout 파이프가 열려 있음 — FD 누수")
+	}
+}
+
+// T7 재재재리뷰 차단 1의 회귀 (2): 취소 가능한 Spawn을 반복해도
+// goroutine이 누적되지 않는다 (watchCtx 누수의 재발 방지).
+func TestNoGoroutineAccumulationAcrossSpawns(t *testing.T) {
+	bin := buildNullAdapter(t)
+	settle := func() int {
+		best := 1 << 30
+		for i := 0; i < 20; i++ {
+			runtime.GC()
+			n := runtime.NumGoroutine()
+			if n < best {
+				best = n
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		return best
+	}
+	baseline := settle()
+	for i := 0; i < 5; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		store := &FakeStore{}
+		w, err := logd.NewWriter(context.Background(), store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sub, err := Spawn(ctx, w, logd.NewTraceID(), logd.NewSpanID(), 1, spawnSpec([]string{bin}, "요청"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sub.Wait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		cancel()
+		w.Close()
+	}
+	after := settle()
+	if after > baseline+3 {
+		t.Fatalf("goroutine 누적: %d → %d (허용 +3)", baseline, after)
+	}
+}
+
+// T7 재재재리뷰 차단 1의 회귀 (3): task 전송 실패 경로도 프로세스·파이프·
+// goroutine이 정리된다.
+func TestSpawnSendFailureCleansUp(t *testing.T) {
+	bin := buildNullAdapter(t)
+	settle := func() int {
+		best := 1 << 30
+		for i := 0; i < 20; i++ {
+			runtime.GC()
+			n := runtime.NumGoroutine()
+			if n < best {
+				best = n
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		return best
+	}
+	baseline := settle()
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	// 빈 instruction → 발신 task가 계약 위반(minLength 1) → 전송 실패 경로
+	if _, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1,
+		spawnSpec([]string{bin}, "")); err == nil {
+		t.Fatal("계약 위반 task가 전송됨")
+	}
+	after := settle()
+	if after > baseline+3 {
+		t.Fatalf("실패 경로 goroutine 누적: %d → %d", baseline, after)
 	}
 }
 
