@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
@@ -89,6 +90,10 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 		return nil, fmt.Errorf("subagent: 어댑터 명령이 비어 있음")
 	}
 	proc := exec.CommandContext(ctx, spec.Command[0], spec.Command[1:]...)
+	// 어댑터를 자체 프로세스 그룹으로 실행한다 — kill 시 어댑터의 자손까지
+	// 함께 종료해야 고아 자손이 stdout 파이프를 잡고 EOF를 지연시키는
+	// (= drain·reap이 늘어지는) 경로가 없다.
+	proc.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := proc.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -112,7 +117,7 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 		Budget:      spec.Budget,
 		Depth:       spec.Depth,
 	}); err != nil {
-		proc.Process.Kill()
+		killGroup(proc)
 		proc.Wait() // 펌프가 시작되지 않았으므로 여기서 reap
 		return nil, err
 	}
@@ -138,7 +143,7 @@ func (s *Subagent) Wait(ctx context.Context) (gen.DonePayload, error) {
 	case r := <-s.doneCh:
 		return r.done, r.err
 	case <-ctx.Done():
-		s.proc.Process.Kill()
+		killGroup(s.proc)
 		return gen.DonePayload{}, ctx.Err()
 	}
 }
@@ -183,7 +188,7 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string, stdout io.Re
 	violate := func(err error) {
 		if pumpErr == nil {
 			pumpErr = err
-			s.proc.Process.Kill() // 위반 시 프로세스 종료 — 이후 EOF까지 drain만
+			killGroup(s.proc) // 위반 시 프로세스 그룹 종료 — 이후 EOF까지 drain만
 		}
 	}
 
@@ -256,6 +261,16 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string, stdout io.Re
 		s.doneCh <- waitResult{err: fmt.Errorf("subagent: done 이후 비정상 종료: %w", waitErr)}
 	default:
 		s.doneCh <- waitResult{done: *done}
+	}
+}
+
+// killGroup은 어댑터 프로세스 그룹 전체를 종료한다 — 어댑터가 만든 자손이
+// 파이프를 잡고 살아남는 것을 막는다. 그룹 시그널 실패에 대비해 직접
+// 프로세스 kill도 병행한다.
+func killGroup(proc *exec.Cmd) {
+	if p := proc.Process; p != nil {
+		syscall.Kill(-p.Pid, syscall.SIGKILL)
+		p.Kill()
 	}
 }
 
