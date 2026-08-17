@@ -42,3 +42,7 @@
 | T5 재리뷰 — Writer 결속 프로젝션(혼합 불가), 오류·취소 경로 경계 보존, rewrite 전체 교체(strict decode) | `core/loop/loop_test.go` (TestModelCancellationKeepsBoundaries, TestSchemaViolatingUsageKeepsBoundaries, TestPreToolRewrite* 계열, TestPreStepRewriteIsFullReplacement, TestPostToolRewriteNonObjectFails…) | T5 | green |
 | T5 재재리뷰 — hook/verdict durable 기록(훅의 ctx 취소에도 유실 0), 검증 후 기록(부분 기록 방지), 지점별 rewrite 대상 검증 | `core/loop/loop_test.go` (TestHookCancellationKeepsVerdictDurable, TestInvalidLaterDecisionPreventsPartialVerdictRecord, TestInvalidRewriteTargetPreventsVerdictRecord) | T5 | green |
 | T5 payload 확정 (2026-08-17 [H] 승인) — 대화·툴 4종 + turn/step 경계 4종 폐쇄, tool/result status 판별, output 객체 정규화, args 정규화 | `contracts/validate/validate_test.go` (확정 유효 7종/위반 8종) + `core/propgen_test.go` (생성기 갱신) + codegen drift 게이트 | T5 | green |
+| FR-ADP-01/02/03 — 어댑터 독립 실행 파일(NDJSON stdio), spawn/send/events/stop 최소 계약, ready·done MUST + 중간 이벤트 정규화 | `seams/subagent/subagent_test.go` (TestNullAdapterNormalization, TestStopPath) + `surfaces/hx/e2e_test.go` (실바이너리 관통) | T7 | green |
+| §5.2 계약 위반 어댑터 거부 (비 NDJSON, raw 누락, 미지 kind, done 없는 종료) + 발신 명령 자체 검증 | `seams/subagent/subagent_test.go` (TestContractViolatingAdapterRejected) | T7 | green |
+| FR-CLI-01/02 — hx run·hx replay(--to), stdout NDJSON/stderr 진단(FR-CLI-06), 재생 결정론·동일 상태 | `surfaces/hx/e2e_test.go` (TestRunReplayEndToEnd — replay 2회 동일, --to prefix) | T7 | green |
+| FR-LOG-10 — 자식 중간 이벤트는 child span에만, 부모 히스토리에는 subagent/done 결과만 (E2E) | `surfaces/hx/e2e_test.go` (부모 Messages = subagent_result 1건 단정) | T7 | green |
