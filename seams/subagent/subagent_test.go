@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -428,12 +429,13 @@ func TestPipesClosedAfterCompletion(t *testing.T) {
 	if _, err := sub.Wait(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sub.stdin.Write([]byte("x")); err == nil {
-		t.Fatal("완료 후 stdin 파이프가 열려 있음 — FD 누수")
+	// EPIPE/EOF가 아니라 실제 Close 상태(os.ErrClosed)임을 단정 —
+	// Close 제거 회귀를 정확히 잡는다.
+	if _, err := sub.stdin.(*os.File).Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("완료 후 stdin이 닫힌 상태가 아님: %v", err)
 	}
-	buf := make([]byte, 1)
-	if _, err := sub.stdoutFile.Read(buf); err == nil {
-		t.Fatal("완료 후 stdout 파이프가 열려 있음 — FD 누수")
+	if _, err := sub.stdoutFile.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("완료 후 stdout이 닫힌 상태가 아님: %v", err)
 	}
 }
 

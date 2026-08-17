@@ -188,7 +188,7 @@ func (s *Subagent) Wait(ctx context.Context) (gen.DonePayload, error) {
 	case r := <-s.doneCh:
 		return r.done, r.err
 	case <-ctx.Done():
-		killGroup(s.proc)
+		s.killGroupGuarded()
 		return gen.DonePayload{}, ctx.Err()
 	}
 }
@@ -234,7 +234,7 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string, stdout io.Re
 	violate := func(err error) {
 		if pumpErr == nil {
 			pumpErr = err
-			killGroup(s.proc) // 위반 시 프로세스 그룹 종료 — 이후 EOF까지 drain만
+			s.killGroupGuarded() // 위반 시 프로세스 그룹 종료 — 이후 EOF까지 drain만
 		}
 	}
 
@@ -314,6 +314,17 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string, stdout io.Re
 		s.doneCh <- waitResult{err: fmt.Errorf("subagent: done 이후 비정상 종료: %w", waitErr)}
 	default:
 		s.doneCh <- waitResult{done: *done}
+	}
+}
+
+// killGroupGuarded는 아직 회수되지 않은 경우에만 그룹에 신호를 보낸다 —
+// reap 이후 재사용된 PID(그룹)에 늦은 취소 신호가 가는 것을 막는다.
+func (s *Subagent) killGroupGuarded() {
+	select {
+	case <-s.exited:
+		// 이미 회수됨 — 재신호 금지
+	default:
+		killGroup(s.proc)
 	}
 }
 
