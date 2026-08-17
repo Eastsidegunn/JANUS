@@ -10,6 +10,7 @@ package policy
 
 import (
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 
@@ -134,9 +135,17 @@ func Evaluate(p Profile, req SpawnRequest) (SandboxConfig, *Denial) {
 		return SandboxConfig{}, &Denial{Reason: fmt.Sprintf(
 			"spawn 깊이 %d가 한도 %d 이상 (FR-ADP-08)", req.Depth, p.Budget.MaxDepth)}
 	}
-	if !workspaceAllowed(p.FSScope, req.Workspace) {
+	// 경로는 POSIX 정규화 후에만 판정한다 — "/workspace/../etc" 류의
+	// 탈출이 문자열 접두사 검사를 통과하면 정책 범위 밖 호스트 경로가
+	// T10에 전달되는 fail-open이 된다. 빈·상대 경로도 거부.
+	if req.Workspace == "" || !path.IsAbs(req.Workspace) {
 		return SandboxConfig{}, &Denial{Reason: fmt.Sprintf(
-			"워크스페이스 %q가 fs 스코프 %v 밖", req.Workspace, p.FSScope)}
+			"워크스페이스 %q — 비어 있지 않은 절대 경로여야 함", req.Workspace)}
+	}
+	workspace := path.Clean(req.Workspace)
+	if !workspaceAllowed(p.FSScope, workspace) {
+		return SandboxConfig{}, &Denial{Reason: fmt.Sprintf(
+			"워크스페이스 %q가 fs 스코프 %v 밖", workspace, p.FSScope)}
 	}
 	allowed := map[string]bool{}
 	for _, d := range p.Egress {
@@ -155,7 +164,7 @@ func Evaluate(p Profile, req SpawnRequest) (SandboxConfig, *Denial) {
 	sort.Strings(denied)
 	return SandboxConfig{
 		ProfileID:    p.ID,
-		Workspace:    req.Workspace,
+		Workspace:    workspace, // 정규화된 경로만 하류(T10)로 전달
 		Egress:       granted,
 		DeniedEgress: denied,
 		Budget:       p.Budget,
@@ -163,12 +172,21 @@ func Evaluate(p Profile, req SpawnRequest) (SandboxConfig, *Denial) {
 	}, nil
 }
 
-// workspaceAllowed는 요청 경로가 스코프 경로와 같거나 그 하위인지 본다.
-// 접두사 문자열 매칭이 아니라 경로 구분자 경계를 지킨다 —
-// "/workspace"가 "/workspace-evil"을 허용하면 안 된다.
+// workspaceAllowed는 정규화된 요청 경로가 스코프 경로와 같거나 그 하위인지
+// 본다. 접두사 문자열 매칭이 아니라 경로 구분자 경계를 지키고
+// ("/workspace"가 "/workspace-evil"을 허용하면 안 된다), 빈 문자열·상대
+// 경로 스코프 엔트리는 아무 권한도 부여하지 않는다 — FSScope [""]가
+// 전체 파일시스템을 여는 fail-open 차단.
 func workspaceAllowed(scope []string, workspace string) bool {
 	for _, s := range scope {
-		if workspace == s || strings.HasPrefix(workspace, strings.TrimSuffix(s, "/")+"/") {
+		if s == "" || !path.IsAbs(s) {
+			continue // 무효 엔트리는 무권한
+		}
+		s = path.Clean(s)
+		if s == "/" {
+			return true // 루트 스코프의 명시적 선언
+		}
+		if workspace == s || strings.HasPrefix(workspace, s+"/") {
 			return true
 		}
 	}

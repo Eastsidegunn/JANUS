@@ -119,15 +119,17 @@ func TestCheckExternalRestrictions(t *testing.T) {
 		{ImportPath: mod + "/seams/store/sqlite", Imports: []string{"modernc.org/sqlite"}},                       // 허용
 		{ImportPath: mod + "/seams/store/sqlite/wal", Imports: []string{"modernc.org/sqlite"}},                   // 하위도 허용
 		{ImportPath: mod + "/contracts/validate", Imports: []string{"github.com/santhosh-tekuri/jsonschema/v6"}}, // 허용
+		{ImportPath: mod + "/core/policy", Imports: []string{"github.com/goccy/go-yaml"}},                        // 허용
 		{ImportPath: mod + "/core/logd", Imports: []string{"modernc.org/sqlite"}},                                // 위반
 		{ImportPath: mod + "/collector", TestImports: []string{"modernc.org/libc"}},                              // 테스트 import도 위반
 		{ImportPath: mod + "/core", Imports: []string{"github.com/santhosh-tekuri/jsonschema/v6"}},               // 위반
-		{ImportPath: mod + "/surfaces/cli", Imports: []string{"fmt"}},                                            // 무제한 외부는 무관
+		{ImportPath: mod + "/surfaces/cli", Imports: []string{"fmt", "github.com/goccy/go-yaml"}},                // fmt 무관, yaml 위반
 	}
 	assertViolations(t, Check(mod, pkgs), []string{
 		"collector → modernc.org/libc (외부 모듈 modernc.org/*는 seams/store/sqlite에서만 import 가능)",
 		"core → github.com/santhosh-tekuri/jsonschema/v6 (외부 모듈 github.com/santhosh-tekuri/jsonschema*는 contracts/validate에서만 import 가능)",
 		"core/logd → modernc.org/sqlite (외부 모듈 modernc.org/*는 seams/store/sqlite에서만 import 가능)",
+		"surfaces/cli → github.com/goccy/go-yaml (외부 모듈 github.com/goccy/go-yaml*는 core/policy에서만 import 가능)",
 	})
 }
 

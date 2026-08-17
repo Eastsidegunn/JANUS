@@ -93,12 +93,42 @@ func TestEvaluateWorkspaceScope(t *testing.T) {
 		{"/workspace-evil", false}, // 경로 경계 — 접두사 문자열 매칭 금지
 		{"/etc", false},
 		{"/", false},
+		// [H] 재리뷰 재현 3종의 영구 회귀 — 경로 탈출은 정규화 후 판정
+		{"/workspace/../etc", false},
+		{"/workspace/sub/../../etc", false},
+		{"", false},                // 빈 경로 거부
+		{"workspace/x", false},     // 상대 경로 거부
+		{"/workspace/./sub", true}, // 정규화 후 스코프 안
 	}
 	for _, c := range cases {
 		_, denial := Evaluate(p, SpawnRequest{Workspace: c.ws, Depth: 0})
 		if (denial == nil) != c.allow {
 			t.Errorf("workspace %q: denial=%v (allow=%v 기대)", c.ws, denial, c.allow)
 		}
+	}
+}
+
+// [H] 재리뷰 재현: 빈 문자열 스코프 엔트리는 아무 권한도 부여하지 않는다.
+func TestEvaluateEmptyScopeEntryGrantsNothing(t *testing.T) {
+	p := Profile{FSScope: []string{""}, Budget: b(1, 1, 5)}
+	if _, denial := Evaluate(p, SpawnRequest{Workspace: "/etc", Depth: 0}); denial == nil {
+		t.Fatal(`FSScope [""]가 /etc를 허용함 — fail-open`)
+	}
+	rel := Profile{FSScope: []string{"workspace"}, Budget: b(1, 1, 5)}
+	if _, denial := Evaluate(rel, SpawnRequest{Workspace: "/workspace", Depth: 0}); denial == nil {
+		t.Fatal("상대 경로 스코프 엔트리가 권한을 부여함")
+	}
+}
+
+// SandboxConfig.Workspace는 정규화된 경로다 — 하류(T10)에 비정규 경로 금지.
+func TestEvaluateReturnsNormalizedWorkspace(t *testing.T) {
+	p := Profile{FSScope: []string{"/workspace"}, Budget: b(1, 1, 5)}
+	cfg, denial := Evaluate(p, SpawnRequest{Workspace: "/workspace/./a/b/../sub", Depth: 0})
+	if denial != nil {
+		t.Fatal(denial)
+	}
+	if cfg.Workspace != "/workspace/a/sub" {
+		t.Fatalf("Workspace = %q (정규화 기대)", cfg.Workspace)
 	}
 }
 
