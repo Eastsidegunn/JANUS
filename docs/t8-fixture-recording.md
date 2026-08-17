@@ -100,16 +100,25 @@ Codex도 같은 번호 체계로 동일 의도의 시나리오를 녹화한다(�
 파일 개수만으로는 T8이 끝나지 않는다. 모델이 툴을 쓰지 않고 텍스트로만
 답해도 파일은 생기기 때문이다. 다음을 모두 만족해야 완료다.
 
-1. **검증 포인트가 실제 NDJSON에 나타난 녹화만** 시나리오 1건으로 센다.
+1. **검증 포인트가 실제 NDJSON에 나타난 녹화만** 1건으로 센다.
    예: 02는 툴 콜 이벤트가 실제로 있어야 하고, 05는 승인 요청 이벤트가,
    08은 중단으로 끊긴 스트림 꼬리가 실제로 있어야 한다. 없으면 프롬프트를
    조정해 재녹화한다(그 시도의 meta에 "검증 포인트 미출현 — 재녹화" 기록).
-2. **분류별 최소 1건**을 전체 픽스처(두 도구 합산)에서 충족한다:
-   정상(툴 없음), 다중 툴, 승인 거부, 툴/명령 오류, 중단.
-3. **meta만 있고 녹화가 없는 skip은 15건에 포함하지 않는다.**
-4. 각 meta에 **해당 녹화가 어느 분류인지와 검증 포인트 확인 결과**를 적는다
-   (§4). 확인은 원본 NDJSON에서 직접 한다 — 예:
-   `grep -c '"type":"tool_use"' NN-슬러그.ndjson` 같은 형태로 세고, 사용한
+2. **meta만 있고 녹화가 없는 skip은 15건에 포함하지 않는다.**
+3. 각 meta에 아래 두 축을 **분리해서** 적는다 (§4):
+   - `scenario:` — 무엇을 녹화했는가. §3 표의 슬러그
+     (`simple-text`, `single-tool`, `multi-tool`, `edit-file`,
+     `approval-denied`, `tool-error`, `command-fail`, `interrupted`,
+     `multi-step`, `empty-ish`).
+   - `coverage:` — TASKS.md의 요구 분류 중 이 녹화가 커버하는 것.
+     `normal`(툴 없는 최소 세션) / `multi-tool` / `approval-denied` /
+     `error` / `interrupted` 중 **0개 이상**. 예: `single-tool`과
+     `edit-file`은 시나리오로서 필요하지만 요구 분류에는 해당이 없어
+     `coverage:` 가 비어 있을 수 있다(그래도 15건에는 포함된다).
+4. **`coverage:` 5종은 전체 픽스처(두 도구 합산)에서 각각 최소 1건** 있어야
+   한다: `normal`, `multi-tool`, `approval-denied`, `error`, `interrupted`.
+5. 검증 포인트 확인은 원본 NDJSON에서 직접 한다 — 예:
+   `grep -c '"type":"tool_use"' NN-슬러그.ndjson` 형태로 세고, 사용한
    확인 커맨드와 결과를 그대로 meta에 남긴다.
 
 위 규칙을 만족하는 녹화가 **합계 15개 이상**일 때 T8 완료다.
@@ -123,9 +132,27 @@ Codex도 같은 번호 체계로 동일 의도의 시나리오를 녹화한다(�
 - **CLI exit code**
 - **중단 방법** (08번: Ctrl-C 시점/timeout 값)
 - **stderr 처리 방식** (별도 파일 경로)
-- **분류** (정상 / 다중 툴 / 승인 거부 / 오류 / 중단 중 하나 — §3 계수 규칙)
+- **`scenario:`** — §3 표의 슬러그 (무엇을 녹화했는가)
+- **`coverage:`** — 커버하는 요구 분류 0개 이상
+  (`normal`/`multi-tool`/`approval-denied`/`error`/`interrupted`)
 - **검증 포인트 확인 결과**: 원본 NDJSON에서 실제로 확인한 커맨드와 그 출력
   (예: `grep -c '"type":"tool_use"' 02-single-tool.ndjson` → `3`)
+
+meta 예시:
+
+```
+tool: claude-code 2.1.233
+command: claude -p "이 디렉토리의 파일 목록을 보여줘" --output-format stream-json --verbose --safe-mode --no-session-persistence --permission-mode manual
+date: 2026-08-18
+prompt: 이 디렉토리의 파일 목록을 보여줘
+workspace-initial: a.txt("alpha"), b.txt("beta")
+exit-code: 0
+interrupt: 해당 없음
+stderr: 02-single-tool.stderr.txt (별도 파일)
+scenario: single-tool
+coverage:            # 요구 분류 해당 없음 — 15건 계수에는 포함
+verify: grep -c '"type":"tool_use"' 02-single-tool.ndjson → 1
+```
 
 ## 5. 커밋 전 비밀 검사 (필수, fail-closed)
 
@@ -151,6 +178,32 @@ tools/check-fixture-secrets.sh "$CAPTURE"   # 복사 전 캡처 루트에서 먼
 grep -rn "$HOME" contracts/fixtures/ | head
 ```
 
+## 5.5. README.md 작성 (필수)
+
+캡처 루트에 `README.md`를 만든다 — 커밋 전 매니페스트 검사가 존재를 확인한다.
+
+```markdown
+# T8 픽스처 녹화 목록
+
+녹화일: 2026-08-__ / 도구: claude-code 2.1.233, codex 0.147.0
+
+| 파일 | scenario | coverage | 검증 포인트 확인 |
+|---|---|---|---|
+| claude-code/01-simple-text.ndjson | simple-text | normal | tool_use 0건 확인 |
+| claude-code/02-single-tool.ndjson | single-tool | — | tool_use 1건 |
+| … | | | |
+
+## coverage 충족 (§3 규칙 4)
+- normal: claude-code/01
+- multi-tool: claude-code/03
+- approval-denied: claude-code/05
+- error: claude-code/06, codex/06
+- interrupted: claude-code/08
+
+## meta-only skip (녹화 없음 — 15건 미포함)
+- codex/05-approval-denied.meta.txt — 사유: (도구 특성상 승인 이벤트 없음 등)
+```
+
 ## 6. 커밋
 
 복사 대상이 **비어 있는지 fail-closed로 먼저 확인**한다 — 이전 시도의
@@ -165,13 +218,15 @@ if [ -e contracts/fixtures ] && [ -n "$(ls -A contracts/fixtures)" ]; then
   exit 1
 fi
 
-# 2) 캡처 루트에서 먼저 비밀 검사 (exit 0일 때만 진행)
+# 2) 캡처 루트에서 비밀 검사 + 매니페스트 검사 (둘 다 exit 0일 때만 진행)
 tools/check-fixture-secrets.sh "$CAPTURE" || exit 1
+tools/check-fixture-manifest.sh "$CAPTURE" 15 || exit 1
 
 # 3) 복사 후 대상에서도 재검사
 mkdir -p contracts/fixtures
-cp -R "$CAPTURE/claude-code" "$CAPTURE/codex" contracts/fixtures/
+cp -R "$CAPTURE"/. contracts/fixtures/
 tools/check-fixture-secrets.sh contracts/fixtures || exit 1
+tools/check-fixture-manifest.sh contracts/fixtures 15 || exit 1
 
 # 4) 복사 목록이 캡처와 일치하는지 대조 (누락·stale 검출)
 diff -r "$CAPTURE" contracts/fixtures || { echo '캡처와 커밋 대상이 다름' >&2; exit 1; }
