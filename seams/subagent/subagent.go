@@ -11,6 +11,7 @@ package subagent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -112,6 +113,7 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 		Depth:       spec.Depth,
 	}); err != nil {
 		proc.Process.Kill()
+		proc.Wait() // 펌프가 시작되지 않았으므로 여기서 reap
 		return nil, err
 	}
 	go s.pump(w, traceID, parentSpan, stdout)
@@ -128,11 +130,12 @@ func (s *Subagent) Stop(reason gen.StopPayloadReason) error {
 	return s.sendCommand(gen.CommandCmdStop, gen.StopPayload{Reason: reason})
 }
 
-// Wait는 subagent/done까지 기다려 최종 결과를 반환한다.
+// Wait는 subagent/done까지 기다려 최종 결과를 반환한다. ctx가 먼저
+// 끝나면 프로세스를 kill하고 즉시 반환한다 — 회수(reap)는 펌프 goroutine이
+// EOF 후 정확히 한 번 수행하므로 zombie가 남지 않는다.
 func (s *Subagent) Wait(ctx context.Context) (gen.DonePayload, error) {
 	select {
 	case r := <-s.doneCh:
-		s.proc.Wait()
 		return r.done, r.err
 	case <-ctx.Done():
 		s.proc.Process.Kill()
@@ -159,24 +162,61 @@ func (s *Subagent) sendCommand(cmd gen.CommandCmd, payload any) error {
 }
 
 // pump는 어댑터 stdout의 NDJSON을 검증·정규화해 writer로 흘린다.
-// 검증 실패는 해당 어댑터의 종료 사유다 — 계약을 어기는 어댑터는 등록될 수
-// 없다(§5.2)의 런타임 판이다.
+//
+// §5.2 시퀀스 강제 (FR-ADP-03): 첫 이벤트는 반드시 subagent/ready이고,
+// ready 중복·done 중복·done 이후의 어떤 출력도 위반이다. 검증·시퀀스·
+// writer 오류는 프로세스 종료(kill) 사유다 — 계약을 어기는 어댑터는
+// 등록될 수 없다(§5.2)의 런타임 판.
+//
+// 프로세스 수명 주기: kill 여부와 무관하게 stdout을 EOF까지 drain한 뒤
+// 이 goroutine이 proc.Wait()를 정확히 한 번 수행한다(단일 reap).
+// exit 오류는 결과에 보존된다.
 func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string, stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+
+	var (
+		pumpErr  error
+		sawReady bool
+		done     *gen.DonePayload
+	)
+	violate := func(err error) {
+		if pumpErr == nil {
+			pumpErr = err
+			s.proc.Process.Kill() // 위반 시 프로세스 종료 — 이후 EOF까지 drain만
+		}
+	}
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		if len(line) == 0 {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		if pumpErr != nil {
+			continue // kill 후 잔여 출력 drain
+		}
+		if done != nil {
+			violate(fmt.Errorf("subagent: done 이후 출력 — §5.2 시퀀스 위반"))
 			continue
 		}
 		if err := s.vals.ValidateEvent(line); err != nil {
-			s.fail(fmt.Errorf("subagent: 어댑터 이벤트가 §5.2 위반: %w", err))
-			return
+			violate(fmt.Errorf("subagent: 어댑터 이벤트가 §5.2 위반: %w", err))
+			continue
 		}
 		var ev wireEvent
 		if err := json.Unmarshal(line, &ev); err != nil {
-			s.fail(err)
-			return
+			violate(err)
+			continue
+		}
+		if ev.Kind == gen.KindSubagentReady {
+			if sawReady {
+				violate(fmt.Errorf("subagent: ready 중복 — §5.2 시퀀스 위반"))
+				continue
+			}
+			sawReady = true
+		} else if !sawReady {
+			violate(fmt.Errorf("subagent: ready 전에 %s 수신 — 첫 이벤트는 subagent/ready여야 함 (FR-ADP-03)", ev.Kind))
+			continue
 		}
 		rec := gen.EventRecord{
 			Ts: now(), TraceID: traceID, SpanID: s.childSpn, ParentSpanID: &parentSpan,
@@ -189,28 +229,34 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string, stdout io.Re
 			}
 		}
 		if _, err := w.Submit(context.Background(), rec); err != nil {
-			s.fail(fmt.Errorf("subagent: 이벤트 기록: %w", err))
-			return
+			violate(fmt.Errorf("subagent: 이벤트 기록: %w", err))
+			continue
 		}
 		if ev.Kind == gen.KindSubagentDone {
-			var done gen.DonePayload
-			if err := json.Unmarshal(ev.Payload, &done); err != nil {
-				s.fail(err)
-				return
+			var d gen.DonePayload
+			if err := json.Unmarshal(ev.Payload, &d); err != nil {
+				violate(err)
+				continue
 			}
-			s.doneCh <- waitResult{done: done}
-			return
+			done = &d
+			// return하지 않는다 — done 이후 출력 감시와 EOF drain을 계속한다
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		s.fail(err)
-		return
-	}
-	s.fail(fmt.Errorf("subagent: 어댑터가 subagent/done 없이 종료함 (§5.2 위반)"))
-}
+	scanErr := scanner.Err()
+	waitErr := s.proc.Wait() // 단일 reap — stdout EOF 이후 정확히 한 번
 
-func (s *Subagent) fail(err error) {
-	s.doneCh <- waitResult{err: err}
+	switch {
+	case pumpErr != nil:
+		s.doneCh <- waitResult{err: pumpErr}
+	case scanErr != nil:
+		s.doneCh <- waitResult{err: scanErr}
+	case done == nil:
+		s.doneCh <- waitResult{err: fmt.Errorf("subagent: 어댑터가 subagent/done 없이 종료함 (§5.2 위반, exit: %v)", waitErr)}
+	case waitErr != nil:
+		s.doneCh <- waitResult{err: fmt.Errorf("subagent: done 이후 비정상 종료: %w", waitErr)}
+	default:
+		s.doneCh <- waitResult{done: *done}
+	}
 }
 
 func now() int64 { return time.Now().UnixMilli() }

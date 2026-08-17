@@ -157,12 +157,12 @@ func (w *Writer) awaitAck(sub submission) (int64, error) {
 	}
 }
 
-// submitInitBatch는 빈 로그에만 허용되는 배타적 초기화 배치다(포크 경로).
+// InitBatch는 빈 로그에만 허용되는 배타적 초기화 배치다(포크·세션 시작 경로).
 // 공백 확인과 배치 기록이 writer 루프 안에서 직렬화되므로, 목적지에
 // 이벤트가 하나라도 커밋됐거나 배치보다 먼저 admission된 제출이 처리되면
 // ErrDestinationNotEmpty로 거부된다. 배치는 전건 사전 검증(redaction·
 // contracts) 후에만 기록을 시작한다 — 검증 실패 시 목적지는 계속 비어 있다.
-func (w *Writer) submitInitBatch(ctx context.Context, events []gen.EventRecord) error {
+func (w *Writer) InitBatch(ctx context.Context, events []gen.EventRecord) error {
 	if len(events) == 0 {
 		return fmt.Errorf("logd: 빈 초기화 배치")
 	}

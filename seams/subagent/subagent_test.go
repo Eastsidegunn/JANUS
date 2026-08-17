@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/core/logd"
@@ -132,6 +133,124 @@ printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'`,
 				t.Fatal("계약 위반 어댑터가 정상 완료로 처리됨")
 			}
 		})
+	}
+}
+
+// T7 재리뷰 차단 1의 회귀: §5.2 시퀀스 위반은 전부 거부된다 (FR-ADP-03).
+func TestSequenceViolationsRejected(t *testing.T) {
+	cases := map[string]string{
+		"ready 없는 done": `read line
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'`,
+		"ready 중복": `read line
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'`,
+		"done 이후 출력": `read line
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/message","payload":{"text":"유령"},"raw":""}'`,
+		"ready 전 중간 이벤트": `read line
+printf '%s\n' '{"v":1,"kind":"subagent/message","payload":{"text":"x"},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'`,
+	}
+	for name, script := range cases {
+		t.Run(name, func(t *testing.T) {
+			store := &FakeStore{}
+			w, err := logd.NewWriter(context.Background(), store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Close()
+			sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1,
+				spawnSpec([]string{"/bin/sh", "-c", script}, "지시"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sub.Wait(context.Background()); err == nil {
+				t.Fatal("시퀀스 위반 어댑터가 정상 완료로 처리됨")
+			}
+		})
+	}
+}
+
+// T7 재리뷰 차단 2의 회귀 (1): done 이후 프로세스가 늘어져도 Wait(ctx)는
+// deadline을 지킨다 — kill 후 즉시 반환, reap은 펌프가 수행.
+func TestWaitHonorsContextAfterDone(t *testing.T) {
+	script := `read line
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'
+sleep 5`
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1,
+		spawnSpec([]string{"/bin/sh", "-c", script}, "지시"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, waitErr := sub.Wait(ctx)
+	elapsed := time.Since(start)
+	if waitErr == nil {
+		t.Fatal("deadline이 무시되고 성공 반환됨")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("Wait가 %v 소요 — deadline(100ms) 무시", elapsed)
+	}
+}
+
+// T7 재리뷰 차단 2의 회귀 (2): 검증 실패 후 프로세스가 늘어져도 kill되어
+// 빠르게 오류가 반환된다 (fail 후 hang 없음).
+func TestInvalidEventKillsLingeringProcess(t *testing.T) {
+	script := `read line
+printf 'not json\n'
+sleep 5`
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1,
+		spawnSpec([]string{"/bin/sh", "-c", script}, "지시"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, waitErr := sub.Wait(context.Background())
+	if waitErr == nil {
+		t.Fatal("검증 실패가 성공으로 처리됨")
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("kill이 동작하지 않아 %v 소요", time.Since(start))
+	}
+}
+
+// T7 재리뷰 차단 2의 회귀 (3): done 이후 비정상 exit 코드는 보존된다.
+func TestAbnormalExitAfterDonePreserved(t *testing.T) {
+	script := `read line
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'
+exit 3`
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1,
+		spawnSpec([]string{"/bin/sh", "-c", script}, "지시"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sub.Wait(context.Background()); err == nil || !strings.Contains(err.Error(), "비정상 종료") {
+		t.Fatalf("exit 오류가 보존되지 않음: %v", err)
 	}
 }
 

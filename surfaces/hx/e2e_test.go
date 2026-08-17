@@ -134,6 +134,82 @@ func TestRunReplayEndToEnd(t *testing.T) {
 	}
 }
 
+// T7 재리뷰 차단 3의 회귀 (1): 두 번째 run은 기존 로그 불변으로 거부된다.
+func TestRunRefusesExistingSession(t *testing.T) {
+	hx, adapter := buildBinaries(t)
+	session := filepath.Join(t.TempDir(), "s.db")
+
+	first := exec.Command(hx, "run", "--session", session, "--adapter", adapter, "첫 실행")
+	if out, err := first.CombinedOutput(); err != nil {
+		t.Fatalf("첫 run 실패: %v\n%s", err, out)
+	}
+	ctx := context.Background()
+	log, err := sqlite.Open(ctx, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := log.Reader.ReadFrom(ctx, 1)
+	log.Close()
+
+	second := exec.Command(hx, "run", "--session", session, "--adapter", adapter, "두 번째 실행")
+	out, err := second.CombinedOutput()
+	if err == nil {
+		t.Fatalf("두 번째 run이 성공함 — 세션 오염 경로:\n%s", out)
+	}
+	if !strings.Contains(string(out), "이미 로그가 있음") {
+		t.Fatalf("거부 사유 이상: %s", out)
+	}
+	log2, err := sqlite.Open(ctx, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log2.Close()
+	after, _ := log2.Reader.ReadFrom(ctx, 1)
+	if len(before) != len(after) {
+		t.Fatalf("거부된 run이 로그를 변형함 (%d → %d건)", len(before), len(after))
+	}
+	// 재생도 여전히 단일 trace로 성공한다
+	if _, err := logd.Replay(after); err != nil {
+		t.Fatalf("거부 후 재생 불가: %v", err)
+	}
+}
+
+// T7 재리뷰 차단 3의 회귀 (2): 손상 로그(복수 trace)의 replay는 stdout에
+// 아무것도 내보내지 않고 실패한다 — 검증이 출력보다 먼저다.
+func TestReplayCorruptedLogEmitsNothing(t *testing.T) {
+	hx, _ := buildBinaries(t)
+	session := filepath.Join(t.TempDir(), "corrupt.db")
+	ctx := context.Background()
+	log, err := sqlite.Open(ctx, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 서로 다른 trace_id 두 건 — writer는 레코드 단위 검증만 하므로 기록은
+	// 되지만 세션 재생은 실패해야 하는 손상 로그다
+	for _, trace := range []string{strings.Repeat("a", 32), strings.Repeat("b", 32)} {
+		if _, err := log.Writer.Submit(ctx, gen.EventRecord{
+			Ts: 1, TraceID: trace, SpanID: strings.Repeat("c", 16),
+			Kind: gen.KindSessionStart, Actor: "parent", Payload: []byte(`{}`),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	log.Close()
+
+	cmd := exec.Command(hx, "replay", "--session", session)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err == nil {
+		t.Fatal("손상 로그 replay가 성공함")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("실패하는 replay가 stdout에 %d바이트를 흘림:\n%s", stdout.Len(), stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "재생") {
+		t.Fatalf("stderr 진단 이상: %s", stderr.String())
+	}
+}
+
 func runReplay(t *testing.T, hx, session string, extra []string) (stdout, stderr string) {
 	t.Helper()
 	args := append([]string{"replay", "--session", session}, extra...)
