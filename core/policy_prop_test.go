@@ -1,22 +1,22 @@
-//go:build xfail
-
 package core
 
-// FR-POL-03 병합 협소성 속성 테스트 (T2: 구현 전 — 실패가 기대 상태).
-// T6이 mergeProfilesFn을 실제 구현으로 배선하면 green으로 전환되며, 그 시점에
-// xfail 태그를 제거해 본 스위트로 편입한다. 반복 횟수 축소는 금지(CLAUDE.md).
+// FR-POL-03 병합 협소성 속성 테스트.
+// T2에서 xfail(구현 전 실패 기대)로 커밋됐고, T6에서 core/policy.Merge가
+// 배선되며 본 스위트로 편입됐다. 반복 횟수 축소는 금지(CLAUDE.md).
 
 import (
 	"math/rand"
 	"testing"
+
+	"github.com/Eastsidegunn/JANUS/core/policy"
 )
 
 const mergePropIterations = 300
 
-// mergeProfilesFn은 프로파일 오버레이 병합이다. T6에서 배선된다.
+// mergeProfilesFn은 프로파일 오버레이 병합이다. T6에서 배선됐다.
 // 불변식: 병합은 강화만 — allow 리스트는 교집합, 예산은 최솟값,
 // 어떤 조합도 상위 프로파일보다 넓은 권한을 만들 수 없다.
-var mergeProfilesFn func(base, overlay Profile) Profile
+var mergeProfilesFn = policy.Merge
 
 func TestPropertyProfileMergeOnlyNarrows(t *testing.T) {
 	if mergeProfilesFn == nil {
@@ -59,7 +59,7 @@ func assertNarrower(t *testing.T, seed int, label string, narrow, wide Profile) 
 	}
 	// 자동 승인은 양쪽 모두 auto일 때만 유지될 수 있다 — narrow가 auto인데
 	// wide가 manual이면 오버레이가 승인 게이트를 풀어버린 것이다.
-	if narrow.Approval == "auto" && wide.Approval != "auto" {
+	if narrow.Approval == policy.ApprovalAuto && wide.Approval != policy.ApprovalAuto {
 		t.Fatalf("seed %d %s: 승인 모드가 완화됨 (manual → auto)", seed, label)
 	}
 }
