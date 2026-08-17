@@ -1,0 +1,341 @@
+// Package subagent는 서브에이전트 seam이다: 어댑터 프로세스를 호스트 측에서
+// 실행하고(FR-ADP-10) §5.2 NDJSON 와이어 프로토콜로 대화하며, 어댑터의
+// 정규화 이벤트를 검증해 child span으로 세션 로그에 기록한다.
+//
+// 어댑터 계약은 spawn / send / events / stop의 최소 집합이다 (FR-ADP-02):
+// Spawn이 프로세스를 띄워 task를 보내고, Send가 추가 입력을, Stop이 중단을
+// 보내며, 이벤트 스트림은 내부 펌프가 writer로 흘린다. 자식의 중간 이벤트는
+// 전부 child span에 기록되지만 부모 모델 히스토리에는 subagent/done의 최종
+// 결과만 진입한다(FR-LOG-10 — logd.Replay의 프로젝션 규칙).
+package subagent
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"syscall"
+	"time"
+
+	"github.com/Eastsidegunn/JANUS/contracts/gen"
+	"github.com/Eastsidegunn/JANUS/contracts/validate"
+	"github.com/Eastsidegunn/JANUS/core/logd"
+)
+
+// Spec은 spawn 명세다.
+type Spec struct {
+	Adapter     string   // 어댑터 이름 — actor "subagent:{adapter}:{n}" 구성
+	Command     []string // 어댑터 실행 파일과 인자 (호스트 측 실행)
+	Instruction string
+	Workspace   string
+	Budget      gen.Budget // 정책 병합이 끝난 실효 예산 (§5.2)
+	Depth       int64      // 현재 spawn 깊이
+}
+
+// Subagent는 실행 중인 어댑터 프로세스 핸들이다.
+type Subagent struct {
+	actor      string
+	stdin      io.WriteCloser
+	stdoutFile *os.File
+	proc       *exec.Cmd
+	vals       *validate.Validators
+	doneCh     chan waitResult
+	childSpn   string
+
+	// exited는 reaper가 프로세스 종료를 관측하면 닫힌다 — 종료 관측은
+	// stdout EOF에 종속되지 않는다. reaper는 리더 종료 즉시 잔여 프로세스
+	// 그룹을 종료하므로 파이프의 모든 writer가 사라져 EOF가 곧바로 오고,
+	// pump는 임의 유예 없이 진짜 EOF까지 전량 drain한다.
+	exited  chan struct{}
+	exitErr error // exited 닫기 전에만 기록
+}
+
+type waitResult struct {
+	done gen.DonePayload
+	err  error
+}
+
+// wireEvent는 어댑터 → 코어 NDJSON 한 줄이다 (§5.2 event).
+type wireEvent struct {
+	V       int64           `json:"v"`
+	Kind    gen.Kind        `json:"kind"`
+	Payload json.RawMessage `json:"payload"`
+	Raw     string          `json:"raw"`
+}
+
+// Spawn은 어댑터를 실행하고 task를 보낸 뒤, 이벤트 펌프를 시작한다.
+// n은 세션 내 서브에이전트 순번이다. 모든 이벤트는 새 child span으로
+// (parent_span_id = parentSpan) writer를 경유해 기록된다.
+func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n int, spec Spec) (*Subagent, error) {
+	vals, err := validate.New()
+	if err != nil {
+		return nil, err
+	}
+	childSpan := logd.NewSpanID()
+	actor := fmt.Sprintf("subagent:%s:%d", spec.Adapter, n)
+
+	// spawn 이벤트 — 실행 환경 메타데이터의 진입점 (FR-SBX-06은 T10에서 확장)
+	spawnPayload, err := json.Marshal(map[string]any{
+		"adapter":     spec.Adapter,
+		"instruction": spec.Instruction,
+		"depth":       spec.Depth,
+		"budget":      spec.Budget,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.Submit(ctx, gen.EventRecord{
+		Ts: now(), TraceID: traceID, SpanID: childSpan, ParentSpanID: &parentSpan,
+		Kind: gen.KindSubagentSpawn, Actor: "parent", Payload: spawnPayload,
+	}); err != nil {
+		return nil, fmt.Errorf("subagent: spawn 기록: %w", err)
+	}
+
+	if len(spec.Command) == 0 {
+		return nil, fmt.Errorf("subagent: 어댑터 명령이 비어 있음")
+	}
+	// exec.CommandContext가 아니라 exec.Command를 쓴다: Cmd.Wait를
+	// 호출하지 않는 이 설계에서 CommandContext의 watchCtx goroutine은
+	// 회수되지 못하고 누적된다(재재재리뷰 검출). context 감시·그룹 kill·
+	// 파이프 정리는 전부 이 패키지가 직접 소유한다.
+	proc := exec.Command(spec.Command[0], spec.Command[1:]...)
+	// 어댑터를 자체 프로세스 그룹으로 실행한다 — kill 시 어댑터의 자손까지
+	// 함께 종료해야 고아 자손이 stdout 파이프를 잡고 EOF를 지연시키는
+	// (= drain·reap이 늘어지는) 경로가 없다.
+	proc.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdin, err := proc.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := proc.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdoutFile, ok := stdout.(*os.File)
+	if !ok {
+		return nil, fmt.Errorf("subagent: stdout 파이프가 *os.File이 아님 (%T)", stdout)
+	}
+	proc.Stderr = nil // 진단은 v0.1에서 버린다 — 수집은 collector(T11)의 몫
+	if err := proc.Start(); err != nil {
+		return nil, fmt.Errorf("subagent: 어댑터 실행: %w", err)
+	}
+
+	s := &Subagent{
+		actor: actor, stdin: stdin, stdoutFile: stdoutFile, proc: proc, vals: vals,
+		doneCh: make(chan waitResult, 1), childSpn: childSpan,
+		exited: make(chan struct{}),
+	}
+	// reaper: 프로세스 종료를 stdout과 독립적으로 관측하고 정확히 한 번
+	// 회수한다(단일 reap — Cmd.Wait는 사용하지 않는다). 리더가 종료되면
+	// 잔여 프로세스 그룹을 즉시 종료한다: 파이프의 모든 writer가 사라져
+	// EOF가 곧바로 오므로 pump는 커널 버퍼를 유실 없이 진짜 EOF까지 읽고,
+	// done 이후 지연 출력을 만들 프로세스 자체가 남지 않는다 —
+	// 임의 유예 기반 마감(fail-open)이 아니다.
+	go func() {
+		ps, werr := proc.Process.Wait()
+		switch {
+		case werr != nil:
+			s.exitErr = werr
+		case !ps.Success():
+			s.exitErr = fmt.Errorf("exit: %s", ps.String())
+		}
+		killGroup(proc)
+		close(s.exited)
+	}()
+	// context 감시: exec.Command 전환으로 취소 연결도 직접 소유 —
+	// 취소는 항상 그룹 kill이다(리더만 죽여 자손이 남는 경로 없음).
+	go func() {
+		select {
+		case <-ctx.Done():
+			killGroup(proc)
+		case <-s.exited:
+		}
+	}()
+	if err := s.sendCommand(gen.CommandCmdTask, gen.TaskPayload{
+		Instruction: spec.Instruction,
+		Workspace:   spec.Workspace,
+		Budget:      spec.Budget,
+		Depth:       spec.Depth,
+	}); err != nil {
+		killGroup(proc) // 회수는 reaper goroutine이 수행
+		stdin.Close()
+		stdoutFile.Close()
+		return nil, err
+	}
+	go s.pump(w, traceID, parentSpan, stdout)
+	return s, nil
+}
+
+// Send는 추가 입력을 어댑터에 전달한다 (§5.2 message).
+func (s *Subagent) Send(text string) error {
+	return s.sendCommand(gen.CommandCmdMessage, gen.MessagePayload{Text: text})
+}
+
+// Stop은 중단을 요청한다 (§5.2 stop). 어댑터는 done(stopped)으로 응답해야 한다.
+func (s *Subagent) Stop(reason gen.StopPayloadReason) error {
+	return s.sendCommand(gen.CommandCmdStop, gen.StopPayload{Reason: reason})
+}
+
+// Wait는 subagent/done까지 기다려 최종 결과를 반환한다. ctx가 먼저
+// 끝나면 프로세스 그룹을 kill하고 즉시 반환한다 — 회수(reap)는 reaper
+// goroutine이 정확히 한 번 수행하므로 zombie가 남지 않는다.
+func (s *Subagent) Wait(ctx context.Context) (gen.DonePayload, error) {
+	select {
+	case r := <-s.doneCh:
+		return r.done, r.err
+	case <-ctx.Done():
+		s.killGroupGuarded()
+		return gen.DonePayload{}, ctx.Err()
+	}
+}
+
+// sendCommand는 코어 → 어댑터 명령을 자체 검증(ValidateCommand) 후 보낸다 —
+// 코어가 계약 위반 명령을 만들면 어댑터에 도달하기 전에 실패한다.
+func (s *Subagent) sendCommand(cmd gen.CommandCmd, payload any) error {
+	p, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	line, err := json.Marshal(gen.Command{V: 1, Cmd: cmd, Payload: p})
+	if err != nil {
+		return err
+	}
+	if err := s.vals.ValidateCommand(line); err != nil {
+		return fmt.Errorf("subagent: 발신 명령이 계약 위반: %w", err)
+	}
+	_, err = s.stdin.Write(append(line, '\n'))
+	return err
+}
+
+// pump는 어댑터 stdout의 NDJSON을 검증·정규화해 writer로 흘린다.
+//
+// §5.2 시퀀스 강제 (FR-ADP-03): 첫 이벤트는 반드시 subagent/ready이고,
+// ready 중복·done 중복·done 이후의 어떤 출력도 위반이다. 검증·시퀀스·
+// writer 오류는 프로세스 종료(kill) 사유다 — 계약을 어기는 어댑터는
+// 등록될 수 없다(§5.2)의 런타임 판.
+//
+// 프로세스 수명 주기: 종료 관측·회수는 reaper goroutine의 몫이다. 리더
+// 종료 시 reaper가 잔여 그룹을 즉시 죽이므로 EOF는 항상 곧 도착하고,
+// pump는 진짜 EOF까지 전량 drain한 뒤 결과를 확정하고 부모 측 파이프를
+// 닫는다. exit 오류는 결과에 보존된다.
+func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string, stdout io.Reader) {
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+
+	var (
+		pumpErr  error
+		sawReady bool
+		done     *gen.DonePayload
+	)
+	violate := func(err error) {
+		if pumpErr == nil {
+			pumpErr = err
+			s.killGroupGuarded() // 위반 시 프로세스 그룹 종료 — 이후 EOF까지 drain만
+		}
+	}
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if pumpErr != nil {
+			continue // kill 후 잔여 출력 drain
+		}
+		if len(bytes.TrimSpace(line)) == 0 {
+			// "모든 메시지는 한 줄 JSON"(§5.2) — 공백 줄은 상태와 무관하게
+			// 위반이다 (post-done 공백이 시퀀스 검사를 우회하면 안 된다).
+			violate(fmt.Errorf("subagent: 공백 줄 출력 — §5.2 위반"))
+			continue
+		}
+		if done != nil {
+			violate(fmt.Errorf("subagent: done 이후 출력 — §5.2 시퀀스 위반"))
+			continue
+		}
+		if err := s.vals.ValidateEvent(line); err != nil {
+			violate(fmt.Errorf("subagent: 어댑터 이벤트가 §5.2 위반: %w", err))
+			continue
+		}
+		var ev wireEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			violate(err)
+			continue
+		}
+		if ev.Kind == gen.KindSubagentReady {
+			if sawReady {
+				violate(fmt.Errorf("subagent: ready 중복 — §5.2 시퀀스 위반"))
+				continue
+			}
+			sawReady = true
+		} else if !sawReady {
+			violate(fmt.Errorf("subagent: ready 전에 %s 수신 — 첫 이벤트는 subagent/ready여야 함 (FR-ADP-03)", ev.Kind))
+			continue
+		}
+		rec := gen.EventRecord{
+			Ts: now(), TraceID: traceID, SpanID: s.childSpn, ParentSpanID: &parentSpan,
+			Kind: ev.Kind, Actor: s.actor, Payload: ev.Payload, Raw: &ev.Raw,
+		}
+		if ev.Kind == gen.KindSubagentUsage {
+			var u gen.UsagePayload
+			if err := json.Unmarshal(ev.Payload, &u); err == nil {
+				rec.UsageIn, rec.UsageOut = &u.InputTokens, &u.OutputTokens
+			}
+		}
+		if _, err := w.Submit(context.Background(), rec); err != nil {
+			violate(fmt.Errorf("subagent: 이벤트 기록: %w", err))
+			continue
+		}
+		if ev.Kind == gen.KindSubagentDone {
+			var d gen.DonePayload
+			if err := json.Unmarshal(ev.Payload, &d); err != nil {
+				violate(err)
+				continue
+			}
+			done = &d
+			// return하지 않는다 — done 이후 출력 감시와 EOF drain을 계속한다
+		}
+	}
+	scanErr := scanner.Err()
+	<-s.exited // 종료 상태는 reaper가 관측 — EOF 비종속
+	waitErr := s.exitErr
+	// 결과 확정 전에 부모 측 파이프를 닫는다 — FD 누수 방지
+	s.stdin.Close()
+	s.stdoutFile.Close()
+
+	switch {
+	case pumpErr != nil:
+		s.doneCh <- waitResult{err: pumpErr}
+	case scanErr != nil:
+		s.doneCh <- waitResult{err: scanErr}
+	case done == nil:
+		s.doneCh <- waitResult{err: fmt.Errorf("subagent: 어댑터가 subagent/done 없이 종료함 (§5.2 위반, exit: %v)", waitErr)}
+	case waitErr != nil:
+		s.doneCh <- waitResult{err: fmt.Errorf("subagent: done 이후 비정상 종료: %w", waitErr)}
+	default:
+		s.doneCh <- waitResult{done: *done}
+	}
+}
+
+// killGroupGuarded는 아직 회수되지 않은 경우에만 그룹에 신호를 보낸다 —
+// reap 이후 재사용된 PID(그룹)에 늦은 취소 신호가 가는 것을 막는다.
+func (s *Subagent) killGroupGuarded() {
+	select {
+	case <-s.exited:
+		// 이미 회수됨 — 재신호 금지
+	default:
+		killGroup(s.proc)
+	}
+}
+
+// killGroup은 어댑터 프로세스 그룹 전체를 종료한다 — 어댑터가 만든 자손이
+// 파이프를 잡고 살아남는 것을 막는다. 그룹 시그널 실패에 대비해 직접
+// 프로세스 kill도 병행한다.
+func killGroup(proc *exec.Cmd) {
+	if p := proc.Process; p != nil {
+		syscall.Kill(-p.Pid, syscall.SIGKILL)
+		p.Kill()
+	}
+}
+
+func now() int64 { return time.Now().UnixMilli() }

@@ -76,7 +76,7 @@ func Fork(ctx context.Context, src Reader, atSeq int64, newTraceID string, dst *
 		e.TraceID = newTraceID
 		batch = append(batch, e)
 	}
-	if err := dst.submitInitBatch(ctx, batch); err != nil {
+	if err := dst.InitBatch(ctx, batch); err != nil {
 		return fmt.Errorf("logd: 포크 배치 기록: %w", err)
 	}
 	return nil
