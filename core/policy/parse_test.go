@@ -100,6 +100,24 @@ egress: [""]
 budget: {tokens: 1, time_ms: 1, max_depth: 1}
 approval: manual
 `, "egress"},
+		{"암묵적 루트 스코프 — /workspace/..", `
+id: p
+fs_scope: ["/workspace/.."]
+budget: {tokens: 1, time_ms: 1, max_depth: 1}
+approval: manual
+`, "루트"},
+		{"암묵적 루트 스코프 — //", `
+id: p
+fs_scope: ["//"]
+budget: {tokens: 1, time_ms: 1, max_depth: 1}
+approval: manual
+`, "루트"},
+		{"암묵적 루트 스코프 — /./", `
+id: p
+fs_scope: ["/./"]
+budget: {tokens: 1, time_ms: 1, max_depth: 1}
+approval: manual
+`, "루트"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -111,6 +129,22 @@ approval: manual
 				t.Fatalf("오류 %q에 %q 없음", err, c.wantErr)
 			}
 		})
+	}
+}
+
+// 명시적 루트 스코프("/")는 파싱된다 — 암묵과 명시의 경계 회귀.
+func TestParseProfileExplicitRootScope(t *testing.T) {
+	p, err := ParseProfile([]byte(`
+id: root-profile
+fs_scope: ["/"]
+budget: {tokens: 1, time_ms: 1, max_depth: 1}
+approval: manual
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.FSScope) != 1 || p.FSScope[0] != "/" {
+		t.Fatalf("fs_scope = %v", p.FSScope)
 	}
 }
 

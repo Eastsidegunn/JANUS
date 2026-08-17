@@ -72,7 +72,14 @@ func ParseProfile(data []byte) (Profile, error) {
 		if s == "" || !path.IsAbs(s) {
 			return Profile{}, fmt.Errorf("policy: fs_scope 엔트리 %q — 비어 있지 않은 절대 경로여야 함", s)
 		}
-		scope = append(scope, path.Clean(s))
+		cleaned := path.Clean(s)
+		if cleaned == "/" && s != "/" {
+			// 정규화 결과가 루트가 되는 엔트리("/workspace/..", "//", "/./")는
+			// 암묵적 루트 스코프다 — 루트는 원문이 정확히 "/"일 때만 허용
+			// (T6 재재리뷰 차단).
+			return Profile{}, fmt.Errorf("policy: fs_scope 엔트리 %q — 정규화하면 루트가 됨; 루트 스코프는 정확히 \"/\"로만 선언 가능", s)
+		}
+		scope = append(scope, cleaned)
 	}
 	for _, d := range raw.Egress {
 		if d == "" {

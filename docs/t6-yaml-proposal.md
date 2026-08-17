@@ -10,7 +10,7 @@ YAML 파서의 자체 구현은 규격 복잡도(anchor, 다중 문서, 타입 �
 
 | | github.com/goccy/go-yaml | gopkg.in/yaml.v3 (go-yaml/yaml) | sigs.k8s.io/yaml |
 |---|---|---|---|
-| 최신 버전 | **v1.19.2** (2026-01-08) | v3.0.1 (2022) | v1.6.x |
+| 최신 버전 | **v1.19.2** (2026-01-08) | v3.0.5 (유지보수 포크 기준) | v1.6.x |
 | 상태 | 활성 (push 2026-04) | 구 저장소는 아카이브(2025-04)됐으나 **YAML.org 유지보수 포크(github.com/yaml/go-yaml)가 보안 수정 제공** — 현재 v3.0.5, v4 개발 중 ([H] 리뷰 정정) | 활성 (k8s) |
 | 라이선스 | MIT | 저장소 라이선스 표기 비표준(NOASSERTION) | Apache-2.0 |
 | 의존 | **모듈 의존성 0개** ([H] 리뷰 확인·정정) | 0 | yaml 계열 wrapper (JSON 경유 변환) |

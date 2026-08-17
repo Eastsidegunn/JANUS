@@ -182,11 +182,16 @@ func workspaceAllowed(scope []string, workspace string) bool {
 		if s == "" || !path.IsAbs(s) {
 			continue // 무효 엔트리는 무권한
 		}
-		s = path.Clean(s)
 		if s == "/" {
-			return true // 루트 스코프의 명시적 선언
+			return true // 루트 스코프는 원문이 정확히 "/"일 때만 — 명시적 선언
 		}
-		if workspace == s || strings.HasPrefix(workspace, s+"/") {
+		cleaned := path.Clean(s)
+		if cleaned == "/" {
+			// "/workspace/..", "//", "/./" — 정규화가 루트가 되는 암묵적
+			// 루트 스코프는 무권한이다 (T6 재재리뷰 차단).
+			continue
+		}
+		if workspace == cleaned || strings.HasPrefix(workspace, cleaned+"/") {
 			return true
 		}
 	}

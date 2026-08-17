@@ -120,6 +120,23 @@ func TestEvaluateEmptyScopeEntryGrantsNothing(t *testing.T) {
 	}
 }
 
+// T6 재재리뷰 차단의 영구 회귀: 정규화하면 루트가 되는 스코프 엔트리는
+// 암묵적 루트다 — 무권한. 루트는 원문이 정확히 "/"일 때만 허용된다.
+func TestEvaluateImplicitRootScopeGrantsNothing(t *testing.T) {
+	implicit := []string{"/workspace/..", "//", "/./"}
+	for _, entry := range implicit {
+		p := Profile{FSScope: []string{entry}, Budget: b(1, 1, 5)}
+		if _, denial := Evaluate(p, SpawnRequest{Workspace: "/etc", Depth: 0}); denial == nil {
+			t.Errorf("암묵적 루트 스코프 %q가 /etc를 허용함", entry)
+		}
+	}
+	// 명시적 루트는 허용된다
+	root := Profile{FSScope: []string{"/"}, Budget: b(1, 1, 5)}
+	if _, denial := Evaluate(root, SpawnRequest{Workspace: "/etc", Depth: 0}); denial != nil {
+		t.Errorf("명시적 루트 스코프가 거부됨: %v", denial)
+	}
+}
+
 // SandboxConfig.Workspace는 정규화된 경로다 — 하류(T10)에 비정규 경로 금지.
 func TestEvaluateReturnsNormalizedWorkspace(t *testing.T) {
 	p := Profile{FSScope: []string{"/workspace"}, Budget: b(1, 1, 5)}
