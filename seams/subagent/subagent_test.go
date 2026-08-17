@@ -254,6 +254,125 @@ exit 3`
 	}
 }
 
+// T7 재재리뷰 차단 1의 회귀 (1): 어댑터 본체가 정상 종료했는데 자손이
+// stdout을 쥐고 있어도 종료 관측은 EOF에 인질 잡히지 않는다 —
+// Wait는 deadline 안에 정상 결과를 반환한다.
+func TestExitObservationIndependentOfStdoutEOF(t *testing.T) {
+	script := `read line
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'
+sleep 2 &
+exit 0`
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1,
+		spawnSpec([]string{"/bin/sh", "-c", script}, "지시"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	done, waitErr := sub.Wait(ctx)
+	if waitErr != nil {
+		t.Fatalf("자손의 파이프 점유로 정상 결과가 유실됨: %v (elapsed=%v)", waitErr, time.Since(start))
+	}
+	if done.Status != gen.DonePayloadStatusOk {
+		t.Fatalf("status = %s", done.Status)
+	}
+	if time.Since(start) > 1500*time.Millisecond {
+		t.Fatalf("종료 관측이 EOF에 종속됨: %v 소요", time.Since(start))
+	}
+}
+
+// T7 재재리뷰 차단 1의 회귀 (2): Spawn context 취소는 리더만이 아니라
+// 프로세스 그룹 전체를 죽인다 — 자손이 남아 Wait를 지연시키지 않는다.
+func TestSpawnContextCancelKillsGroup(t *testing.T) {
+	script := `read line
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+sleep 2 &
+wait`
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	spawnCtx, cancel := context.WithCancel(context.Background())
+	sub, err := Spawn(spawnCtx, w, logd.NewTraceID(), logd.NewSpanID(), 1,
+		spawnSpec([]string{"/bin/sh", "-c", script}, "지시"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ready가 기록될 때까지 대기 후 취소
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		events, _ := store.ReadFrom(context.Background(), 1)
+		found := false
+		for _, e := range events {
+			if e.Kind == gen.KindSubagentReady {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ready가 기록되지 않음")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	start := time.Now()
+	if _, waitErr := sub.Wait(context.Background()); waitErr == nil {
+		t.Fatal("취소됐는데 정상 완료로 처리됨")
+	}
+	if time.Since(start) > 1500*time.Millisecond {
+		t.Fatalf("취소가 그룹을 죽이지 못해 %v 대기 — 자손 잔존", time.Since(start))
+	}
+}
+
+// T7 재재리뷰 차단 2의 회귀: 공백 줄은 상태(ready 전·중간·done 후)와
+// 무관하게 §5.2 위반이다 — post-done 공백이 시퀀스 검사를 우회하지 않는다.
+func TestBlankLinesAreViolations(t *testing.T) {
+	cases := map[string]string{
+		"ready 전 공백": `read line
+printf '\n'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'`,
+		"중간 공백": `read line
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '\n'
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'`,
+		"done 후 공백": `read line
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'
+printf '\n'`,
+	}
+	for name, script := range cases {
+		t.Run(name, func(t *testing.T) {
+			store := &FakeStore{}
+			w, err := logd.NewWriter(context.Background(), store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Close()
+			sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1,
+				spawnSpec([]string{"/bin/sh", "-c", script}, "지시"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sub.Wait(context.Background()); err == nil {
+				t.Fatal("공백 줄이 §5.2 검사를 우회함")
+			}
+		})
+	}
+}
+
 // null 어댑터 전 이벤트가 child span + subagent actor로 기록되고
 // usage가 envelope에 집계된다 (FR-ADP-03/04/07, FR-LOG-10 전제).
 func TestNullAdapterNormalization(t *testing.T) {

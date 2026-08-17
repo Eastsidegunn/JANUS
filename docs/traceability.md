@@ -49,3 +49,4 @@
 | T7 재리뷰 — §5.2 시퀀스 강제(첫 이벤트 ready, ready 중복·done 이후 출력·ready 전 이벤트 거부 + kill) | `seams/subagent/subagent_test.go` (TestSequenceViolationsRejected — 4형태) | T7 | green |
 | T7 재리뷰 — 프로세스 수명 주기(단일 reap, Wait(ctx) deadline 준수, 위반 시 kill·drain, exit 오류 보존) | `seams/subagent/subagent_test.go` (TestWaitHonorsContextAfterDone, TestInvalidEventKillsLingeringProcess, TestAbnormalExitAfterDonePreserved) | T7 | green |
 | T7 재리뷰 — hx run 원자적 세션 초기화(InitBatch, 두 번째 run 거부·로그 불변), replay 검증-후-출력(손상 로그 stdout 0바이트) | `surfaces/hx/e2e_test.go` (TestRunRefusesExistingSession, TestReplayCorruptedLogEmitsNothing) | T7 | green |
+| T7 재재리뷰 — 종료 관측의 EOF 비종속(reaper + drain 유예), Spawn ctx 취소의 그룹 kill, 공백 줄 §5.2 위반 | `seams/subagent/subagent_test.go` (TestExitObservationIndependentOfStdoutEOF, TestSpawnContextCancelKillsGroup, TestBlankLinesAreViolations — 3위치) | T7 | green |

@@ -14,8 +14,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -37,13 +39,23 @@ type Spec struct {
 
 // Subagent는 실행 중인 어댑터 프로세스 핸들이다.
 type Subagent struct {
-	actor    string
-	stdin    io.WriteCloser
-	proc     *exec.Cmd
-	vals     *validate.Validators
-	doneCh   chan waitResult
-	childSpn string
+	actor      string
+	stdin      io.WriteCloser
+	stdoutFile *os.File
+	proc       *exec.Cmd
+	vals       *validate.Validators
+	doneCh     chan waitResult
+	childSpn   string
+
+	// exited는 reaper가 프로세스 종료를 관측하면 닫힌다 — 종료 관측은
+	// stdout EOF에 종속되지 않는다(자손이 파이프를 쥐어도 무관).
+	exited  chan struct{}
+	exitErr error // exited 닫기 전에만 기록
 }
+
+// drainGrace는 프로세스 종료 후 잔여 stdout 버퍼를 비우는 유예다.
+// 유예가 지나면 읽기 deadline으로 스트림을 마감한다.
+const drainGrace = 200 * time.Millisecond
 
 type waitResult struct {
 	done gen.DonePayload
@@ -94,6 +106,12 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 	// 함께 종료해야 고아 자손이 stdout 파이프를 잡고 EOF를 지연시키는
 	// (= drain·reap이 늘어지는) 경로가 없다.
 	proc.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Spawn context 취소도 리더만이 아니라 그룹 전체를 죽인다 —
+	// 기본 Cancel은 리더만 kill해 자손이 남는다.
+	proc.Cancel = func() error {
+		killGroup(proc)
+		return nil
+	}
 	stdin, err := proc.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -102,23 +120,41 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 	if err != nil {
 		return nil, err
 	}
+	stdoutFile, ok := stdout.(*os.File)
+	if !ok {
+		return nil, fmt.Errorf("subagent: stdout 파이프가 *os.File이 아님 (%T)", stdout)
+	}
 	proc.Stderr = nil // 진단은 v0.1에서 버린다 — 수집은 collector(T11)의 몫
 	if err := proc.Start(); err != nil {
 		return nil, fmt.Errorf("subagent: 어댑터 실행: %w", err)
 	}
 
 	s := &Subagent{
-		actor: actor, stdin: stdin, proc: proc, vals: vals,
+		actor: actor, stdin: stdin, stdoutFile: stdoutFile, proc: proc, vals: vals,
 		doneCh: make(chan waitResult, 1), childSpn: childSpan,
+		exited: make(chan struct{}),
 	}
+	// reaper: 프로세스 종료를 stdout과 독립적으로 관측하고 정확히 한 번
+	// 회수한다. 종료 후에는 drain 유예 deadline으로 읽기를 마감해, 자손이
+	// write end를 쥐고 있어도 pump가 EOF에 인질 잡히지 않는다.
+	go func() {
+		ps, werr := proc.Process.Wait()
+		switch {
+		case werr != nil:
+			s.exitErr = werr
+		case !ps.Success():
+			s.exitErr = fmt.Errorf("exit: %s", ps.String())
+		}
+		close(s.exited)
+		s.stdoutFile.SetReadDeadline(time.Now().Add(drainGrace))
+	}()
 	if err := s.sendCommand(gen.CommandCmdTask, gen.TaskPayload{
 		Instruction: spec.Instruction,
 		Workspace:   spec.Workspace,
 		Budget:      spec.Budget,
 		Depth:       spec.Depth,
 	}); err != nil {
-		killGroup(proc)
-		proc.Wait() // 펌프가 시작되지 않았으므로 여기서 reap
+		killGroup(proc) // 회수는 reaper goroutine이 수행
 		return nil, err
 	}
 	go s.pump(w, traceID, parentSpan, stdout)
@@ -194,11 +230,14 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string, stdout io.Re
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
 		if pumpErr != nil {
 			continue // kill 후 잔여 출력 drain
+		}
+		if len(bytes.TrimSpace(line)) == 0 {
+			// "모든 메시지는 한 줄 JSON"(§5.2) — 공백 줄은 상태와 무관하게
+			// 위반이다 (post-done 공백이 시퀀스 검사를 우회하면 안 된다).
+			violate(fmt.Errorf("subagent: 공백 줄 출력 — §5.2 위반"))
+			continue
 		}
 		if done != nil {
 			violate(fmt.Errorf("subagent: done 이후 출력 — §5.2 시퀀스 위반"))
@@ -248,7 +287,12 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string, stdout io.Re
 		}
 	}
 	scanErr := scanner.Err()
-	waitErr := s.proc.Wait() // 단일 reap — stdout EOF 이후 정확히 한 번
+	// 프로세스 종료로 인한 파이프 마감(deadline·close)은 스트림의 정상 끝이다
+	if scanErr != nil && (errors.Is(scanErr, os.ErrClosed) || os.IsTimeout(scanErr)) {
+		scanErr = nil
+	}
+	<-s.exited // 종료 상태는 reaper가 관측 — EOF 비종속
+	waitErr := s.exitErr
 
 	switch {
 	case pumpErr != nil:
