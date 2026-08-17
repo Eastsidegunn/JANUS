@@ -31,15 +31,23 @@ contracts/fixtures/
 **시나리오마다 새 작업공간**을 만들고, **캡처 출력은 작업공간 밖**에 둔다 —
 파일목록·편집 시나리오가 자기 출력물이나 이전 실행 산출물을 보면 안 된다.
 
+캡처 루트도 **실행마다 새로 만든다**. 고정 경로를 재사용하면 이전 실패·중단
+녹화가 남아, 일부 시나리오만 재녹화했을 때 stale 파일이 함께 커밋된다.
+
 ```sh
-CAPTURE=/tmp/t8-captures
+CAPTURE=$(mktemp -d /tmp/t8-captures.XXXXXX)   # 실행마다 새 루트
 mkdir -p "$CAPTURE/claude-code" "$CAPTURE/codex"
+echo "캡처 루트: $CAPTURE"   # 세션 중단 시 이어가려면 이 값을 기록해 둔다
 
 # 시나리오 NN마다:
 WS=$(mktemp -d /tmp/t8-case-NN.XXXXXX)
 cd "$WS"
 # (시나리오가 초기 파일을 요구하면 여기서 명시적으로 생성 — §3의 '초기 상태' 열)
 ```
+
+재녹화가 필요하면 **캡처 루트를 새로 만들어 전 시나리오를 다시 녹화**하거나,
+기존 루트에서 해당 파일을 지우고 다시 녹화한 뒤 §6의 목록 대조로 확인한다 —
+어느 쪽이든 커밋되는 것은 "이번에 의도한 녹화 전부"여야 한다.
 
 ### Claude Code (stream-json) — 2.1.233 기준 재현 플래그
 
@@ -85,7 +93,26 @@ TASKS.md 요구 분류(정상/툴 다수/승인 요청/에러/중단)를 커버�
 | 10 | empty-ish | (빈 디렉토리) | "." 같은 극단 입력 | 경계 입력의 출력 형태 |
 
 Codex도 같은 번호 체계로 동일 의도의 시나리오를 녹화한다(도구 특성상
-불가능한 시나리오는 meta에 사유를 남기고 건너뛴다). 합계 15개 이상.
+불가능한 시나리오는 meta에 사유를 남기고 건너뛴다).
+
+### 시나리오 계수·완료 판정 규칙
+
+파일 개수만으로는 T8이 끝나지 않는다. 모델이 툴을 쓰지 않고 텍스트로만
+답해도 파일은 생기기 때문이다. 다음을 모두 만족해야 완료다.
+
+1. **검증 포인트가 실제 NDJSON에 나타난 녹화만** 시나리오 1건으로 센다.
+   예: 02는 툴 콜 이벤트가 실제로 있어야 하고, 05는 승인 요청 이벤트가,
+   08은 중단으로 끊긴 스트림 꼬리가 실제로 있어야 한다. 없으면 프롬프트를
+   조정해 재녹화한다(그 시도의 meta에 "검증 포인트 미출현 — 재녹화" 기록).
+2. **분류별 최소 1건**을 전체 픽스처(두 도구 합산)에서 충족한다:
+   정상(툴 없음), 다중 툴, 승인 거부, 툴/명령 오류, 중단.
+3. **meta만 있고 녹화가 없는 skip은 15건에 포함하지 않는다.**
+4. 각 meta에 **해당 녹화가 어느 분류인지와 검증 포인트 확인 결과**를 적는다
+   (§4). 확인은 원본 NDJSON에서 직접 한다 — 예:
+   `grep -c '"type":"tool_use"' NN-슬러그.ndjson` 같은 형태로 세고, 사용한
+   확인 커맨드와 결과를 그대로 meta에 남긴다.
+
+위 규칙을 만족하는 녹화가 **합계 15개 이상**일 때 T8 완료다.
 
 ## 4. meta.txt 필수 기록
 
@@ -96,27 +123,27 @@ Codex도 같은 번호 체계로 동일 의도의 시나리오를 녹화한다(�
 - **CLI exit code**
 - **중단 방법** (08번: Ctrl-C 시점/timeout 값)
 - **stderr 처리 방식** (별도 파일 경로)
+- **분류** (정상 / 다중 툴 / 승인 거부 / 오류 / 중단 중 하나 — §3 계수 규칙)
+- **검증 포인트 확인 결과**: 원본 NDJSON에서 실제로 확인한 커맨드와 그 출력
+  (예: `grep -c '"type":"tool_use"' 02-single-tool.ndjson` → `3`)
 
 ## 5. 커밋 전 비밀 검사 (필수, fail-closed)
 
-검출이든 스캔 오류든 non-zero로 끝나는 게이트다 — `sh check-secrets.sh`로
-실행해 **exit 0일 때만** 커밋한다:
+검사기는 저장소에 있다: **`tools/check-fixture-secrets.sh <디렉토리>`**.
+검출이든 스캔 오류든 non-zero로 끝나며, **exit 0일 때만** 커밋한다.
 
 ```sh
-#!/bin/sh
-# check-secrets.sh — 검출: exit 1, grep 오류: exit 2, 무검출: exit 0
-matches=$(grep -rInE 'sk-ant-[A-Za-z0-9_-]{10,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_|xox[baprs]-|BEGIN [A-Z ]*PRIVATE KEY|eyJ[A-Za-z0-9_-]{10,}\.eyJ' \
-  contracts/fixtures/)
-status=$?
-case $status in
-  0) echo '비밀 검출 — 커밋 금지:'; echo "$matches"; exit 1 ;;
-  1) echo '비밀 검사 통과'; exit 0 ;;
-  *) echo "grep 실행 오류 (exit $status) — 통과로 간주하지 않음"; exit 2 ;;
-esac
+tools/check-fixture-secrets.sh "$CAPTURE"   # 복사 전 캡처 루트에서 먼저
 ```
 
-(core/logd redaction 기본 패턴과 동일 집합. 검출 시 해당 녹화를 폐기하고
-재녹화한다 — 픽스처는 수정 금지이므로 마스킹 편집도 불가.)
+| exit | 의미 | 조치 |
+|---|---|---|
+| 0 | 무검출 | 커밋 진행 |
+| 1 | 비밀 검출 | 해당 녹화 **폐기·재녹화** (픽스처 수정 금지이므로 마스킹 편집 불가) |
+| 2 | 사용법 오류·대상 부재·grep 실행 오류 | **통과로 간주하지 않음** — 원인 해결 후 재실행 |
+
+패턴은 core/logd redaction 기본 집합과 동일하며, 3분기 동작은
+`tools/fixturecheck`의 테스트로 CI에서 고정된다.
 
 추가로 홈 디렉토리 경로 등 개인 식별 정보가 과하게 남았는지 육안 확인:
 
@@ -126,14 +153,35 @@ grep -rn "$HOME" contracts/fixtures/ | head
 
 ## 6. 커밋
 
+복사 대상이 **비어 있는지 fail-closed로 먼저 확인**한다 — 이전 시도의
+잔여 픽스처 위에 덮어쓰면 stale 파일이 섞여 들어간다.
+
 ```sh
 git checkout -b t8/fixtures
+
+# 1) 대상이 비어 있어야 한다 (없거나 빈 디렉토리만 허용)
+if [ -e contracts/fixtures ] && [ -n "$(ls -A contracts/fixtures)" ]; then
+  echo 'contracts/fixtures가 비어 있지 않음 — 잔여물 확인 후 정리하고 다시 실행' >&2
+  exit 1
+fi
+
+# 2) 캡처 루트에서 먼저 비밀 검사 (exit 0일 때만 진행)
+tools/check-fixture-secrets.sh "$CAPTURE" || exit 1
+
+# 3) 복사 후 대상에서도 재검사
 mkdir -p contracts/fixtures
 cp -R "$CAPTURE/claude-code" "$CAPTURE/codex" contracts/fixtures/
-sh check-secrets.sh || exit 1
+tools/check-fixture-secrets.sh contracts/fixtures || exit 1
+
+# 4) 복사 목록이 캡처와 일치하는지 대조 (누락·stale 검출)
+diff -r "$CAPTURE" contracts/fixtures || { echo '캡처와 커밋 대상이 다름' >&2; exit 1; }
+
 git add contracts/fixtures/
 git commit -m "fixtures: T8 Claude Code·Codex 녹화 N개 시나리오 (FR-ADP-05 전제)"
 ```
+
+PR 본문에 §3 계수 규칙의 충족 근거(분류별 건수, 검증 포인트 확인 결과)를
+요약해 남긴다.
 
 PR 후 T9에서 이 픽스처에 대한 스냅샷 테스트가 `make fixtures`를 실제
 대조로 대체한다.
