@@ -3,6 +3,7 @@ module github.com/Eastsidegunn/JANUS
 go 1.26.6
 
 require (
+	github.com/goccy/go-yaml v1.19.2
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	modernc.org/sqlite v1.56.0
 )

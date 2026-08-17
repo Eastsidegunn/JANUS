@@ -13,6 +13,7 @@ import (
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/contracts/validate"
+	"github.com/Eastsidegunn/JANUS/core/policy"
 )
 
 // ---- 이벤트 시퀀스 생성기 (FR-LOG-06 입력) ----
@@ -174,14 +175,9 @@ func genHookVerdict(r *rand.Rand) gen.HookVerdictPayload {
 
 // ---- 프로파일 생성기 (FR-POL-03 입력) ----
 
-// Profile은 FR-POL-01의 v0.1 필드를 가진 정책 프로파일이다.
-// T6이 실제 파서·평가기를 구현하며, 속성 테스트는 이 형태를 입력으로 쓴다.
-type Profile struct {
-	FSScope  []string
-	Egress   []string
-	Budget   gen.Budget
-	Approval string // "manual" | "auto"
-}
+// Profile은 T6에서 구현된 core/policy의 실제 프로파일 타입이다
+// (T2 시점에는 테스트 로컬 형태였고, T6에서 별칭으로 전환).
+type Profile = policy.Profile
 
 var (
 	egressPool = []string{
@@ -202,11 +198,12 @@ func genProfile(r *rand.Rand) Profile {
 		return out
 	}
 	budgets := []int64{0, 1, 100, 10_000, 1_000_000, 1 << 40}
-	approval := "manual"
+	approval := policy.ApprovalManual
 	if r.Intn(2) == 0 {
-		approval = "auto"
+		approval = policy.ApprovalAuto
 	}
 	return Profile{
+		ID:      fmt.Sprintf("p%d", r.Intn(1000)),
 		FSScope: pick(fsPool),
 		Egress:  pick(egressPool),
 		Budget: gen.Budget{
@@ -266,7 +263,7 @@ func TestGeneratorProfilesAreDiverse(t *testing.T) {
 		} else {
 			nonEmptyEgress++
 		}
-		if p.Approval == "auto" {
+		if p.Approval == policy.ApprovalAuto {
 			auto++
 		} else {
 			manual++

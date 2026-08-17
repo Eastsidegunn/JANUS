@@ -33,6 +33,7 @@ var validLayers = map[string]bool{
 var externalRestrictions = map[string][]string{
 	"modernc.org/":                          {"seams/store/sqlite"}, // SQLite 드라이버 (T3 제안서)
 	"github.com/santhosh-tekuri/jsonschema": {"contracts/validate"}, // 스키마 검증기 (T1 제안서 §6)
+	"github.com/goccy/go-yaml":              {"core/policy"},        // YAML 파서 (T6 제안서)
 }
 
 // Check는 패키지 그래프가 §3.1의 의존 방향 규칙을 지키는지 검사한다.

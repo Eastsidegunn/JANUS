@@ -14,7 +14,12 @@
 | codegen drift 게이트 (미추적 신규 파일 포함) | `tools/schemagen/drift_test.go` + `make codegen-drift` (CI 편입) | T1 | green |
 | donePayload 거울 정의 동일성 | `contracts/schema_test.go` | T1 | green |
 | FR-LOG-06 — 리플레이 결정론 속성 (300회, 입력 불변성 포함) | `core/replay_prop_test.go` — **T4에서 logd.Replay 배선, xfail 태그 제거 후 본 스위트 편입** | T2→T4 | green |
-| FR-POL-03 — 병합 협소성 속성 (300회, 체인·교환·자기병합 포함) | `core/policy_prop_test.go` (xfail 태그, T6에서 배선·편입) | T2 | **expected-fail** |
+| FR-POL-03 — 병합 협소성 속성 (300회, 체인·교환·자기병합·승인 완화 금지) | `core/policy_prop_test.go` — **T6에서 policy.Merge 배선, xfail 태그 제거 후 본 스위트 편입** | T2→T6 | green |
+| FR-POL-02 — 순수 평가 함수 (결정성·워크스페이스 경로 경계·egress 편입/거부 분리·깊이 거부) | `core/policy/policy_test.go` (TestEvaluatePure, TestEvaluateWorkspaceScope, TestEvaluateDepthDenial) | T6 | green |
+| FR-POL-06 — 예산 초과 판정 (토큰/시간/깊이, 경계값 포함 7케이스) | `core/policy/policy_test.go` (TestExceededReason) | T6 | green |
+| FR-POL-03 — 병합 단위 (교집합 정렬·최솟값·승인 강화·ID 계보) | `core/policy/policy_test.go` (TestMerge, TestIntersectDeterministic) | T6 | green |
+| T6 재리뷰 — 워크스페이스 경로 탈출 차단 (POSIX 정규화 후 판정, 빈·상대 경로 거부, 빈 스코프 엔트리 무권한, 정규화 경로 반환) | `core/policy/policy_test.go` (TestEvaluateWorkspaceScope 탈출 3종+evil, TestEvaluateEmptyScopeEntryGrantsNothing, TestEvaluateReturnsNormalizedWorkspace) | T6 | green |
+| FR-POL-01 — YAML 프로파일 파서 (strict+중복 키 거부, 다중 문서 거부(2차 Decode==io.EOF), 승인 명시·예산 3축 비음수·fs 절대경로 정규화) | `core/policy/parse_test.go` (거부 12종 + 유효·auto 명시) + boundarylint yaml import 한정 | T6 | green |
 | T2 완료 기준 — 생성기가 스키마 유효·다양·결정적 입력을 실제 생성 | `core/propgen_test.go` (TestGenerator*) | T2 | green |
 | FR-LOG-01 — append-only 저장소 수준 물리 차단 (직접 연결 UPDATE/DELETE 거부) | `seams/store/sqlite/store_test.go` (TestAppendOnlyTriggers) | T3 | green |
 | FR-LOG-02 — 단일 writer seq 전순서 + mutation 비노출 (동시 제출·store 도달 순서, Reader 동적 타입의 Append/Close 미노출, 파일 직접 INSERT는 PK 최후 방어) | `core/logd/writer_test.go` (TestWriterSeqTotalOrder) + `seams/store/sqlite/store_test.go` (TestSingleWriterOverSQLite) + `seams/store/sqlite/bypass_test.go` (외부 패키지 assertion 검사) | T3 | green |
