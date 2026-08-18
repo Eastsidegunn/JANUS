@@ -1,0 +1,11 @@
+tool: claude-code 2.1.233
+command: (cd "/tmp/t8-c06.q2jTmf" && claude -p "Read 도구로 no-such-file.txt를 읽어줘. 파일이 없으면 만들거나 수정하지 말고 오류를 보고해." --output-format stream-json --verbose --safe-mode --no-session-persistence --permission-mode manual --tools Read --allowedTools Read)
+date: 2026-08-18
+prompt: Read 도구로 no-such-file.txt를 읽어줘. 파일이 없으면 만들거나 수정하지 말고 오류를 보고해.
+workspace-initial: 빈 디렉토리
+exit-code: 0
+interrupt: 해당 없음
+stderr: 06-tool-error.stderr.txt (별도 파일)
+scenario: tool-error
+coverage: error
+verify: tool_use=1, tool_result=1, is_error=1, file-absent=0

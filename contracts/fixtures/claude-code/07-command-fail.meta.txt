@@ -1,0 +1,11 @@
+tool: claude-code 2.1.233
+command: (cd "/tmp/t8-c07.jw37Ec" && claude -p "Bash 도구로 sh -c 'exit 42'를 정확히 한 번 실행해. 다른 명령은 실행하지 말고 종료 코드를 보고해." --output-format stream-json --verbose --safe-mode --no-session-persistence --permission-mode manual --tools Bash --allowedTools Bash)
+date: 2026-08-18
+prompt: Bash 도구로 sh -c 'exit 42'를 정확히 한 번 실행해. 다른 명령은 실행하지 말고 종료 코드를 보고해.
+workspace-initial: 빈 디렉토리
+exit-code: 0
+interrupt: 해당 없음
+stderr: 07-command-fail.stderr.txt (별도 파일)
+scenario: command-fail
+coverage: error
+verify: tool_use=1, tool_result=1, is_error=1, result-contains-42=1

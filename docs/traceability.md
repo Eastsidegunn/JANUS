@@ -48,6 +48,7 @@
 | FR-LOG-10 — 자식 중간 이벤트는 child span에만, 부모 히스토리에는 subagent/done 결과만 (E2E) | `surfaces/hx/e2e_test.go` (부모 Messages = subagent_result 1건 단정) | T7 | green |
 | T8 준비 — 픽스처 비밀 검사 게이트 fail-closed 3분기 (무검출 0 / 검출 1 / 대상 부재·인자 누락·**실제 grep 실행 오류** 2) | `tools/fixturecheck/script_test.go` (TestSecretCheckGate — 7케이스, PATH 주입 가짜 grep으로 오류 분기 실증) | T8 | green |
 | T8 준비 — 픽스처 매니페스트 게이트 (README 존재, NDJSON↔meta 대응, meta-only skip 계수 제외, 최소 15건) | `tools/fixturecheck/script_test.go` (TestManifestGate — 6그룹, `tools/check-fixture-manifest.sh` 실행) | T8 | green |
+| FR-ADP-05 전제 — Claude Code·Codex 실출력 픽스처 15건(정상/툴 다수/승인 거부/오류/중단), meta-only skip 1건 | `contracts/fixtures/README.md` + `tools/check-fixture-secrets.sh contracts/fixtures` + `tools/check-fixture-manifest.sh contracts/fixtures 15` | T8 | green |
 | T7 재리뷰 — §5.2 시퀀스 강제(첫 이벤트 ready, ready 중복·done 이후 출력·ready 전 이벤트 거부 + kill) | `seams/subagent/subagent_test.go` (TestSequenceViolationsRejected — 4형태) | T7 | green |
 | T7 재리뷰 — 프로세스 수명 주기(단일 reap, Wait(ctx) deadline 준수, 위반 시 kill·drain, exit 오류 보존) | `seams/subagent/subagent_test.go` (TestWaitHonorsContextAfterDone, TestInvalidEventKillsLingeringProcess, TestAbnormalExitAfterDonePreserved) | T7 | green |
 | T7 재리뷰 — hx run 원자적 세션 초기화(InitBatch, 두 번째 run 거부·로그 불변), replay 검증-후-출력(손상 로그 stdout 0바이트) | `surfaces/hx/e2e_test.go` (TestRunRefusesExistingSession, TestReplayCorruptedLogEmitsNothing) | T7 | green |

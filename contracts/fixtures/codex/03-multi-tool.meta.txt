@@ -1,0 +1,11 @@
+tool: codex-cli 0.147.0
+command: codex exec --json --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules -s workspace-write -C "/tmp/t8-x03.CwMJk3" "서로 분리된 두 번의 셸 명령을 실행해. 첫 번째 명령은 hello.txt에 hello를 써. 두 번째 명령은 그 파일을 읽어 확인해."
+date: 2026-08-18
+prompt: 서로 분리된 두 번의 셸 명령을 실행해. 첫 번째 명령은 hello.txt에 hello를 써. 두 번째 명령은 그 파일을 읽어 확인해.
+workspace-initial: 빈 디렉토리
+exit-code: 0
+interrupt: 해당 없음
+stderr: 03-multi-tool.stderr.txt (별도 파일)
+scenario: multi-tool
+coverage: multi-tool
+verify: jq item.started 검사 → command_execution=2

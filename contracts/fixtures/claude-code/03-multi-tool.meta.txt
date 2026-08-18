@@ -1,0 +1,11 @@
+tool: claude-code 2.1.233
+command: (cd "/tmp/t8-c03.xpT08J" && claude -p "Write 도구로 hello.txt에 hello를 써. 그 다음 Read 도구로 파일을 읽어 확인해. 반드시 서로 다른 두 번의 도구 호출을 사용해." --output-format stream-json --verbose --safe-mode --no-session-persistence --permission-mode manual --tools "Write,Read" --allowedTools "Write,Read")
+date: 2026-08-18
+prompt: Write 도구로 hello.txt에 hello를 써. 그 다음 Read 도구로 파일을 읽어 확인해. 반드시 서로 다른 두 번의 도구 호출을 사용해.
+workspace-initial: 빈 디렉토리
+exit-code: 0
+interrupt: 해당 없음
+stderr: 03-multi-tool.stderr.txt (별도 파일)
+scenario: multi-tool
+coverage: multi-tool
+verify: jq 구조 검사 → tool_use=2, tool_result=2

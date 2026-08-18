@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a0116d-6f9e-7460-bd1f-9c17fd45b49d"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"현재 디렉터리를 한 번만 조회하겠습니다."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"find . -maxdepth 1 -type f -exec basename {} \\\\;\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"find . -maxdepth 1 -type f -exec basename {} \\\\;\"","aggregated_output":"b.txt\na.txt\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"b.txt\na.txt"}}
+{"type":"turn.completed","usage":{"input_tokens":27023,"cached_input_tokens":23040,"cache_write_input_tokens":0,"output_tokens":99,"reasoning_output_tokens":0}}

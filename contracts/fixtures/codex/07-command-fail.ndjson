@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a01388-75ba-7d00-a7d6-ed82ae5a221e"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"요청하신 명령을 정확히 한 번 실행하고 종료 코드만 확인하겠습니다."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -c \"sh -c 'exit 42'\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -c \"sh -c 'exit 42'\"","aggregated_output":"","exit_code":42,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"종료 코드: 42"}}
+{"type":"turn.completed","usage":{"input_tokens":27027,"cached_input_tokens":23040,"cache_write_input_tokens":0,"output_tokens":94,"reasoning_output_tokens":0}}

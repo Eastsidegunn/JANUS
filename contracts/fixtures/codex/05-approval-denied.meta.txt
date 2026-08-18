@@ -1,0 +1,10 @@
+tool: codex-cli 0.147.0
+date: 2026-08-18
+scenario: approval-denied
+coverage:
+recording: meta-only skip
+counted: no
+reason: codex exec --json은 승인 UI를 표면화하지 않음
+evidence: -a untrusted에서도 승인 화면이 나타나지 않음
+evidence: /tmp는 쓰기 허용 영역이라 요청이 실행됨
+action: 유효한 approval-denied 픽스처로 사용하지 않음
