@@ -18,26 +18,18 @@
 
 ---
 
-## SCP-002. §5.2 코어→어댑터 command에 `approval_response` 추가 (상태: 제안됨, 2026-08-18)
+## SCP-002. §5.2 코어→어댑터 command에 `approval_response` 추가 (상태: **명세 변경 요청**, 2026-08-18 갱신)
 
-- 위치: §5.2 "코어 → 어댑터 (stdin)" 표 — 현재 `task` / `message` / `stop` 3종.
-  관련: FR-ADP-02("어댑터 인터페이스는 spawn / send / events / stop의 최소
-  계약으로 한정한다(MUST)"), FR-POL-05.
-- 문제: FR-POL-05는 서브에이전트의 승인 요청이 `subagent/approval_request`로
-  승격되어 **부모 정책 레이어가 판정한다**고 요구한다. 그러나 판정 결과를
-  어댑터로 되돌릴 command가 §5.2에 없어, 판정이 실행을 게이트할 경로가 없다.
-  현재 어휘만으로는 "요청을 로그에 남기고 아무도 소비하지 않는" 상태밖에
-  구현할 수 없다(T9 제안서 §2.4 참조).
-- 제안(택1, [H] 결정 필요):
-  1. **명세 변경**: §5.2 표에 `approval_response`를 4번째 command로 추가하고
-     FR-ADP-02의 "최소 계약"을 spawn / send / events / stop / **approval**로
-     확장 명시.
-  2. **해석 승인**: "FR-POL-05 이행을 위한 공통 제어 응답은 FR-ADP-02가 금지한
-     '대상 도구별 고유 기능'이 아니라 모든 어댑터가 공유하는 제어 평면의
-     일부"라고 해석하고, 명세 본문은 그대로 두되 이 해석을 기록.
-- 판단 근거: `approval_response`는 특정 도구(Claude Code)의 고유 기능이 아니라
-  FR-POL-05를 어떤 어댑터로도 이행하기 위한 공통 응답이다. 반대로 §5.2 표를
-  진실로 읽으면 command 어휘 확장은 명백한 명세 변경이다. 어느 쪽이든
-  **contracts 수정 전에 승인이 필요**하다.
-- 구현 영향: 승인 전에는 `wire.schema.json`을 수정하지 않는다. 승인 시
-  T9 제안서 §2.5의 스키마 델타를 반영한다.
+- 위치: §5.2 "코어 → 어댑터 (stdin)" 표(현재 `task`/`message`/`stop`),
+  FR-ADP-02("spawn / send / events / stop의 최소 계약").
+- 문제: FR-POL-05는 승인 요청이 부모 정책 레이어의 **판정**으로 이어질 것을
+  요구하지만, 판정을 어댑터로 되돌릴 command가 없어 판정이 실행을 게이트할
+  경로가 없다.
+- **제안(단일안 — 2차 리뷰 지시로 해석 승인안 철회)**: 명세를 변경한다.
+  1. §5.2 command 표에 `approval_response` 행 추가
+     (payload: request_id, decision(allow|deny), reason — deny 시 필수)
+  2. FR-ADP-02의 최소 공통 계약을 spawn / send / events / stop / **approval**로
+     확장 명시
+  3. 위 명세 변경 승인 후에만 `wire.schema.json`·codegen 반영
+- 근거: 이 저장소는 기능 명세를 유일한 진실로 선언한다. §5.2 표를 그대로 둔 채
+  해석 기록만으로 command를 추가하면 contracts와 명세가 다시 갈라진다.
