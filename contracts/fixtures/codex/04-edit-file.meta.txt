@@ -1,0 +1,11 @@
+tool: codex-cli 0.147.0
+command: codex exec --json --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules -s workspace-write -C "/tmp/t8-x04.ROB7vr" "hello.txt를 읽은 뒤 apply_patch로 내용을 'world'로 바꿔. 셸 리다이렉션, sed, Python으로 수정하지 마. 다른 파일은 건드리지 마."
+date: 2026-08-18
+prompt: hello.txt를 읽은 뒤 apply_patch로 내용을 'world'로 바꿔. 셸 리다이렉션, sed, Python으로 수정하지 마. 다른 파일은 건드리지 마.
+workspace-initial: hello.txt("hello")
+exit-code: 0
+interrupt: 해당 없음
+stderr: 04-edit-file.stderr.txt (별도 파일)
+scenario: edit-file
+coverage:
+verify: command_execution=2, file_change=1, final-content=world:0

@@ -1,0 +1,11 @@
+tool: codex-cli 0.147.0
+command: codex exec --json --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules -s workspace-write -C "/tmp/t8-x08.X414ec" "셸 명령으로 tail -f /dev/null을 실행해. 포그라운드에서 계속 기다려. 백그라운드 실행이나 다른 명령은 금지야."
+date: 2026-08-18
+prompt: 셸 명령으로 tail -f /dev/null을 실행해. 포그라운드에서 계속 기다려. 백그라운드 실행이나 다른 명령은 금지야.
+workspace-initial: 빈 디렉토리
+exit-code: 1
+interrupt: foreground tail -f 요청 중 약 15초 후 Ctrl-C 1회
+stderr: 08-interrupted.stderr.txt (별도 파일)
+scenario: interrupted
+coverage: interrupted
+verify: final item=command_execution/in_progress, turn.completed=0, lines=4, JSON=0, nonempty=0

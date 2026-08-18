@@ -1,0 +1,15 @@
+tool: claude-code 2.1.233
+command: (cd "/tmp/t8-claude-02.14NX5v" && claude -p "Glob 도구를 정확히 한 번 사용해서 현재 디렉토리의 파일 이름을 확인하고, 이름
+  만 답해." --output-format stream-json
+    --verbose --safe-mode --no-session-persistence --permission-mode manual --tools Glob
+    --allowedTools Glob)
+date: 2026-08-18
+prompt: Glob 도구를 정확히 한 번 사용해서 현재 디렉토리의 파일 이름을 확인하고, 이름
+  만 답해.
+workspace-initial: a.txt("alpha"), b.txt("beta")
+exit-code: 0
+interrupt: 해당 없음
+stderr: 02-single-tool.stderr.txt (별도 파일)
+scenario: single-tool
+coverage:
+verify: jq structural type count → tool_use=1, tool_result=1

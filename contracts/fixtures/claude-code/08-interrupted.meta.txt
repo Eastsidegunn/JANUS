@@ -1,0 +1,11 @@
+tool: claude-code 2.1.233
+command: (cd "/tmp/t8-c08.kHSKtf" && claude -p "Bash 도구로 tail -f /dev/null을 실행해. run_in_background는 반드시 false로 설정해. 포그라운드에서 계속 기다려. 다른 명령은 실행하지 마." --output-format stream-json --verbose --safe-mode --no-session-persistence --permission-mode manual --tools Bash --allowedTools Bash)
+date: 2026-08-18
+prompt: Bash 도구로 tail -f /dev/null을 실행해. run_in_background는 반드시 false로 설정해. 포그라운드에서 계속 기다려. 다른 명령은 실행하지 마.
+workspace-initial: 빈 디렉토리
+exit-code: 0
+interrupt: 요청 처리 중 약 8초 후 Ctrl-C 1회 (도구 호출 전)
+stderr: 08-interrupted.stderr.txt (별도 파일)
+scenario: interrupted
+coverage: interrupted
+verify: result subtype=error_during_execution, tool_use=0, lines=8, JSON=0, nonempty=0

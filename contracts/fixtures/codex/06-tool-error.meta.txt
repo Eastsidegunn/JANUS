@@ -1,0 +1,11 @@
+tool: codex-cli 0.147.0
+command: codex exec --json --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules -s workspace-write -C "/tmp/t8-x06.FN38tr" "셸 명령을 정확히 한 번 사용해서 cat no-such-file.txt를 실행해. 파일이 없으면 만들거나 수정하지 말고 오류를 보고해."
+date: 2026-08-18
+prompt: 셸 명령을 정확히 한 번 사용해서 cat no-such-file.txt를 실행해. 파일이 없으면 만들거나 수정하지 말고 오류를 보고해.
+workspace-initial: 빈 디렉토리
+exit-code: 0
+interrupt: 해당 없음
+stderr: 06-tool-error.stderr.txt (별도 파일)
+scenario: tool-error
+coverage: error
+verify: command_execution=1, nonzero-exit=1, file-absent=0

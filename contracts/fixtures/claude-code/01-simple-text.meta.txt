@@ -1,0 +1,12 @@
+tool: claude-code 2.1.233
+command: claude -p "1+1은? 숫자만 답하고 도구는 사용하지 마." --output-format stream-json
+    --verbose --safe-mode --no-session-persistence --permission-mode manual --tools ""
+date: 2026-08-18
+prompt: 1+1은? 숫자만 답하고 도구는 사용하지 마.
+workspace-initial: 빈 디렉토리
+exit-code: 0
+interrupt: 해당 없음
+stderr: 01-simple-text.stderr.txt (별도 파일)
+scenario: simple-text
+coverage: normal
+verify: jq structural type count → tool_use=0

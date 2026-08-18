@@ -1,0 +1,11 @@
+tool: claude-code 2.1.233
+command: (cd "/tmp/t8-c04.6yxmiT" && claude -p "Read 도구로 hello.txt를 확인해. 그 다음 Edit 도구로 내용을 'world'로 바꿔. 다른 파일은 건드리지 마." --output-format stream-json --verbose --safe-mode --no-session-persistence --permission-mode manual --tools "Read,Edit" --allowedTools "Read,Edit")
+date: 2026-08-18
+prompt: Read 도구로 hello.txt를 확인해. 그 다음 Edit 도구로 내용을 'world'로 바꿔. 다른 파일은 건드리지 마.
+workspace-initial: hello.txt("hello")
+exit-code: 0
+interrupt: 해당 없음
+stderr: 04-edit-file.stderr.txt (별도 파일)
+scenario: edit-file
+coverage:
+verify: tool_use=2, tool_result=2, Edit=1, final-content=world:0

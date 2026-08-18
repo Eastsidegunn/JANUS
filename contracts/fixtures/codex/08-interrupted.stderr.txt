@@ -1,0 +1,1 @@
+2026-08-18T06:33:31.807394Z ERROR codex_core::tools::router: error=exec_command failed for `/bin/zsh -lc 'tail -f /dev/null'`: UnknownProcessId { process_id: 69202 }

@@ -1,0 +1,14 @@
+tool: codex-cli 0.147.0
+command: codex exec --json --skip-git-repo-check --ephemeral --ignore-user-config
+    --ignore-rules -s workspace-write -C "/tmp/t8-codex-02.piVRqh" "셸 명령을 정확히 한 번 실행해서 현재 디렉토리의 파일 이름을 확인하고, 이름만
+  답해."
+date: 2026-08-18
+prompt: 셸 명령을 정확히 한 번 실행해서 현재 디렉토리의 파일 이름을 확인하고, 이름만
+  답해.
+workspace-initial: a.txt("alpha"), b.txt("beta")
+exit-code: 0
+interrupt: 해당 없음
+stderr: 02-single-tool.stderr.txt (별도 파일)
+scenario: single-tool
+coverage:
+verify: jq item.started structural count → command_execution=1

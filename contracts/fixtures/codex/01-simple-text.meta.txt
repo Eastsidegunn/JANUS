@@ -1,0 +1,12 @@
+tool: codex-cli 0.147.0
+command: codex exec --json --skip-git-repo-check --ephemeral --ignore-user-config
+    --ignore-rules -s workspace-write -C "$WS" "1+1은? 숫자만 답하고 도구는 사용하지 마."
+date: 2026-08-18
+prompt: 1+1은? 숫자만 답하고 도구는 사용하지 마.
+workspace-initial: 빈 디렉토리
+exit-code: 0
+interrupt: 해당 없음
+stderr: 01-simple-text.stderr.txt (별도 파일)
+scenario: simple-text
+coverage: normal
+verify: jq item.started structural count → command_execution=0

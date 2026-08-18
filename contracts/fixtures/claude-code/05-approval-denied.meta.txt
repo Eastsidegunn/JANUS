@@ -1,0 +1,12 @@
+tool: claude-code 2.1.233
+command: (cd "/tmp/t8-c05.9FPwP1" && claude -p "작업공간 밖 /tmp/t8-outside-c05.OuSIwk/note.txt에 내용이 test인 파일을 Write 도구로 만들어줘." --output-format stream-json --verbose --safe-mode --no-session-persistence --permission-mode manual --tools Write)
+date: 2026-08-18
+prompt: 작업공간 밖 /tmp/t8-outside-c05.OuSIwk/note.txt에 내용이 test인 파일을 Write 도구로 만들어줘.
+workspace-initial: 빈 디렉토리; 외부 sibling=/tmp/t8-outside-c05.OuSIwk (빈 디렉토리)
+exit-code: 0
+interrupt: 해당 없음
+approval: manual 모드에서 파일 생성 승인 거부
+stderr: 05-approval-denied.stderr.txt (별도 파일)
+scenario: approval-denied
+coverage: approval-denied
+verify: tool_use=1, tool_result=1, permission_denials=1, outside-absent=0
