@@ -342,10 +342,13 @@ func (p *Parser) parseResult(n nativeLine, line []byte) ([]Event, error) {
 
 // doneStatus는 result → done 매핑이다 (제안서 §8.3).
 func doneStatus(n nativeLine, stopRequested bool) gen.DonePayloadStatus {
+	if stopRequested {
+		return gen.DonePayloadStatusStopped
+	}
 	if n.Subtype == "success" {
 		return gen.DonePayloadStatusOk
 	}
-	if stopRequested || n.TerminalReason == "aborted_streaming" || n.TerminalReason == "aborted" {
+	if n.TerminalReason == "aborted_streaming" || n.TerminalReason == "aborted" {
 		return gen.DonePayloadStatusStopped
 	}
 	return gen.DonePayloadStatusError

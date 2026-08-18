@@ -149,6 +149,7 @@ func TestDoneStatusMapping(t *testing.T) {
 		wantResult string
 	}{
 		{"success", `{"type":"result","subtype":"success","terminal_reason":"completed","result":"끝"}`, false, "ok", "끝"},
+		{"stop 명령 뒤 success", `{"type":"result","subtype":"success","terminal_reason":"completed","result":"끝"}`, true, "stopped", "끝"},
 		{"중단", `{"type":"result","subtype":"error_during_execution","terminal_reason":"aborted_streaming"}`, false, "stopped",
 			"(결과 없음: subtype=error_during_execution, terminal_reason=aborted_streaming)"},
 		{"stop 명령 선행", `{"type":"result","subtype":"error_during_execution","terminal_reason":"other"}`, true, "stopped",
