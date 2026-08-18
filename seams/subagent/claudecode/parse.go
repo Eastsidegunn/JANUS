@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sync/atomic"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 )
@@ -37,7 +38,7 @@ type Parser struct {
 	rejectedEmitted map[string]bool
 	// stopRequested는 코어가 stop 명령을 보냈음을 뜻한다 — done 매핑의
 	// 1순위 근거(제안서 §8.3).
-	stopRequested bool
+	stopRequested atomic.Bool
 	done          bool
 	// disposition은 직전 ParseLine이 이벤트를 만들지 않은 경우의 사유다.
 	// 골든에 기록해 "의도적 무시"와 "조용한 누락"을 구분한다(제안서 §8.1).
@@ -50,7 +51,15 @@ func NewParser() *Parser {
 }
 
 // NoteStop은 코어가 stop 명령을 보냈음을 기록한다.
-func (p *Parser) NoteStop() { p.stopRequested = true }
+func (p *Parser) NoteStop() { p.stopRequested.Store(true) }
+
+// StopRequested reports whether the core sent stop. It is safe to call from
+// the command goroutine while the native stream is being drained.
+func (p *Parser) StopRequested() bool { return p.stopRequested.Load() }
+
+// Ready reports whether system/init produced subagent/ready. It is read after
+// native drain completion when a missing result must be synthesized.
+func (p *Parser) Ready() bool { return p.sawInit }
 
 // Done은 subagent/done을 이미 방출했는지 여부다.
 func (p *Parser) Done() bool { return p.done }
@@ -331,7 +340,7 @@ func (p *Parser) parseResult(n nativeLine, line []byte) ([]Event, error) {
 		}
 		out = append(out, ev...)
 	}
-	done := gen.DonePayload{Status: doneStatus(n, p.stopRequested), Result: resultText(n)}
+	done := gen.DonePayload{Status: doneStatus(n, p.stopRequested.Load()), Result: resultText(n)}
 	ev, err := p.emit(gen.EventKindSubagentDone, done, line)
 	if err != nil {
 		return nil, err
