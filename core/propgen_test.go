@@ -107,16 +107,28 @@ func genEventSequence(r *rand.Rand) []gen.EventRecord {
 			child := randID(r, 16)
 			actor := fmt.Sprintf("subagent:null:%d", subagentN)
 			add(gen.KindSubagentSpawn, "parent", child, ptr(rootSpan), map[string]any{"adapter": "null"}, nil)
-			add(gen.KindSubagentReady, actor, child, ptr(rootSpan), empty, func(e *gen.EventRecord) { e.Raw = ptr("") })
+			add(gen.KindSubagentReady, actor, child, ptr(rootSpan), gen.SubagentReadyPayload{
+				Grade: gen.SubagentReadyPayloadGradeObservable,
+			}, func(e *gen.EventRecord) { e.Raw = ptr("") })
 			for j := r.Intn(4); j > 0; j-- {
 				switch r.Intn(4) {
 				case 0:
-					add(gen.KindSubagentMessage, actor, child, ptr(rootSpan), map[string]any{"text": "진행"}, nil)
+					add(gen.KindSubagentMessage, actor, child, ptr(rootSpan), gen.SubagentMessagePayload{Text: "진행"}, nil)
 				case 1:
-					add(gen.KindSubagentToolCall, actor, child, ptr(rootSpan), map[string]any{"name": "edit"}, nil)
-					add(gen.KindSubagentToolResult, actor, child, ptr(rootSpan), map[string]any{"ok": true}, nil)
+					add(gen.KindSubagentToolCall, actor, child, ptr(rootSpan), gen.SubagentToolCallPayload{
+						CallID: fmt.Sprintf("call-%d-%d", subagentN, j), Name: "edit",
+						Args: mustJSON(map[string]any{"path": "a.txt"}),
+					}, nil)
+					add(gen.KindSubagentToolResult, actor, child, ptr(rootSpan), gen.SubagentToolResultPayload{
+						CallID: fmt.Sprintf("call-%d-%d", subagentN, j),
+						Status: gen.SubagentToolResultPayloadStatusOk,
+						Output: mustJSON(map[string]any{"ok": true}),
+					}, nil)
 				case 2:
-					add(gen.KindSubagentApprovalRequest, actor, child, ptr(rootSpan), map[string]any{"action": "rm -rf"}, nil)
+					add(gen.KindSubagentApprovalRequest, actor, child, ptr(rootSpan), gen.SubagentApprovalRequestPayload{
+						RequestID: fmt.Sprintf("req-%d-%d", subagentN, j), CallID: fmt.Sprintf("call-%d-%d", subagentN, j),
+						Name: "bash", Args: mustJSON(map[string]any{"command": "rm -rf /"}),
+					}, nil)
 				case 3:
 					add(gen.KindSubagentUsage, actor, child, ptr(rootSpan), empty, func(e *gen.EventRecord) {
 						e.UsageIn = ptr(r.Int63n(1_000_000))

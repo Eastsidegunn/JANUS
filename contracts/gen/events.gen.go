@@ -105,6 +105,14 @@ type SessionForkPayload struct {
 	OriginTraceID string `json:"origin_trace_id"`
 }
 
+type SubagentApprovalRequestPayload struct {
+	Args      json.RawMessage `json:"args"`
+	CallID    string          `json:"call_id"`
+	Name      string          `json:"name"`
+	Reason    *string         `json:"reason,omitempty"`
+	RequestID string          `json:"request_id"`
+}
+
 type SubagentDonePayloadStatus string
 
 const (
@@ -116,6 +124,46 @@ const (
 type SubagentDonePayload struct {
 	Result string                    `json:"result"`
 	Status SubagentDonePayloadStatus `json:"status"`
+}
+
+type SubagentMessagePayload struct {
+	Text string `json:"text"`
+}
+
+type SubagentReadyPayloadGrade string
+
+const (
+	SubagentReadyPayloadGradeObservable SubagentReadyPayloadGrade = "observable"
+	SubagentReadyPayloadGradeOpaque     SubagentReadyPayloadGrade = "opaque"
+)
+
+type SubagentReadyPayload struct {
+	Grade           SubagentReadyPayloadGrade `json:"grade"`
+	Model           *string                   `json:"model,omitempty"`
+	NativeSessionID *string                   `json:"native_session_id,omitempty"`
+	Tools           []string                  `json:"tools,omitempty"`
+}
+
+type SubagentToolCallPayload struct {
+	Args   json.RawMessage `json:"args"`
+	CallID string          `json:"call_id"`
+	Name   string          `json:"name"`
+}
+
+type SubagentToolResultPayloadStatus string
+
+const (
+	SubagentToolResultPayloadStatusOk       SubagentToolResultPayloadStatus = "ok"
+	SubagentToolResultPayloadStatusError    SubagentToolResultPayloadStatus = "error"
+	SubagentToolResultPayloadStatusRejected SubagentToolResultPayloadStatus = "rejected"
+)
+
+type SubagentToolResultPayload struct {
+	CallID string                          `json:"call_id"`
+	Error  *string                         `json:"error,omitempty"`
+	Output json.RawMessage                 `json:"output,omitempty"`
+	Reason *string                         `json:"reason,omitempty"`
+	Status SubagentToolResultPayloadStatus `json:"status"`
 }
 
 type ToolCallPayload struct {

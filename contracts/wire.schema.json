@@ -24,29 +24,66 @@
       "type": "object",
       "title": "코어 → 어댑터 (stdin)",
       "properties": {
-        "v": { "$ref": "#/$defs/protocolVersion" },
-        "cmd": { "enum": ["task", "message", "stop"] },
-        "payload": { "type": "object" }
+        "v": {
+          "$ref": "#/$defs/protocolVersion"
+        },
+        "cmd": {
+          "enum": [
+            "task",
+            "message",
+            "stop",
+            "approval_response"
+          ]
+        },
+        "payload": {
+          "type": "object"
+        }
       },
-      "required": ["v", "cmd", "payload"],
+      "required": [
+        "v",
+        "cmd",
+        "payload"
+      ],
       "additionalProperties": false,
       "oneOf": [
         {
           "properties": {
-            "cmd": { "const": "task" },
-            "payload": { "$ref": "#/$defs/taskPayload" }
+            "cmd": {
+              "const": "task"
+            },
+            "payload": {
+              "$ref": "#/$defs/taskPayload"
+            }
           }
         },
         {
           "properties": {
-            "cmd": { "const": "message" },
-            "payload": { "$ref": "#/$defs/messagePayload" }
+            "cmd": {
+              "const": "message"
+            },
+            "payload": {
+              "$ref": "#/$defs/messagePayload"
+            }
           }
         },
         {
           "properties": {
-            "cmd": { "const": "stop" },
-            "payload": { "$ref": "#/$defs/stopPayload" }
+            "cmd": {
+              "const": "stop"
+            },
+            "payload": {
+              "$ref": "#/$defs/stopPayload"
+            }
+          }
+        },
+        {
+          "properties": {
+            "cmd": {
+              "const": "approval_response"
+            },
+            "payload": {
+              "$ref": "#/$defs/approvalResponsePayload"
+            }
           }
         }
       ]
@@ -54,13 +91,18 @@
     "taskPayload": {
       "type": "object",
       "properties": {
-        "instruction": { "type": "string", "minLength": 1 },
+        "instruction": {
+          "type": "string",
+          "minLength": 1
+        },
         "workspace": {
           "type": "string",
           "minLength": 1,
           "description": "샌드박스 안에서 어댑터 대상 에이전트에게 보이는 워크스페이스 경로"
         },
-        "budget": { "$ref": "#/$defs/budget" },
+        "budget": {
+          "$ref": "#/$defs/budget"
+        },
         "depth": {
           "$ref": "#/$defs/int64NonNeg",
           "description": "이 서브에이전트가 위치한 현재 spawn 깊이(root의 직계 자식 = 0). 절대 한도는 budget.max_depth. 깊이·잔여 예산은 환경변수로도 자식에 전파된다 (FR-ADP-08)"
@@ -68,49 +110,79 @@
         "extensions": {
           "type": "array",
           "description": "대상 에이전트의 네이티브 확장 선언 (FR-EXT-01). 옵셔널",
-          "items": { "$ref": "#/$defs/extension" }
+          "items": {
+            "$ref": "#/$defs/extension"
+          }
         }
       },
-      "required": ["instruction", "workspace", "budget", "depth"],
+      "required": [
+        "instruction",
+        "workspace",
+        "budget",
+        "depth"
+      ],
       "additionalProperties": false
     },
     "messagePayload": {
       "type": "object",
       "properties": {
-        "text": { "type": "string", "minLength": 1 }
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
       },
-      "required": ["text"],
+      "required": [
+        "text"
+      ],
       "additionalProperties": false
     },
     "stopPayload": {
       "type": "object",
       "properties": {
         "reason": {
-          "enum": ["user", "budget_exceeded", "policy", "parent_done"]
+          "enum": [
+            "user",
+            "budget_exceeded",
+            "policy",
+            "parent_done"
+          ]
         }
       },
-      "required": ["reason"],
+      "required": [
+        "reason"
+      ],
       "additionalProperties": false
     },
     "budget": {
       "type": "object",
       "description": "정책 병합(FR-POL-03)이 끝난 뒤의 실효 잔여 예산 — 어댑터는 프로파일·상속 의미를 알지 못하며, 받은 값이 곧 한도다. 세 축 모두 필수",
       "properties": {
-        "tokens": { "$ref": "#/$defs/int64NonNeg" },
-        "time_ms": { "$ref": "#/$defs/int64NonNeg" },
+        "tokens": {
+          "$ref": "#/$defs/int64NonNeg"
+        },
+        "time_ms": {
+          "$ref": "#/$defs/int64NonNeg"
+        },
         "max_depth": {
           "$ref": "#/$defs/int64NonNeg",
           "description": "절대 spawn 깊이 한도. 어댑터는 taskPayload.depth >= max_depth이면 자식 spawn을 거부한다 (FR-ADP-08)"
         }
       },
-      "required": ["tokens", "time_ms", "max_depth"],
+      "required": [
+        "tokens",
+        "time_ms",
+        "max_depth"
+      ],
       "additionalProperties": false
     },
     "extension": {
       "type": "object",
       "description": "확장 선언: 이름/버전/무결성 해시/출처/필요 egress 도메인 (FR-EXT-01/02/06)",
       "properties": {
-        "name": { "type": "string", "minLength": 1 },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
         "version": {
           "type": "string",
           "minLength": 1,
@@ -128,10 +200,18 @@
         "egress": {
           "type": "array",
           "description": "실행 중 필요한 egress 도메인 선언(FR-EXT-06). 정책 통과분만 실행 프로파일에 편입",
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       },
-      "required": ["name", "version", "integrity", "source"],
+      "required": [
+        "name",
+        "version",
+        "integrity",
+        "source"
+      ],
       "additionalProperties": false
     },
     "event": {
@@ -139,7 +219,9 @@
       "title": "어댑터 → 코어 (stdout)",
       "$comment": "어댑터가 방출하는 정규화 이벤트. 코어 writer가 envelope(seq, ts, trace_id, span_id, actor)을 입혀 events 스키마의 레코드로 기록한다",
       "properties": {
-        "v": { "$ref": "#/$defs/protocolVersion" },
+        "v": {
+          "$ref": "#/$defs/protocolVersion"
+        },
         "kind": {
           "enum": [
             "subagent/ready",
@@ -151,50 +233,90 @@
             "subagent/done"
           ]
         },
-        "payload": { "type": "object" },
+        "payload": {
+          "type": "object"
+        },
         "raw": {
           "$ref": "#/$defs/base64",
           "description": "대상 도구 원본 페이로드의 base64 (FR-ADP-04, MUST). upstream 원본이 없는 합성 이벤트는 빈 base64(\"\")를 명시한다 (2026-08-17 [H] 승인)"
         }
       },
-      "required": ["v", "kind", "payload", "raw"],
+      "required": [
+        "v",
+        "kind",
+        "payload",
+        "raw"
+      ],
       "additionalProperties": false,
       "oneOf": [
         {
           "properties": {
-            "kind": { "const": "subagent/ready" }
+            "kind": {
+              "const": "subagent/ready"
+            },
+            "payload": {
+              "$ref": "#/$defs/readyPayload"
+            }
           }
         },
         {
           "properties": {
-            "kind": { "const": "subagent/message" }
+            "kind": {
+              "const": "subagent/message"
+            },
+            "payload": {
+              "$ref": "#/$defs/agentMessagePayload"
+            }
           }
         },
         {
           "properties": {
-            "kind": { "const": "subagent/tool_call" }
+            "kind": {
+              "const": "subagent/tool_call"
+            },
+            "payload": {
+              "$ref": "#/$defs/agentToolCallPayload"
+            }
           }
         },
         {
           "properties": {
-            "kind": { "const": "subagent/tool_result" }
+            "kind": {
+              "const": "subagent/tool_result"
+            },
+            "payload": {
+              "$ref": "#/$defs/agentToolResultPayload"
+            }
           }
         },
         {
           "properties": {
-            "kind": { "const": "subagent/approval_request" }
+            "kind": {
+              "const": "subagent/approval_request"
+            },
+            "payload": {
+              "$ref": "#/$defs/approvalRequestPayload"
+            }
           }
         },
         {
           "properties": {
-            "kind": { "const": "subagent/usage" },
-            "payload": { "$ref": "#/$defs/usagePayload" }
+            "kind": {
+              "const": "subagent/usage"
+            },
+            "payload": {
+              "$ref": "#/$defs/usagePayload"
+            }
           }
         },
         {
           "properties": {
-            "kind": { "const": "subagent/done" },
-            "payload": { "$ref": "#/$defs/donePayload" }
+            "kind": {
+              "const": "subagent/done"
+            },
+            "payload": {
+              "$ref": "#/$defs/donePayload"
+            }
           }
         }
       ]
@@ -203,20 +325,247 @@
       "type": "object",
       "description": "urn:hx:contracts:events:v1#/$defs/subagentDonePayload의 거울 — 서브셋이 문서 간 $ref를 금지하므로 중복 정의. 두 정의의 canonical JSON 구조 동일성은 contracts 테스트로 고정한다(2026-08-17 [H] 승인). result는 문자열 고정",
       "properties": {
-        "status": { "enum": ["ok", "error", "stopped"] },
-        "result": { "type": "string" }
+        "status": {
+          "enum": [
+            "ok",
+            "error",
+            "stopped"
+          ]
+        },
+        "result": {
+          "type": "string"
+        }
       },
-      "required": ["status", "result"],
+      "required": [
+        "status",
+        "result"
+      ],
       "additionalProperties": false
     },
     "usagePayload": {
       "type": "object",
       "description": "토큰 사용량 보고 (FR-ADP-07, SHOULD — 방출한다면 두 필드 모두 필수). 미보고 시 코어가 시간·요금 기반 추정으로 폴백",
       "properties": {
-        "input_tokens": { "$ref": "#/$defs/int64NonNeg" },
-        "output_tokens": { "$ref": "#/$defs/int64NonNeg" }
+        "input_tokens": {
+          "$ref": "#/$defs/int64NonNeg"
+        },
+        "output_tokens": {
+          "$ref": "#/$defs/int64NonNeg"
+        }
       },
-      "required": ["input_tokens", "output_tokens"],
+      "required": [
+        "input_tokens",
+        "output_tokens"
+      ],
+      "additionalProperties": false
+    },
+    "readyPayload": {
+      "type": "object",
+      "description": "어댑터 준비 완료 — 관측 등급 선언 (FR-ADP-06). T9 확정, 2026-08-18 [H] 승인",
+      "properties": {
+        "grade": {
+          "enum": [
+            "observable",
+            "opaque"
+          ]
+        },
+        "native_session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "grade"
+      ],
+      "additionalProperties": false
+    },
+    "agentMessagePayload": {
+      "type": "object",
+      "description": "서브에이전트의 모델 응답 텍스트",
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "agentToolCallPayload": {
+      "type": "object",
+      "description": "서브에이전트의 툴 실행 요청. call_id는 대상 도구의 네이티브 ID를 불투명 문자열로 보존",
+      "properties": {
+        "call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "call_id",
+        "name",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "agentToolResultPayload": {
+      "type": "object",
+      "description": "툴 실행 결과 — status 판별. ok(정상)/error(실행 오류)/rejected(승인 거부)",
+      "properties": {
+        "call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error",
+            "rejected"
+          ]
+        },
+        "output": {
+          "type": "object",
+          "$comment": "스칼라·배열·null 출력은 {\"value\": <원본>}으로 정규화"
+        },
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "call_id",
+        "status"
+      ],
+      "oneOf": [
+        {
+          "properties": {
+            "status": {
+              "const": "ok"
+            }
+          },
+          "required": [
+            "output"
+          ]
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "error"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "rejected"
+            }
+          },
+          "required": [
+            "reason"
+          ]
+        }
+      ],
+      "additionalProperties": false
+    },
+    "approvalRequestPayload": {
+      "type": "object",
+      "description": "승인 요청 — 부모 정책 레이어가 판정한다 (FR-POL-05). request_id는 approval_response와의 상관 키",
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "type": "object"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "request_id",
+        "call_id",
+        "name",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "approvalResponsePayload": {
+      "type": "object",
+      "description": "부모 정책 판정 (FR-POL-05). deny는 비어 있지 않은 reason 필수 — 사유 없는 거부 금지",
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision": {
+          "enum": [
+            "allow",
+            "deny"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "request_id",
+        "decision"
+      ],
+      "oneOf": [
+        {
+          "properties": {
+            "decision": {
+              "const": "allow"
+            }
+          }
+        },
+        {
+          "properties": {
+            "decision": {
+              "const": "deny"
+            }
+          },
+          "required": [
+            "reason"
+          ]
+        }
+      ],
       "additionalProperties": false
     }
   }

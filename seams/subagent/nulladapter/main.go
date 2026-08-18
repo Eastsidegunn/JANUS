@@ -59,9 +59,15 @@ func main() {
 			}
 			emit("subagent/ready", map[string]any{"grade": "observable"}, "")
 			emit("subagent/message", map[string]any{"text": "작업 시작: " + task.Instruction}, "")
-			emit("subagent/tool_call", map[string]any{"name": "echo", "args": map[string]any{"text": task.Instruction}}, "")
+			emit("subagent/tool_call", map[string]any{
+				"call_id": "null-call-1", "name": "echo",
+				"args": map[string]any{"text": task.Instruction},
+			}, "")
 			fakeRaw := base64.StdEncoding.EncodeToString([]byte(`{"native":"echo-output"}`))
-			emit("subagent/tool_result", map[string]any{"output": map[string]any{"stdout": task.Instruction}}, fakeRaw)
+			emit("subagent/tool_result", map[string]any{
+				"call_id": "null-call-1", "status": "ok",
+				"output": map[string]any{"stdout": task.Instruction},
+			}, fakeRaw)
 			emit("subagent/usage", map[string]any{"input_tokens": 12, "output_tokens": 34}, "")
 			emit("subagent/done", map[string]any{"status": "ok", "result": "null 어댑터 완료: " + task.Instruction}, "")
 			return
