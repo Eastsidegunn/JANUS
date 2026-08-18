@@ -431,10 +431,10 @@ func TestPipesClosedAfterCompletion(t *testing.T) {
 	}
 	// EPIPE/EOF가 아니라 실제 Close 상태(os.ErrClosed)임을 단정 —
 	// Close 제거 회귀를 정확히 잡는다.
-	if _, err := sub.stdin.(*os.File).Stat(); !errors.Is(err, os.ErrClosed) {
+	if _, err := sub.proc.StatStdin(); !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("완료 후 stdin이 닫힌 상태가 아님: %v", err)
 	}
-	if _, err := sub.stdoutFile.Stat(); !errors.Is(err, os.ErrClosed) {
+	if _, err := sub.proc.StatStdout(); !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("완료 후 stdout이 닫힌 상태가 아님: %v", err)
 	}
 }
