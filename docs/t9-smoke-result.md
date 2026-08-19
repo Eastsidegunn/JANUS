@@ -8,7 +8,7 @@ OAuth 유지·API key 미사용)
 
 | # | 내용 | 결과 |
 |---|---|---|
-| 1 | pristine 작업공간에서 사용자 훅 미발화 | **미증명 (증명 대기)** — 이 머신의 `~/.claude/settings.json`에 hooks가 없어 배제할 대상 자체가 없었다. 전용 테스트를 추가했다. §잔여 위험 참조 |
+| 1 | pristine 작업공간에서 사용자 훅 미발화 | **통과** — 별도 테스트로 증명. §확인점 1 참조 |
 | 2 | 우리 훅 발화 → `approval_request` 방출 | **통과** (deny·allow 실행 모두) |
 | 3 | deny 응답 → 툴 미실행 | **통과** — `smoke-approved.txt` 생성 안 됨 |
 | 4 | allow 응답 → 실행 | **통과** — 파일 생성됨 |
@@ -43,29 +43,49 @@ subagent/ready → subagent/tool_call → subagent/approval_request
 2. **Claude stdin 미종료** — 지시를 argv(`-p`)로 넘기면서 stdin을 열어둬 매
    세션 3초 대기와 경고가 발생했다. `procgroup.CloseStdin()`으로 즉시 종료.
 
-## 잔여 위험 — 확인점 1
+## 확인점 1 — 별도 증명 (2026-08-19)
 
-`--setting-sources project,local`이 사용자 설정을 실제로 배제하는지는 위 실행으로
-증명되지 않았다(배제할 사용자 훅이 없었다).
+위 실행으로는 증명되지 않았다. 이 머신의 `~/.claude/settings.json`에 hooks가
+없어 배제할 대상 자체가 없었기 때문이다. 전용 테스트
+`TestSmokeUserSettingIsolation`으로 따로 증명했다.
 
-증명용 테스트를 추가했다 — `TestSmokeUserSettingIsolation`. 개인
-`~/.claude`을 건드리지 않는다. `CLAUDE_CONFIG_DIR`로 사용자 설정 디렉터리를
-임시 경로로 옮기고 마커 훅을 심어 두 번 돌린다.
+```
+대조군 통과: user 소스 포함 시 사용자 훅 발화 — 기법이 유효하다
+격리 실행 이벤트: subagent/ready → subagent/message → subagent/usage → subagent/done
+확인점 1 통과: 사용자 훅 미발화(session-start-fired.txt 부재), 세션은 정상 시작
+--- PASS: TestSmokeUserSettingIsolation (2.33s)
+```
 
-| 실행 | setting-sources | 마커 기대 | 증명 대상 |
+| 실행 | setting-sources | 마커 | 증명 대상 |
 |---|---|---|---|
 | A 대조군 | `user,project,local` | 있음 | 기법 자체의 유효성 |
-| B 실제 | 어댑터 고정값 `project,local` | 없음 | 격리 성립 |
+| B 실제 | 어댑터를 실제로 띄움(`project,local` 고정) | 없음 | 격리 성립 |
+
+`CLAUDE_CONFIG_DIR`로 사용자 설정 디렉터리만 임시 경로로 옮긴다. 개인
+`~/.claude`은 읽지도 쓰지도 않는다.
 
 대조군을 둔 이유: 마커 부재만 보는 것은 증명이 아니다. 훅이 잘못 배선됐거나
 `CLAUDE_CONFIG_DIR`이 무시돼도 똑같이 마커가 없고, 그때 "격리 성공"으로 읽으면
 아무것도 증명하지 못한 채 증명했다고 착각하게 된다. A가 실패하면 테스트는 B의
-결과를 보지 않고 그 자리에서 멈춘다. B에서 우리 훅의 `approval_request`가 없어도
-멈춘다 — 세션이 죽어서 마커가 없는 것과 격리를 구분하기 위해서다.
+결과를 보지 않고 멈춘다. B에서 `ready`가 없어도 멈춘다 — 세션 사망과 격리를
+구분하기 위해서다.
 
-실행 절차는 `docs/t9-smoke-runbook.md` §5.1. [H] 사람이 실행한다.
+**자격증명을 쓰지 않고 API 호출도 하지 않는다.** `SessionStart` 훅은 첫 API
+호출보다 먼저 발화하므로, 임시 config에서 인증이 깨져도(실측:
+`authentication_failed`) 판정에 영향이 없다.
 
-**이 결과가 나오기 전까지 확인점 1은 미증명이다.** 영향 범위: 사용자 훅이 있는
-환경에서 그것이 함께 발화하면 격리 가정이 약해진다. 다만 (a) 우리 훅은 정상
-발화했고 (b) managed policy는 이 머신에 없으며 (c) 작업공간은 pristine이라
-project/local 설정도 없다.
+### 여기까지 오면서 틀렸던 것
+
+1. **PreToolUse 훅으로 시도** — 툴 호출까지 가야 발화하니 정상 세션이 필요했다.
+   `SessionStart`로 바꾸자 인증이 아예 필요 없어졌다.
+2. **"자격증명이 Keychain에 있으니 config 디렉터리 교체와 무관하다"** — 내가
+   사실로 단언했으나 틀렸다. 실제로는 인증이 깨진다(`Not logged in`). Keychain
+   항목 존재만 보고 반대로 읽었고, doctor의 "Not signed in" 신호를 무시했다.
+3. **대조군 출력을 앞 1500바이트만 로깅** — 정작 오류가 있는 뒷부분을 버려
+   1차 진단을 놓쳤다. 전문 저장 + 꼬리 로깅으로 고쳤다.
+
+## 잔여 위험
+
+`managed-settings.json`은 `--setting-sources`의 통제 밖이다. 이 머신에는 없지만
+(확인점 5), 있는 환경에서는 격리 가정이 달라질 수 있다. 배포 대상 환경에서
+확인점 5를 다시 봐야 한다.

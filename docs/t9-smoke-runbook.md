@@ -58,25 +58,30 @@ go test -tags smoke -count=1 -v -timeout 10m \
   -run TestSmokeUserSettingIsolation ./seams/subagent/claudecode
 ```
 
-`CLAUDE_CONFIG_DIR`로 사용자 설정 디렉터리를 임시 경로로 옮기고 거기에 마커
-훅을 심는다. `~/.claude`은 읽지도 쓰지도 않는다. 두 번 실행한다.
+`CLAUDE_CONFIG_DIR`로 사용자 설정 디렉터리를 임시 경로로 옮기고 거기에
+`SessionStart` 마커 훅을 심는다. `~/.claude`은 읽지도 쓰지도 않는다.
 
 | 실행 | setting-sources | 마커 기대 | 무엇을 증명하나 |
 |---|---|---|---|
 | A 대조군 | `user,project,local` | **있음** | 기법이 유효함(훅 배선·CLAUDE_CONFIG_DIR 존중) |
-| B 실제 | 어댑터 고정값 `project,local` | **없음** | 격리 성립 |
+| B 실제 | 어댑터를 실제로 띄움(`project,local` 고정) | **없음** | 격리 성립 |
 
 A가 실패하면 B의 결과는 어떤 값이든 증거가 아니다 — 테스트가 그 자리에서
-fatal로 멈추고 5.2로 안내한다. B에서 우리 훅의 `approval_request`가 안 보여도
-fatal이다(세션이 죽어서 마커가 없는 것을 격리 성공으로 읽지 않기 위해서다).
+fatal로 멈추고 5.2로 안내한다. B에서 `ready`가 안 보여도 fatal이다(세션이
+시작조차 못 해서 마커가 없는 것을 격리 성공으로 읽지 않기 위해서다).
 
-자격증명은 Keychain에 있어(2026-08-19 실측: `Claude Code-credentials` 항목 존재)
-config 디렉터리 교체와 무관하다.
+**이 테스트는 자격증명을 쓰지 않고 API 호출도 하지 않는다.** 임시 config
+디렉터리에서는 인증이 깨지지만(실측: `authentication_failed`, "Not logged in"),
+`SessionStart` 훅과 설정 로딩은 첫 API 호출보다 먼저 끝나므로 판정에 영향이
+없다. 그래서 [H] 제약의 대상이 아니며 누가 돌려도 된다.
 
-신규 config 디렉터리는 온보딩·작업공간 신뢰 상태가 비어 있어 그대로 두면 `-p`
-실행이 `system/init` 직후 exit 1로 죽는다(1차 시도에서 실제로 겪었다). 테스트가
-`.claude.json`에 `hasCompletedOnboarding`과 해당 작업공간의
-`hasTrustDialogAccepted`만 심는다 — 개인 설정을 복사하지 않는다.
+B가 어댑터를 직접 띄우는 이유: 상수를 읽어 claude를 부르면 누군가 argv 조립부에
+다른 값을 박아 넣어도 테스트가 통과하는 구멍이 생긴다.
+
+알아둘 것 — 신규 config 디렉터리는 온보딩·작업공간 신뢰 상태가 비어 있어
+그대로 두면 세션이 그 게이트에서 멈춘다. 테스트가 `.claude.json`에
+`hasCompletedOnboarding`과 해당 작업공간의 `hasTrustDialogAccepted`만 심는다.
+개인 설정을 복사하지 않는다.
 
 ### 5.2 대조군이 실패하면 — 개인 설정 임시 수정 (수동)
 

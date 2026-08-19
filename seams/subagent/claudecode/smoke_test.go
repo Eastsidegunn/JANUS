@@ -49,7 +49,7 @@ func TestSmokeApprovalHandshake(t *testing.T) {
 		{"allow", gen.ApprovalResponsePayloadDecisionAllow, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			run := runSmoke(t, claudeBin, bins, tc.decision, t.TempDir())
+			run := runSmoke(t, claudeBin, bins, tc.decision)
 			marker := filepath.Join(run.workspace, smokeMarkerFile)
 			_, statErr := os.Stat(marker)
 			created := statErr == nil
@@ -131,11 +131,12 @@ type smokeRun struct {
 
 // runSmoke는 코어 역할을 대신한다: task를 보내고, approval_request가 오면
 // 지정한 판정으로 approval_response를 돌려준 뒤 done까지 읽는다.
-func runSmoke(t *testing.T, claudeBin string, bins adapterBinaries, decision gen.ApprovalResponsePayloadDecision, workspace string) smokeRun {
+func runSmoke(t *testing.T, claudeBin string, bins adapterBinaries, decision gen.ApprovalResponsePayloadDecision) smokeRun {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), smokeTimeout)
 	defer cancel()
 
+	workspace := t.TempDir() // pristine — project/local 설정 없음
 	cmd := exec.CommandContext(ctx, bins.adapter)
 	cmd.Env = append(os.Environ(), "HX_CLAUDE_BIN="+claudeBin)
 	stdin, err := cmd.StdinPipe()
@@ -218,14 +219,19 @@ func smokeTaskLine(t *testing.T, workspace string) []byte {
 	return append(line, '\n')
 }
 
-const smokeUserHookMarker = "user-hook-fired.txt"
+const smokeSessionStartMarker = "session-start-fired.txt"
 
 // TestSmokeUserSettingIsolation은 확인점 1을 증명한다: 고정 플래그
 // --setting-sources project,local이 사용자 설정을 실제로 배제하는가.
 //
 // 개인 ~/.claude은 건드리지 않는다. CLAUDE_CONFIG_DIR로 사용자 설정
-// 디렉터리를 임시 경로로 옮기고, 거기에 마커를 남기는 PreToolUse 훅을 심는다.
-// 자격증명은 Keychain에 있어(실측) config 디렉터리 교체와 무관하다.
+// 디렉터리를 임시 경로로 옮기고 거기에 마커 훅을 심는다.
+//
+// SessionStart 훅을 쓴다. PreToolUse가 아니다 — 세션 시작 시점은 첫 API 호출
+// 전이라 인증 없이도 발화한다. 임시 config 디렉터리에서는 인증이 깨지지만
+// (2026-08-19 실측: authentication_failed, "Not logged in"), 설정 로딩은 그보다
+// 먼저 끝나므로 판정에 영향이 없다. 결과적으로 이 테스트는 자격증명을 쓰지
+// 않고 API 호출도 하지 않는다.
 //
 // 두 실행이 필요하다. 대조군 없이 "마커가 없다"만 보는 것은 증명이 아니다 —
 // 훅이 잘못 배선됐거나 CLAUDE_CONFIG_DIR이 무시돼도 똑같이 마커가 없고,
@@ -233,84 +239,75 @@ const smokeUserHookMarker = "user-hook-fired.txt"
 //
 //	A(대조군) user,project,local → 마커가 있어야 한다 (기법 자체가 유효한가)
 //	B(실제)   어댑터 그대로       → 마커가 없어야 한다 (격리가 성립하는가)
+//
+// B는 어댑터를 실제로 띄운다. 상수를 직접 읽어 claude를 부르면, 누군가
+// argv 조립부에 다른 값을 박아 넣어도 테스트가 통과하는 구멍이 생긴다.
 func TestSmokeUserSettingIsolation(t *testing.T) {
 	claudeBin := preflight(t)
 	bins := buildAdapterBinaries(t)
 
-	controlWorkspace := t.TempDir()
-	controlDir := t.TempDir()
-	controlMarker := filepath.Join(controlDir, smokeUserHookMarker)
-	writeUserHookSettings(t, controlDir, controlMarker)
-	seedConfigDir(t, controlDir, controlWorkspace)
-	runUserHookControl(t, claudeBin, controlDir, controlWorkspace)
-	if _, err := os.Stat(controlMarker); err != nil {
+	control := newUserHookConfig(t)
+	runControlSession(t, claudeBin, control, "user,project,local")
+	if _, err := os.Stat(control.marker); err != nil {
 		t.Fatalf("대조군 실패: user 소스를 포함했는데도 사용자 훅이 발화하지 않았다 (%v).\n"+
 			"기법이 성립하지 않으므로 아래 격리 실행은 어떤 결과가 나오든 증거가 되지\n"+
-			"못한다. 위 대조군 출력에서 세션이 왜 툴 호출에 도달하지 못했는지 확인하고,\n"+
-			"원인을 못 잡으면 확인점 1은 미증명으로 두고 docs/t9-smoke-runbook.md\n"+
-			"§5.2의 개인 설정 절차로 대체하라.", err)
+			"못한다. 위 대조군 출력에서 원인을 확인하고, 못 잡으면 확인점 1은 미증명으로\n"+
+			"두고 docs/t9-smoke-runbook.md §5.2의 개인 설정 절차로 대체하라.", err)
 	}
-	t.Logf("대조군 통과: user 소스 포함 시 사용자 훅 발화 확인 — 기법이 유효하다")
+	t.Logf("대조군 통과: user 소스 포함 시 사용자 훅 발화 — 기법이 유효하다")
 
-	isolationWorkspace := t.TempDir()
-	isolationDir := t.TempDir()
-	isolationMarker := filepath.Join(isolationDir, smokeUserHookMarker)
-	writeUserHookSettings(t, isolationDir, isolationMarker)
-	seedConfigDir(t, isolationDir, isolationWorkspace)
-	t.Setenv("CLAUDE_CONFIG_DIR", isolationDir) // runSmoke가 os.Environ()으로 전파한다
-
-	run := runSmoke(t, claudeBin, bins, gen.ApprovalResponsePayloadDecisionDeny, isolationWorkspace)
-	// 세션이 툴 호출 지점까지 실제로 갔는지부터 확인한다. 세션이 죽어서
-	// 마커가 없는 것을 격리 성공으로 읽으면 안 된다.
-	if !run.sawApprovalRequest {
-		t.Fatalf("우리 훅이 발화하지 않아 격리를 판정할 수 없다 — 세션이 툴 호출에 도달하지 못했다\nstderr:\n%s", run.stderr)
+	iso := newUserHookConfig(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", iso.dir) // 어댑터가 os.Environ()으로 전파한다
+	sawReady := runAdapterSession(t, claudeBin, bins, iso.workspace)
+	// 세션이 시작조차 못 했다면 마커 부재는 격리의 증거가 아니다.
+	if !sawReady {
+		t.Fatal("어댑터가 ready를 내지 못했다 — 세션이 시작되지 않았으므로 격리를 판정할 수 없다")
 	}
-	if _, err := os.Stat(isolationMarker); err == nil {
+	if _, err := os.Stat(iso.marker); err == nil {
 		t.Fatalf("확인점 1 실패: --setting-sources project,local인데 사용자 훅이 발화했다 (%s 존재).\n"+
-			"격리 가정이 깨진다 — 우회하지 말고 정지·재제안하라.", isolationMarker)
+			"격리 가정이 깨진다 — 우회하지 말고 정지·재제안하라.", iso.marker)
 	}
-	t.Logf("확인점 1 통과: 사용자 훅 미발화(%s 부재), 우리 훅은 정상 발화", smokeUserHookMarker)
+	t.Logf("확인점 1 통과: 사용자 훅 미발화(%s 부재), 세션은 정상 시작", smokeSessionStartMarker)
 }
 
-// writeUserHookSettings는 임시 사용자 설정 디렉터리에 마커 훅을 심는다.
-// 훅은 마커만 남기고 통과시킨다(exit 0) — 툴을 막지 않아야 격리 실행에서
-// 우리 승인 흐름과 간섭하지 않는다.
-func writeUserHookSettings(t *testing.T, configDir, marker string) {
+// userHookConfig는 임시 사용자 설정 디렉터리 한 벌이다.
+type userHookConfig struct {
+	dir       string // CLAUDE_CONFIG_DIR
+	workspace string
+	marker    string
+}
+
+func newUserHookConfig(t *testing.T) userHookConfig {
 	t.Helper()
-	settings := map[string]any{
+	c := userHookConfig{dir: t.TempDir(), workspace: t.TempDir()}
+	c.marker = filepath.Join(c.dir, smokeSessionStartMarker)
+
+	writeJSONFile(t, filepath.Join(c.dir, "settings.json"), map[string]any{
 		"hooks": map[string]any{
-			"PreToolUse": []any{map[string]any{
-				"matcher": "",
+			"SessionStart": []any{map[string]any{
 				"hooks": []any{map[string]any{
 					"type":    "command",
-					"command": fmt.Sprintf("touch %q", marker),
+					"command": fmt.Sprintf("touch %q", c.marker),
 					"timeout": 30,
 				}},
 			}},
 		},
-	}
-	writeJSONFile(t, filepath.Join(configDir, "settings.json"), settings)
-}
+	})
 
-// seedConfigDir는 신규 config 디렉터리의 first-run 게이트를 연다.
-//
-// 실측(2026-08-19, claude 2.1.235): 시드 없이 CLAUDE_CONFIG_DIR을 새 경로로
-// 주면 system/init까지는 나오지만 그 직후 exit 1로 죽는다. 온보딩·작업공간
-// 신뢰 상태가 비어 있기 때문이다. 최소 플래그만 심는다 — 개인 설정을 복사하지
-// 않는다.
-func seedConfigDir(t *testing.T, configDir, workspace string) {
-	t.Helper()
+	// 신규 config 디렉터리는 온보딩·작업공간 신뢰 상태가 비어 있다. 그대로
+	// 두면 세션이 그 게이트에서 멈춘다. 최소 플래그만 심는다 — 개인 설정을
+	// 복사하지 않는다. macOS의 t.TempDir()는 /var/folders/…를 주지만 claude는
+	// 심링크를 푼 /private/var/folders/…를 프로젝트 키로 쓰므로 둘 다 넣는다.
 	entry := map[string]any{"hasTrustDialogAccepted": true, "projectOnboardingSeenCount": 1}
-	projects := map[string]any{workspace: entry}
-	// macOS의 t.TempDir()는 /var/folders/… 를 주지만 claude는 심링크를 푼
-	// /private/var/folders/… 를 프로젝트 키로 쓴다. 둘 다 넣는다.
-	if resolved, err := filepath.EvalSymlinks(workspace); err == nil && resolved != workspace {
+	projects := map[string]any{c.workspace: entry}
+	if resolved, err := filepath.EvalSymlinks(c.workspace); err == nil && resolved != c.workspace {
 		projects[resolved] = entry
 	}
-	writeJSONFile(t, filepath.Join(configDir, ".claude.json"), map[string]any{
+	writeJSONFile(t, filepath.Join(c.dir, ".claude.json"), map[string]any{
 		"hasCompletedOnboarding": true,
 		"projects":               projects,
 	})
+	return c
 }
 
 func writeJSONFile(t *testing.T, path string, v any) {
@@ -324,37 +321,87 @@ func writeJSONFile(t *testing.T, path string, v any) {
 	}
 }
 
-// runUserHookControl은 user 소스를 포함해 claude를 직접 돌린다. 어댑터를
-// 거치지 않는다 — 어댑터의 고정 플래그를 테스트용으로 흔들지 않기 위해서다.
-//
-// 판정은 종료 코드가 아니라 마커 파일이다. 다만 실패 진단이 가능해야 하므로
-// 출력 전문을 파일로 남기고 꼬리를 로그에 찍는다(앞부분만 남기면 정작 오류가
-// 있는 뒷부분을 잃는다 — 1차 시도에서 실제로 그랬다).
-func runUserHookControl(t *testing.T, claudeBin, configDir, workspace string) {
+// runControlSession은 claude를 직접 띄운다. 어댑터를 거치지 않는다 —
+// 어댑터의 고정 플래그를 테스트용으로 흔들지 않기 위해서다. 판정은 종료
+// 코드가 아니라 마커 파일이다(인증 실패로 비정상 종료가 정상이다).
+func runControlSession(t *testing.T, claudeBin string, c userHookConfig, sources string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), smokeTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, claudeBin,
-		"-p", fmt.Sprintf("Write 도구를 정확히 한 번 사용해 현재 디렉토리에 %s 파일을 만들어라. 다른 도구는 쓰지 마라.", smokeMarkerFile),
+		"-p", "hi",
 		"--output-format", "stream-json", "--verbose",
 		"--no-session-persistence",
-		"--permission-mode", "acceptEdits", // 승인 프롬프트 없이 끝나게 — 훅은 그 전에 발화한다
-		"--setting-sources", "user,project,local",
+		"--setting-sources", sources,
 	)
-	cmd.Dir = workspace
-	cmd.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+configDir)
+	cmd.Dir = c.workspace
+	cmd.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+c.dir)
 	out, err := cmd.CombinedOutput() // Stdin nil = 즉시 EOF
 
+	// 출력 전문을 남긴다. 앞부분만 로그에 찍으면 정작 오류가 있는 뒷부분을
+	// 잃는다 — 1차 시도에서 실제로 진단을 놓쳤다.
 	logPath := filepath.Join(t.TempDir(), "control-output.txt")
 	if writeErr := os.WriteFile(logPath, out, 0o600); writeErr != nil {
 		t.Logf("대조군 출력 저장 실패: %v", writeErr)
 	}
-	t.Logf("대조군 종료: err=%v (출력 전문: %s, %d bytes)", err, logPath, len(out))
-	const tail = 2500
+	t.Logf("대조군(sources=%s) 종료: err=%v (출력 전문: %s, %d bytes)", sources, err, logPath, len(out))
+	const tail = 2000
 	if len(out) > tail {
 		t.Logf("대조군 출력 끝 %d바이트:\n%s", tail, out[len(out)-tail:])
 	} else {
 		t.Logf("대조군 출력:\n%s", out)
 	}
+}
+
+// runAdapterSession은 어댑터를 실제 경로 그대로 띄우고 ready 관측 여부만
+// 돌려준다. 임시 config에서는 인증이 깨져 done이 오류로 끝나지만, 설정 로딩과
+// SessionStart 훅은 그 전에 이미 끝났으므로 격리 판정에는 영향이 없다.
+func runAdapterSession(t *testing.T, claudeBin string, bins adapterBinaries, workspace string) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), smokeTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bins.adapter)
+	cmd.Env = append(os.Environ(), "HX_CLAUDE_BIN="+claudeBin)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdin.Write(smokeTaskLine(t, workspace)); err != nil {
+		t.Fatal(err)
+	}
+
+	var kinds []string
+	sawReady := false
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxLineBytes)
+	for scanner.Scan() {
+		var ev struct {
+			Kind gen.EventKind `json:"kind"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			t.Fatalf("어댑터 출력 파싱 실패: %v\n%s", err, scanner.Bytes())
+		}
+		kinds = append(kinds, string(ev.Kind))
+		if ev.Kind == gen.EventKindSubagentReady {
+			sawReady = true
+		}
+	}
+	stdin.Close()
+	waitErr := cmd.Wait()
+	t.Logf("격리 실행 이벤트: %s (err=%v)", strings.Join(kinds, " → "), waitErr)
+	if s := stderr.String(); s != "" {
+		t.Logf("격리 실행 stderr:\n%s", s)
+	}
+	return sawReady
 }
