@@ -212,6 +212,13 @@ oneOf:
 | `system/plugin_install`, `hook_started`/`hook_progress`/`hook_response` | **오류(격리 위반)** | 우리 플래그는 플러그인·자동 훅 발견을 차단한다. 나타나면 격리·플래그 계약이 깨진 것이므로 조용히 무시하면 안 된다 |
 | 그 외 미지 type/subtype | **오류** | 조용한 무시 금지 |
 
+**init 순서 규약 (2026-08-19 smoke 실측 반영)**: `system/init`은 **매핑 대상
+이벤트보다 먼저** 와야 한다(그래야 `ready`가 §5.2의 첫 이벤트가 된다). 단
+무시 대상(`rate_limit_event`, `thinking_tokens`, `api_retry`)은 init보다
+앞설 수 있다 — 실제 세션(claude 2.1.235)의 첫 줄이 `rate_limit_event`였다.
+T8 픽스처 8/8이 `system/init`으로 시작한 것은 `--safe-mode` 녹화 조건의
+산물이며 일반화되지 않는다.
+
 ---
 
 ## 4. raw 의미
@@ -311,6 +318,18 @@ C안 실패 시 T9는 **정지 후 재제안**이며 구현 완료로 머지할 
 `seams/subagent/claudecode/hxapprove`이며, 어댑터가 env로 넘긴 유닉스 소켓
 경로로 판정을 주고받는다. **신규 의존성 없음**.
 
+### 7.5 구현 제약 — `message` 미지원
+
+현재 Claude Code 어댑터는 `task` 하나를 `claude -p` 단발 세션으로 실행하며,
+정식 §5.2 command인 `message`를 받으면 `subagent/done{status:"error"}`를
+기록한 뒤 오류 종료한다. T8 픽스처에는 단발 세션에 후속 메시지를 주입하는
+근거가 없고, `--resume`/`--continue` 기반 구현은 세션 저장을 요구해 §7에서
+배제한 격리 조건과 충돌하기 때문이다.
+
+지원하려면 resume 기반 continuation의 실제 출력 픽스처(정상·오류·중단)를
+사람이 먼저 녹화하고, 세션 저장 위치·수명·격리 정책을 별도로 승인해야 한다.
+그 전까지 FR-ADP-02의 `send`는 **명시적 fail-closed 제약**이다.
+
 ---
 
 ## 8. 스냅샷·회귀 설계 (네트워크·실 인증 없음)
@@ -343,6 +362,10 @@ status = ok      : subtype == "success"
 result = 있으면 그대로 / 없으면 결정적 문구:
          "(결과 없음: subtype=<subtype>, terminal_reason=<terminal_reason|none>)"
 ```
+
+단, native `result`가 `success`여도 Claude 프로세스가 비정상 종료하면
+`status`를 `stopped`(stop 선행) 또는 `error`로 강등한다. 성공 통보와 프로세스
+종료 상태가 충돌할 때 성공으로 보고하지 않는 fail-closed 규칙이다.
 
 ### 8.4 fail-closed 회귀 목록
 

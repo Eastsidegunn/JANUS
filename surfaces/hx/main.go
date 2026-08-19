@@ -17,6 +17,7 @@ import (
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/core/logd"
+	"github.com/Eastsidegunn/JANUS/core/policy"
 	sqlite "github.com/Eastsidegunn/JANUS/seams/store/sqlite"
 	"github.com/Eastsidegunn/JANUS/seams/subagent"
 )
@@ -85,13 +86,27 @@ func runCmd(args []string) error {
 		return err
 	}
 
+	profile := policy.Profile{
+		ID: "hx-default", FSScope: []string{"/"},
+		Budget:   gen.Budget{Tokens: 1_000_000, TimeMs: 600_000, MaxDepth: 2},
+		Approval: policy.ApprovalManual,
+	}
+	sandbox, denial := policy.Evaluate(profile, policy.SpawnRequest{
+		Adapter: "null", Workspace: *workspace, Depth: 0,
+	})
+	if denial != nil {
+		return denial
+	}
 	sub, err := subagent.Spawn(ctx, log.Writer, traceID, rootSpan, 1, subagent.Spec{
 		Adapter:     "null",
 		Command:     []string{*adapter},
 		Instruction: instruction,
-		Workspace:   *workspace,
-		Budget:      gen.Budget{Tokens: 1_000_000, TimeMs: 600_000, MaxDepth: 2},
+		Workspace:   sandbox.Workspace,
+		Budget:      sandbox.Budget,
 		Depth:       0,
+		ProfileID:   sandbox.ProfileID,
+		Approval:    sandbox.Approval,
+		Decider:     policy.DenyAll{},
 	})
 	if err != nil {
 		return err

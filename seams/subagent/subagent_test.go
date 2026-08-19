@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -14,13 +15,15 @@ import (
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/core/logd"
+	"github.com/Eastsidegunn/JANUS/core/policy"
 )
 
 // FakeStore는 테스트 전용 인메모리 store다.
 type FakeStore struct {
-	mu      sync.Mutex
-	events  []gen.EventRecord
-	lastSeq int64
+	mu       sync.Mutex
+	events   []gen.EventRecord
+	lastSeq  int64
+	failKind gen.Kind
 }
 
 func (s *FakeStore) LastSeq(ctx context.Context) (int64, error) {
@@ -32,9 +35,96 @@ func (s *FakeStore) LastSeq(ctx context.Context) (int64, error) {
 func (s *FakeStore) Append(ctx context.Context, rec gen.EventRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if rec.Kind == s.failKind {
+		return errors.New("injected store failure")
+	}
 	s.events = append(s.events, rec)
 	s.lastSeq = rec.Seq
 	return nil
+}
+
+type fakeDecider struct {
+	decision policy.ApprovalDecision
+	err      error
+	entered  chan policy.ApprovalRequest
+	release  <-chan struct{}
+}
+
+func (d *fakeDecider) Decide(ctx context.Context, req policy.ApprovalRequest) (policy.ApprovalDecision, error) {
+	if d.entered != nil {
+		d.entered <- req
+	}
+	if d.release != nil {
+		select {
+		case <-d.release:
+		case <-ctx.Done():
+			return policy.ApprovalDecision{}, ctx.Err()
+		}
+	}
+	return d.decision, d.err
+}
+
+const approvalRequestID = "11111111-1111-4111-8111-111111111111"
+
+func approvalAdapterScript(emitMessage bool) string {
+	message := ""
+	if emitMessage {
+		message = `printf '%s\n' '{"v":1,"kind":"subagent/message","payload":{"text":"pump-progress"},"raw":""}'` + "\n"
+	}
+	return `read task
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/approval_request","payload":{"request_id":"` + approvalRequestID + `","call_id":"call-1","name":"Bash","args":{"command":"true"}},"raw":"eyJ0b29sX25hbWUiOiJCYXNoIn0="}'
+` + message + `read response
+printf '%s' "$response" > "$1"
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"approved"},"raw":""}'`
+}
+
+func decodeApprovalResponse(t *testing.T, path string) gen.ApprovalResponsePayload {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var b []byte
+	var err error
+	for time.Now().Before(deadline) {
+		b, err = os.ReadFile(path)
+		if err == nil && len(b) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err != nil || len(b) == 0 {
+		t.Fatalf("approval response not captured: %v", err)
+	}
+	var cmd gen.Command
+	if err := json.Unmarshal(b, &cmd); err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Cmd != gen.CommandCmdApprovalResponse {
+		t.Fatalf("cmd=%s", cmd.Cmd)
+	}
+	var response gen.ApprovalResponsePayload
+	if err := json.Unmarshal(cmd.Payload, &response); err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func spawnApprovalAdapter(t *testing.T, store *FakeStore, mode policy.ApprovalMode, decider policy.ApprovalDecider, emitMessage bool) (*Subagent, *logd.Writer, string) {
+	t.Helper()
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responsePath := filepath.Join(t.TempDir(), "response.json")
+	spec := spawnSpec([]string{"/bin/sh", "-c", approvalAdapterScript(emitMessage), "sh", responsePath}, "지시")
+	spec.ProfileID = "profile-1"
+	spec.Approval = mode
+	spec.Decider = decider
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1, spec)
+	if err != nil {
+		w.Close()
+		t.Fatal(err)
+	}
+	return sub, w, responsePath
 }
 
 func (s *FakeStore) AppendBatch(ctx context.Context, recs []gen.EventRecord) error {
@@ -80,7 +170,7 @@ func TestStopPath(t *testing.T) {
 	// 흐름이 필요하므로, task 후 즉시 stop이 아닌 stop-우선 시나리오는
 	// null 어댑터의 결정적 각본상 불가 — 대신 sh 기반 즉답 어댑터로 검증.
 	script := `read line
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
 read line
 printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"stopped","result":"중단됨"},"raw":""}'`
 	store := &FakeStore{}
@@ -106,6 +196,129 @@ printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"stopped","resu
 	}
 }
 
+func TestApprovalPolicyModesAndDurableAttribution(t *testing.T) {
+	cases := []struct {
+		name       string
+		mode       policy.ApprovalMode
+		decider    policy.ApprovalDecider
+		decision   gen.ApprovalResponsePayloadDecision
+		reasonPart string
+	}{
+		{"explicit auto", policy.ApprovalAuto, nil, gen.ApprovalResponsePayloadDecisionAllow, ""},
+		{"manual nil defaults deny", policy.ApprovalManual, nil, gen.ApprovalResponsePayloadDecisionDeny, "승인 결정자 미배선"},
+		{"manual decider allow", policy.ApprovalManual, &fakeDecider{decision: policy.ApprovalDecision{Allow: true}}, gen.ApprovalResponsePayloadDecisionAllow, ""},
+		{"decider error denies", policy.ApprovalManual, &fakeDecider{err: errors.New("ui unavailable")}, gen.ApprovalResponsePayloadDecisionDeny, "ui unavailable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &FakeStore{}
+			sub, w, responsePath := spawnApprovalAdapter(t, store, tc.mode, tc.decider, false)
+			defer w.Close()
+			if _, err := sub.Wait(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			response := decodeApprovalResponse(t, responsePath)
+			if response.RequestID != approvalRequestID || response.Decision != tc.decision {
+				t.Fatalf("response=%+v", response)
+			}
+			if tc.reasonPart != "" && (response.Reason == nil || !strings.Contains(*response.Reason, tc.reasonPart)) {
+				t.Fatalf("reason=%v want %q", response.Reason, tc.reasonPart)
+			}
+
+			events, _ := store.ReadFrom(context.Background(), 1)
+			var request, decision *gen.EventRecord
+			for i := range events {
+				switch events[i].Kind {
+				case gen.KindSubagentApprovalRequest:
+					request = &events[i]
+				case gen.KindPolicyDecision:
+					decision = &events[i]
+				}
+			}
+			if request == nil || decision == nil || decision.Seq <= request.Seq {
+				t.Fatalf("approval request/decision durable order missing: %+v", events)
+			}
+			if decision.Actor != "parent" || decision.SpanID != request.SpanID || decision.ParentSpanID == nil {
+				t.Fatalf("policy attribution request=%+v decision=%+v", request, decision)
+			}
+			var payload gen.PolicyDecisionPayload
+			if err := json.Unmarshal(decision.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.ProfileID != "profile-1" || string(payload.Decision) != string(tc.decision) {
+				t.Fatalf("policy payload=%+v", payload)
+			}
+		})
+	}
+}
+
+func TestApprovalDecisionDoesNotBlockPump(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan policy.ApprovalRequest, 1)
+	decider := &fakeDecider{
+		decision: policy.ApprovalDecision{Allow: true}, entered: entered, release: release,
+	}
+	store := &FakeStore{}
+	sub, w, _ := spawnApprovalAdapter(t, store, policy.ApprovalManual, decider, true)
+	defer w.Close()
+	select {
+	case req := <-entered:
+		if req.RequestID != approvalRequestID || req.SpanID == "" {
+			t.Fatalf("request=%+v", req)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("decider not entered")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		events, _ := store.ReadFrom(context.Background(), 1)
+		found := false
+		for _, event := range events {
+			if event.Kind == gen.KindSubagentMessage {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("approval decision blocked stdout pump")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	if _, err := sub.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApprovalEmptyDenyReasonIsFatalAfterForcedDeny(t *testing.T) {
+	store := &FakeStore{}
+	decider := &fakeDecider{decision: policy.ApprovalDecision{Allow: false}}
+	sub, w, responsePath := spawnApprovalAdapter(t, store, policy.ApprovalManual, decider, false)
+	defer w.Close()
+	if _, err := sub.Wait(context.Background()); err == nil || !strings.Contains(err.Error(), "deny reason이 비어 있음") {
+		t.Fatalf("empty deny reason not fatal: %v", err)
+	}
+	response := decodeApprovalResponse(t, responsePath)
+	if response.Decision != gen.ApprovalResponsePayloadDecisionDeny || response.Reason == nil || *response.Reason == "" {
+		t.Fatalf("forced response=%+v", response)
+	}
+}
+
+func TestApprovalRecordFailureSendsDenyBeforeTermination(t *testing.T) {
+	store := &FakeStore{failKind: gen.KindPolicyDecision}
+	sub, w, responsePath := spawnApprovalAdapter(t, store, policy.ApprovalAuto, nil, false)
+	defer w.Close()
+	if _, err := sub.Wait(context.Background()); err == nil || !strings.Contains(err.Error(), "policy/decision 기록") {
+		t.Fatalf("record failure not surfaced: %v", err)
+	}
+	response := decodeApprovalResponse(t, responsePath)
+	if response.Decision != gen.ApprovalResponsePayloadDecisionDeny || response.Reason == nil || *response.Reason != "정책 판정 기록 실패" {
+		t.Fatalf("record failure response=%+v", response)
+	}
+}
+
 // §5.2 위반 어댑터(비 NDJSON, raw 누락 등)는 거부된다 — 계약을 어기는
 // 어댑터는 등록될 수 없다의 런타임 판.
 func TestContractViolatingAdapterRejected(t *testing.T) {
@@ -113,11 +326,11 @@ func TestContractViolatingAdapterRejected(t *testing.T) {
 		"비 JSON 출력": `read line
 printf 'not json at all\n'`,
 		"raw 누락": `read line
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{}}'`,
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"}}'`,
 		"미지 kind": `read line
 printf '%s\n' '{"v":1,"kind":"subagent/spawned","payload":{},"raw":""}'`,
 		"done 없이 종료": `read line
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'`,
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'`,
 	}
 	for name, script := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -145,16 +358,16 @@ func TestSequenceViolationsRejected(t *testing.T) {
 		"ready 없는 done": `read line
 printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'`,
 		"ready 중복": `read line
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
 printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'`,
 		"done 이후 출력": `read line
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
 printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'
 printf '%s\n' '{"v":1,"kind":"subagent/message","payload":{"text":"유령"},"raw":""}'`,
 		"ready 전 중간 이벤트": `read line
 printf '%s\n' '{"v":1,"kind":"subagent/message","payload":{"text":"x"},"raw":""}'
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
 printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'`,
 	}
 	for name, script := range cases {
@@ -181,7 +394,7 @@ printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"
 // deadline을 지킨다 — kill 후 즉시 반환, reap은 펌프가 수행.
 func TestWaitHonorsContextAfterDone(t *testing.T) {
 	script := `read line
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
 printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'
 sleep 5`
 	store := &FakeStore{}
@@ -238,7 +451,7 @@ sleep 5`
 // T7 재리뷰 차단 2의 회귀 (3): done 이후 비정상 exit 코드는 보존된다.
 func TestAbnormalExitAfterDonePreserved(t *testing.T) {
 	script := `read line
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
 printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'
 exit 3`
 	store := &FakeStore{}
@@ -262,7 +475,7 @@ exit 3`
 // Wait는 deadline 안에 정상 결과를 반환한다.
 func TestExitObservationIndependentOfStdoutEOF(t *testing.T) {
 	script := `read line
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
 printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'
 sleep 2 &
 exit 0`
@@ -296,7 +509,7 @@ exit 0`
 // 프로세스 그룹 전체를 죽인다 — 자손이 남아 Wait를 지연시키지 않는다.
 func TestSpawnContextCancelKillsGroup(t *testing.T) {
 	script := `read line
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
 sleep 2 &
 wait`
 	store := &FakeStore{}
@@ -345,14 +558,14 @@ func TestBlankLinesAreViolations(t *testing.T) {
 	cases := map[string]string{
 		"ready 전 공백": `read line
 printf '\n'
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
 printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'`,
 		"중간 공백": `read line
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
 printf '\n'
 printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'`,
 		"done 후 공백": `read line
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
 printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'
 printf '\n'`,
 	}
@@ -382,7 +595,7 @@ printf '\n'`,
 func TestLeaderExitTerminatesRemainingGroup(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "grandchild-ran")
 	script := `read line
-printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
 printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"r"},"raw":""}'
 ( sleep 0.4; printf '%s\n' '{"v":1,"kind":"subagent/message","payload":{"text":"유령"},"raw":""}'; touch "` + marker + `" ) &
 exit 0`
@@ -431,10 +644,10 @@ func TestPipesClosedAfterCompletion(t *testing.T) {
 	}
 	// EPIPE/EOF가 아니라 실제 Close 상태(os.ErrClosed)임을 단정 —
 	// Close 제거 회귀를 정확히 잡는다.
-	if _, err := sub.stdin.(*os.File).Stat(); !errors.Is(err, os.ErrClosed) {
+	if _, err := sub.proc.StatStdin(); !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("완료 후 stdin이 닫힌 상태가 아님: %v", err)
 	}
-	if _, err := sub.stdoutFile.Stat(); !errors.Is(err, os.ErrClosed) {
+	if _, err := sub.proc.StatStdout(); !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("완료 후 stdout이 닫힌 상태가 아님: %v", err)
 	}
 }

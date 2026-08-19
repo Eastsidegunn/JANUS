@@ -189,6 +189,9 @@
       "properties": {
         "kind": {
           "const": "subagent/ready"
+        },
+        "payload": {
+          "$ref": "#/$defs/subagentReadyPayload"
         }
       }
     },
@@ -196,6 +199,9 @@
       "properties": {
         "kind": {
           "const": "subagent/message"
+        },
+        "payload": {
+          "$ref": "#/$defs/subagentMessagePayload"
         }
       }
     },
@@ -203,6 +209,9 @@
       "properties": {
         "kind": {
           "const": "subagent/tool_call"
+        },
+        "payload": {
+          "$ref": "#/$defs/subagentToolCallPayload"
         }
       }
     },
@@ -210,6 +219,9 @@
       "properties": {
         "kind": {
           "const": "subagent/tool_result"
+        },
+        "payload": {
+          "$ref": "#/$defs/subagentToolResultPayload"
         }
       }
     },
@@ -217,6 +229,9 @@
       "properties": {
         "kind": {
           "const": "subagent/approval_request"
+        },
+        "payload": {
+          "$ref": "#/$defs/subagentApprovalRequestPayload"
         }
       }
     },
@@ -300,7 +315,7 @@
       "$comment": "OTel SpanContext 규격: 16자리 소문자 hex이며 최소 한 바이트가 non-zero여야 유효 — all-zero ID는 스키마 수준에서 거부(FR-OBS-01). all-zero 거부는 contracts 영구 테스트 대상"
     },
     "kind": {
-      "description": "§5.1 kind 어휘 전체 (v0.1). 대화·툴 4종과 turn/step 경계 4종은 T5에서 확정(2026-08-17 [H] 승인). payload가 아직 열린 kind(session/*, assistant/chunk, subagent/*)의 필드 확정은 해당 태스크(T7/T9 어댑터, T10 샌드박스, T13 확장)에서 additive로 진행",
+      "description": "§5.1 kind 어휘 전체 (v0.1). 대화·툴 4종과 turn/step 경계 4종은 T5에서, subagent 5종(ready/message/tool_call/tool_result/approval_request)은 T9에서 확정. 남은 열린 kind(session/*, assistant/chunk, subagent/spawn)의 필드 확정은 해당 태스크에서 additive로 진행",
       "enum": [
         "session/start",
         "session/fork",
@@ -633,6 +648,198 @@
           "additionalProperties": false
         }
       ]
+    },
+    "subagentReadyPayload": {
+      "type": "object",
+      "description": "어댑터 준비 완료 — 관측 등급 선언 (FR-ADP-06). T9 확정, 2026-08-18 [H] 승인 — wire.schema.json의 거울 정의(문서 간 $ref 금지). 동일성은 contracts 테스트로 고정",
+      "properties": {
+        "grade": {
+          "enum": [
+            "observable",
+            "opaque"
+          ]
+        },
+        "native_session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "grade"
+      ],
+      "additionalProperties": false
+    },
+    "subagentMessagePayload": {
+      "type": "object",
+      "description": "서브에이전트의 모델 응답 텍스트 — wire.schema.json의 거울 정의(문서 간 $ref 금지). 동일성은 contracts 테스트로 고정",
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "subagentToolCallPayload": {
+      "type": "object",
+      "description": "서브에이전트의 툴 실행 요청. call_id는 대상 도구의 네이티브 ID를 불투명 문자열로 보존 — wire.schema.json의 거울 정의(문서 간 $ref 금지). 동일성은 contracts 테스트로 고정",
+      "properties": {
+        "call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "call_id",
+        "name",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "subagentToolResultPayload": {
+      "type": "object",
+      "description": "툴 실행 결과 — status 판별. ok(정상)/error(실행 오류)/rejected(승인 거부) — wire.schema.json의 거울 정의(문서 간 $ref 금지). 동일성은 contracts 테스트로 고정",
+      "properties": {
+        "call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error",
+            "rejected"
+          ]
+        },
+        "output": {
+          "type": "object",
+          "$comment": "스칼라·배열·null 출력은 {\"value\": <원본>}으로 정규화"
+        },
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "call_id",
+        "status"
+      ],
+      "oneOf": [
+        {
+          "properties": {
+            "call_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "status": {
+              "const": "ok"
+            },
+            "output": {
+              "type": "object",
+              "$comment": "스칼라·배열·null 출력은 {\"value\": <원본>}으로 정규화"
+            }
+          },
+          "required": [
+            "output"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "properties": {
+            "call_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "status": {
+              "const": "error"
+            },
+            "error": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "properties": {
+            "call_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "status": {
+              "const": "rejected"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "additionalProperties": false
+    },
+    "subagentApprovalRequestPayload": {
+      "type": "object",
+      "description": "승인 요청 — 부모 정책 레이어가 판정한다 (FR-POL-05). request_id는 approval_response와의 상관 키 — wire.schema.json의 거울 정의(문서 간 $ref 금지). 동일성은 contracts 테스트로 고정",
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "type": "object"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "request_id",
+        "call_id",
+        "name",
+        "args"
+      ],
+      "additionalProperties": false
     }
   }
 }

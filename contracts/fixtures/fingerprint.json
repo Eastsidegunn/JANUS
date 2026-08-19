@@ -1,0 +1,168 @@
+{
+  "claude-code/01-simple-text.ndjson": {
+    "lines": 4,
+    "sha256": "e0468e9ae1b46c550d2f53ece081c037434577922e44d1940db21ea0a8dbb011",
+    "top_level_types": {
+      "assistant": 1,
+      "rate_limit_event": 1,
+      "result/success": 1,
+      "system/init": 1
+    }
+  },
+  "claude-code/02-single-tool.ndjson": {
+    "lines": 6,
+    "sha256": "2e64fbca868c9fc1c662ff4b24926d8c7faaa9d29cd9d2c27d34e4fb5a9a1890",
+    "top_level_types": {
+      "assistant": 2,
+      "rate_limit_event": 1,
+      "result/success": 1,
+      "system/init": 1,
+      "user": 1
+    }
+  },
+  "claude-code/03-multi-tool.ndjson": {
+    "lines": 11,
+    "sha256": "7e4d5490e7117193ea8baf876cbb23671993b52843f83e9308dc5cb1f812aa4d",
+    "top_level_types": {
+      "assistant": 4,
+      "rate_limit_event": 1,
+      "result/success": 1,
+      "system/init": 1,
+      "system/thinking_tokens": 2,
+      "user": 2
+    }
+  },
+  "claude-code/04-edit-file.ndjson": {
+    "lines": 8,
+    "sha256": "0379a89928c159606d728ca095d0d4a15374d4dfeed4f90bc88cafcd5bb37a18",
+    "top_level_types": {
+      "assistant": 3,
+      "rate_limit_event": 1,
+      "result/success": 1,
+      "system/init": 1,
+      "user": 2
+    }
+  },
+  "claude-code/05-approval-denied.ndjson": {
+    "lines": 11,
+    "sha256": "9d2d6683298bcd5144e7a919ff10a0f35ade31518738350e7dc31362eed43c5b",
+    "top_level_types": {
+      "assistant": 3,
+      "rate_limit_event": 1,
+      "result/success": 1,
+      "system/init": 1,
+      "system/permission_denied": 1,
+      "system/thinking_tokens": 3,
+      "user": 1
+    }
+  },
+  "claude-code/06-tool-error.ndjson": {
+    "lines": 6,
+    "sha256": "98e5049ce0da415cde5896ef9ad0bac7f9a2f09a03a60f1ecf3b21b6f1d8e74f",
+    "top_level_types": {
+      "assistant": 2,
+      "rate_limit_event": 1,
+      "result/success": 1,
+      "system/init": 1,
+      "user": 1
+    }
+  },
+  "claude-code/07-command-fail.ndjson": {
+    "lines": 9,
+    "sha256": "76a89e07c6ea6de4168548a56b50c1ed0363bc31f3fa79adde086e96b5cc173a",
+    "top_level_types": {
+      "assistant": 3,
+      "rate_limit_event": 1,
+      "result/success": 1,
+      "system/init": 1,
+      "system/thinking_tokens": 2,
+      "user": 1
+    }
+  },
+  "claude-code/08-interrupted.ndjson": {
+    "lines": 8,
+    "sha256": "bc312484e1adca7724ca4ccd68a67281010b66bde109de9c482d4fa3469ccc55",
+    "top_level_types": {
+      "rate_limit_event": 1,
+      "result/error_during_execution": 1,
+      "system/init": 1,
+      "system/thinking_tokens": 4,
+      "user": 1
+    }
+  },
+  "codex/01-simple-text.ndjson": {
+    "lines": 4,
+    "sha256": "bfc02444630a9d74ffb0234628ca753d95bb1a9006cfbaea4d79919ed00a28e3",
+    "top_level_types": {
+      "item.completed": 1,
+      "thread.started": 1,
+      "turn.completed": 1,
+      "turn.started": 1
+    }
+  },
+  "codex/02-single-tool.ndjson": {
+    "lines": 7,
+    "sha256": "2ca85dd392c34be9ea51b61dd8e736e9a71006533e4235043f85fcfbd105b31a",
+    "top_level_types": {
+      "item.completed": 3,
+      "item.started": 1,
+      "thread.started": 1,
+      "turn.completed": 1,
+      "turn.started": 1
+    }
+  },
+  "codex/03-multi-tool.ndjson": {
+    "lines": 9,
+    "sha256": "36306702db6482253bf998e9d90e74d172b372d52354072d7dafe8c9629b3ca4",
+    "top_level_types": {
+      "item.completed": 4,
+      "item.started": 2,
+      "thread.started": 1,
+      "turn.completed": 1,
+      "turn.started": 1
+    }
+  },
+  "codex/04-edit-file.ndjson": {
+    "lines": 11,
+    "sha256": "1a22a1e6fb50b15e509cef6010a6ef594bcabbcc9992ede0a0570f141a0baecb",
+    "top_level_types": {
+      "item.completed": 5,
+      "item.started": 3,
+      "thread.started": 1,
+      "turn.completed": 1,
+      "turn.started": 1
+    }
+  },
+  "codex/06-tool-error.ndjson": {
+    "lines": 7,
+    "sha256": "4b25666663c789d51540f0d89cf672c3c28c5133362c84a22f163358fe69f62d",
+    "top_level_types": {
+      "item.completed": 3,
+      "item.started": 1,
+      "thread.started": 1,
+      "turn.completed": 1,
+      "turn.started": 1
+    }
+  },
+  "codex/07-command-fail.ndjson": {
+    "lines": 7,
+    "sha256": "a1d30fdaaa1eb172d56490e7d31cc0f0aeb11277c369f5c455076ef97f2609b3",
+    "top_level_types": {
+      "item.completed": 3,
+      "item.started": 1,
+      "thread.started": 1,
+      "turn.completed": 1,
+      "turn.started": 1
+    }
+  },
+  "codex/08-interrupted.ndjson": {
+    "lines": 4,
+    "sha256": "117e9f91d2960f9cdffd937e82d833ef873b2a4f3c870b344a6b9b850c1c5480",
+    "top_level_types": {
+      "item.completed": 1,
+      "item.started": 1,
+      "thread.started": 1,
+      "turn.started": 1
+    }
+  }
+}

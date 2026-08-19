@@ -23,6 +23,9 @@ codegen-drift:
 
 lint:
 	$(GO) vet ./...
+	# smoke 하네스는 빌드 태그로 CI에서 격리되지만(실 자격증명 필요),
+	# 컴파일은 확인해 코드 부패를 막는다. 실행은 사람 몫이다([H]).
+	$(GO) vet -tags smoke ./seams/subagent/claudecode/
 	$(GO) mod tidy -diff
 	@unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \
@@ -41,8 +44,13 @@ smoke:
 # T2의 expected-fail 속성 테스트는 전부 배선 완료됐다: FR-LOG-06은 T4,
 # FR-POL-03은 T6에서 본 스위트(make test)로 편입 — xfail 게이트는 소멸.
 
-# T8/T9에서 어댑터 골든 픽스처가 생기면 실제 대조로 대체된다.
+# 어댑터 골든 픽스처 대조 (FR-ADP-05, T9에서 활성화).
+# 1층: 매니페스트·비밀 게이트 — 픽스처 구성 자체의 무결성
+# 2층: 원본 포맷 fingerprint — 대상 도구의 출력 포맷 변경 검출(15건 전체)
+# (Claude 8건의 정규화 골든은 seams/subagent/claudecode 테스트가 담당)
 fixtures:
-	@echo "fixtures: 등록된 어댑터 픽스처 없음 (T8/T9에서 활성화)"
+	tools/check-fixture-secrets.sh contracts/fixtures
+	tools/check-fixture-manifest.sh contracts/fixtures 15
+	$(GO) run ./tools/fixtureprint
 
 ci: lint test smoke fixtures codegen-drift

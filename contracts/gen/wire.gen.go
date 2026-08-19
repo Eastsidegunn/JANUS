@@ -5,6 +5,53 @@ package gen
 
 import "encoding/json"
 
+type AgentMessagePayload struct {
+	Text string `json:"text"`
+}
+
+type AgentToolCallPayload struct {
+	Args   json.RawMessage `json:"args"`
+	CallID string          `json:"call_id"`
+	Name   string          `json:"name"`
+}
+
+type AgentToolResultPayloadStatus string
+
+const (
+	AgentToolResultPayloadStatusOk       AgentToolResultPayloadStatus = "ok"
+	AgentToolResultPayloadStatusError    AgentToolResultPayloadStatus = "error"
+	AgentToolResultPayloadStatusRejected AgentToolResultPayloadStatus = "rejected"
+)
+
+type AgentToolResultPayload struct {
+	CallID string                       `json:"call_id"`
+	Error  *string                      `json:"error,omitempty"`
+	Output json.RawMessage              `json:"output,omitempty"`
+	Reason *string                      `json:"reason,omitempty"`
+	Status AgentToolResultPayloadStatus `json:"status"`
+}
+
+type ApprovalRequestPayload struct {
+	Args      json.RawMessage `json:"args"`
+	CallID    string          `json:"call_id"`
+	Name      string          `json:"name"`
+	Reason    *string         `json:"reason,omitempty"`
+	RequestID string          `json:"request_id"`
+}
+
+type ApprovalResponsePayloadDecision string
+
+const (
+	ApprovalResponsePayloadDecisionAllow ApprovalResponsePayloadDecision = "allow"
+	ApprovalResponsePayloadDecisionDeny  ApprovalResponsePayloadDecision = "deny"
+)
+
+type ApprovalResponsePayload struct {
+	Decision  ApprovalResponsePayloadDecision `json:"decision"`
+	Reason    *string                         `json:"reason,omitempty"`
+	RequestID string                          `json:"request_id"`
+}
+
 type Budget struct {
 	MaxDepth int64 `json:"max_depth"`
 	TimeMs   int64 `json:"time_ms"`
@@ -14,9 +61,10 @@ type Budget struct {
 type CommandCmd string
 
 const (
-	CommandCmdTask    CommandCmd = "task"
-	CommandCmdMessage CommandCmd = "message"
-	CommandCmdStop    CommandCmd = "stop"
+	CommandCmdTask             CommandCmd = "task"
+	CommandCmdMessage          CommandCmd = "message"
+	CommandCmdStop             CommandCmd = "stop"
+	CommandCmdApprovalResponse CommandCmd = "approval_response"
 )
 
 type Command struct {
@@ -70,6 +118,20 @@ type MessagePayload struct {
 }
 
 const ProtocolVersion int64 = 1
+
+type ReadyPayloadGrade string
+
+const (
+	ReadyPayloadGradeObservable ReadyPayloadGrade = "observable"
+	ReadyPayloadGradeOpaque     ReadyPayloadGrade = "opaque"
+)
+
+type ReadyPayload struct {
+	Grade           ReadyPayloadGrade `json:"grade"`
+	Model           *string           `json:"model,omitempty"`
+	NativeSessionID *string           `json:"native_session_id,omitempty"`
+	Tools           []string          `json:"tools,omitempty"`
+}
 
 type StopPayloadReason string
 

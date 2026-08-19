@@ -108,7 +108,7 @@ contracts  →  core  →  seams  →  surfaces
 | ID | 요구사항 |
 |---|---|
 | FR-ADP-01 | 어댑터는 stdin/stdout으로 NDJSON 와이어 프로토콜(§5.2)을 말하는 독립 실행 파일이다(MUST). 구현 언어는 제약하지 않는다. |
-| FR-ADP-02 | 어댑터 인터페이스는 spawn / send / events / stop의 최소 계약으로 한정한다(MUST). 대상 도구별 고유 기능은 어댑터 설정으로만 노출한다. |
+| FR-ADP-02 | 어댑터 인터페이스는 spawn / send / events / stop / approval의 최소 계약으로 한정한다(MUST). 대상 도구별 고유 기능은 어댑터 설정으로만 노출한다. |
 | FR-ADP-03 | 어댑터는 대상 에이전트의 네이티브 이벤트를 정규화 이벤트 어휘(§5.1)로 변환해야 하며(MUST), 최소 `subagent/ready`와 `subagent/done`을 방출해야 한다(MUST). 중간 이벤트는 가능한 만큼 방출한다(SHOULD). |
 | FR-ADP-04 | 정규화 이벤트에는 원본 페이로드를 raw 필드로 첨부해야 한다(MUST). |
 | FR-ADP-05 | 각 어댑터는 대상 도구의 녹화 출력(fixture)에 대한 스냅샷 테스트를 보유해야 한다(MUST). 대상 도구의 출력 포맷 변경은 CI에서 검출되어야 한다. |
@@ -229,6 +229,7 @@ CREATE TABLE events (
 | `task` | instruction, workspace 경로, 예산, depth, extensions(옵셔널 — 이름/버전/무결성 해시/출처/필요 egress 도메인의 배열, FR-EXT) |
 | `message` | 추가 입력 텍스트 |
 | `stop` | reason (`user`, `budget_exceeded`, `policy`, `parent_done`) |
+| `approval_response` | request_id, decision(`allow`/`deny`), reason(deny 시 필수) — `subagent/approval_request`에 대한 부모 정책 레이어의 판정 반환 (FR-POL-05) |
 
 어댑터 → 코어 (stdout):
 
