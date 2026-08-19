@@ -27,6 +27,17 @@ const (
 	claudeApprovalHookSettings = `{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"hxapprove","timeout":600}]}]}}`
 )
 
+var (
+	errMessageUnsupported = errors.New("message 미지원")
+	errInboundContract    = errors.New("수신 command 계약 위반")
+	errNativeContract     = errors.New("native stream 계약 위반")
+	errNativeRead         = errors.New("native stream 읽기 실패")
+	errUnmatchedApproval  = errors.New("미상관 approval_response")
+	errDuplicateTask      = errors.New("task 중복")
+	errCommandRead        = errors.New("command 읽기 실패")
+	errCommandInputClosed = errors.New("실행 중 stdin 종료")
+)
+
 // Config contains host-controlled process settings. ClaudeBin is a single
 // executable path, never a shell command.
 type Config struct {
@@ -114,6 +125,7 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 
 	parser := NewParser()
 	w := &wireWriter{out: out, vals: vals}
+	readyEmitted := false
 	adapterDone := make(chan struct{})
 	commandErr := make(chan error, 1)
 	go monitorCommands(scanner, vals, parser, native, adapterDone, commandErr)
@@ -134,6 +146,9 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 			if err := w.emit(e.Kind, e.Payload, e.Raw); err != nil {
 				return err
 			}
+			if e.Kind == gen.EventKindSubagentReady {
+				readyEmitted = true
+			}
 		}
 		return nil
 	})
@@ -146,11 +161,17 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 	}
 
 	doneEvent, finishErr := finishNative(drain, pendingDone, parser.StopRequested())
-	if finishErr != nil {
-		return finishErr
+	terminalErr := finishErr // B-7: native handler/scan failure precedes command-side failure.
+	if terminalErr == nil {
+		terminalErr = cmdErr
 	}
-	if cmdErr != nil {
-		return cmdErr
+	if terminalErr != nil {
+		if readyEmitted {
+			if err := emitFailureDone(w, terminalErr, parser.StopRequested()); err != nil {
+				return errors.Join(terminalErr, fmt.Errorf("claudecode: 오류 done 방출: %w", err))
+			}
+		}
+		return terminalErr
 	}
 	if !parser.Ready() {
 		payload, err := json.Marshal(gen.ReadyPayload{Grade: gen.ReadyPayloadGradeObservable})
@@ -160,8 +181,45 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 		if err := w.emit(gen.EventKindSubagentReady, payload, nil); err != nil {
 			return err
 		}
+		readyEmitted = true
 	}
 	return w.emit(doneEvent.Kind, doneEvent.Payload, doneEvent.Raw)
+}
+
+func emitFailureDone(w *wireWriter, cause error, stopRequested bool) error {
+	status := gen.DonePayloadStatusError
+	if stopRequested {
+		status = gen.DonePayloadStatusStopped
+	}
+	payload, err := json.Marshal(gen.DonePayload{
+		Status: status,
+		Result: "(어댑터 오류: " + terminalCause(cause) + ")",
+	})
+	if err != nil {
+		return err
+	}
+	return w.emit(gen.EventKindSubagentDone, payload, nil)
+}
+
+func terminalCause(err error) string {
+	for _, item := range []struct {
+		target error
+		text   string
+	}{
+		{errMessageUnsupported, "message 미지원"},
+		{errInboundContract, "수신 command 계약 위반"},
+		{errNativeContract, "native stream 계약 위반"},
+		{errNativeRead, "native stream 읽기 실패"},
+		{errUnmatchedApproval, "미상관 approval_response"},
+		{errDuplicateTask, "task 중복"},
+		{errCommandRead, "command 읽기 실패"},
+		{errCommandInputClosed, "실행 중 stdin 종료"},
+	} {
+		if errors.Is(err, item.target) {
+			return item.text
+		}
+	}
+	return "내부 실행 실패"
 }
 
 func readCommand(scanner *bufio.Scanner, vals *validate.Validators) (gen.Command, error) {
@@ -192,12 +250,12 @@ func monitorCommands(scanner *bufio.Scanner, vals *validate.Validators, parser *
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if err := vals.ValidateCommand(line); err != nil {
-			fail(fmt.Errorf("claudecode: 수신 command가 계약 위반: %w", err))
+			fail(fmt.Errorf("claudecode: %w: %v", errInboundContract, err))
 			return
 		}
 		var cmd gen.Command
 		if err := json.Unmarshal(line, &cmd); err != nil {
-			fail(err)
+			fail(fmt.Errorf("claudecode: %w: %v", errInboundContract, err))
 			return
 		}
 		switch cmd.Cmd {
@@ -207,13 +265,13 @@ func monitorCommands(scanner *bufio.Scanner, vals *validate.Validators, parser *
 			native.Kill()
 			return
 		case gen.CommandCmdMessage:
-			fail(fmt.Errorf("claudecode: message는 Claude 단발 print 세션에서 지원되지 않음"))
+			fail(fmt.Errorf("claudecode: %w — Claude 단발 print 세션에서 지원되지 않음", errMessageUnsupported))
 			return
 		case gen.CommandCmdApprovalResponse:
-			fail(fmt.Errorf("claudecode: 상관되지 않은 approval_response"))
+			fail(fmt.Errorf("claudecode: %w", errUnmatchedApproval))
 			return
 		case gen.CommandCmdTask:
-			fail(fmt.Errorf("claudecode: task 중복"))
+			fail(fmt.Errorf("claudecode: %w", errDuplicateTask))
 			return
 		}
 	}
@@ -224,10 +282,10 @@ func monitorCommands(scanner *bufio.Scanner, vals *validate.Validators, parser *
 	default:
 	}
 	if err := scanner.Err(); err != nil && !errors.Is(err, os.ErrClosed) {
-		fail(fmt.Errorf("claudecode: command 읽기: %w", err))
+		fail(fmt.Errorf("claudecode: %w: %v", errCommandRead, err))
 		return
 	}
-	fail(fmt.Errorf("claudecode: 실행 중 stdin 종료"))
+	fail(fmt.Errorf("claudecode: %w", errCommandInputClosed))
 }
 
 func claudeCommand(cfg Config, task gen.TaskPayload) []string {
@@ -247,10 +305,10 @@ func claudeCommand(cfg Config, task gen.TaskPayload) []string {
 // handler contract error > scanner error > process exit mapping.
 func finishNative(drain procgroup.DrainResult, pending *Event, stopRequested bool) (Event, error) {
 	if drain.HandlerErr != nil {
-		return Event{}, fmt.Errorf("claudecode: native stream 계약 위반: %w", drain.HandlerErr)
+		return Event{}, fmt.Errorf("claudecode: %w: %w", errNativeContract, drain.HandlerErr)
 	}
 	if drain.ScanErr != nil {
-		return Event{}, fmt.Errorf("claudecode: native stream 읽기: %w", drain.ScanErr)
+		return Event{}, fmt.Errorf("claudecode: %w: %w", errNativeRead, drain.ScanErr)
 	}
 	if pending != nil {
 		out := *pending

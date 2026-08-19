@@ -1,6 +1,7 @@
 // fakeclaude replays a real T8 Claude fixture for adapter process tests. It
 // never invents stream-json lines; optional modes only omit the native result,
-// hold the process open, or choose an exit code.
+// replay the fixture's first line twice, hold the process open, or choose an
+// exit code.
 package main
 
 import (
@@ -32,6 +33,7 @@ func main() {
 	}
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	first := true
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if os.Getenv("HX_CLAUDE_DROP_RESULT") == "1" {
@@ -45,6 +47,12 @@ func main() {
 		if _, err := os.Stdout.Write(append(append([]byte(nil), line...), '\n')); err != nil {
 			os.Exit(2)
 		}
+		if first && os.Getenv("HX_CLAUDE_DUPLICATE_FIRST") == "1" {
+			if _, err := os.Stdout.Write(append(append([]byte(nil), line...), '\n')); err != nil {
+				os.Exit(2)
+			}
+		}
+		first = false
 	}
 	f.Close()
 	if err := scanner.Err(); err != nil {

@@ -48,7 +48,7 @@ type processRun struct {
 	err    error
 }
 
-func runFixtureProcess(t *testing.T, bins adapterBinaries, fixture string, env []string, stopAfterReady bool) processRun {
+func runFixtureProcess(t *testing.T, bins adapterBinaries, fixture string, env []string, afterReady []byte) processRun {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -87,7 +87,7 @@ func runFixtureProcess(t *testing.T, bins adapterBinaries, fixture string, env [
 	var events []gen.Event
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), MaxLineBytes)
-	stopSent := false
+	commandSent := false
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
 		if err := vals.ValidateEvent(line); err != nil {
@@ -98,11 +98,11 @@ func runFixtureProcess(t *testing.T, bins adapterBinaries, fixture string, env [
 			t.Fatal(err)
 		}
 		events = append(events, event)
-		if stopAfterReady && !stopSent && event.Kind == gen.EventKindSubagentReady {
-			if _, err := stdin.Write(stopCommandLine(t)); err != nil {
+		if len(afterReady) > 0 && !commandSent && event.Kind == gen.EventKindSubagentReady {
+			if _, err := stdin.Write(afterReady); err != nil {
 				t.Fatal(err)
 			}
-			stopSent = true
+			commandSent = true
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -145,6 +145,19 @@ func stopCommandLine(t *testing.T) []byte {
 	return append(line, '\n')
 }
 
+func messageCommandLine(t *testing.T) []byte {
+	t.Helper()
+	payload, err := json.Marshal(gen.MessagePayload{Text: "continue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := json.Marshal(gen.Command{V: 1, Cmd: gen.CommandCmdMessage, Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(line, '\n')
+}
+
 // FR-ADP-01/03/04/05: the built adapter consumes only real T8 Claude output,
 // and its complete §5.2 stream matches the already-reviewed parser goldens.
 func TestAdapterExecutableReplaysAllClaudeFixtures(t *testing.T) {
@@ -157,7 +170,7 @@ func TestAdapterExecutableReplaysAllClaudeFixtures(t *testing.T) {
 		path := path
 		name := strings.TrimSuffix(filepath.Base(path), ".ndjson")
 		t.Run(name, func(t *testing.T) {
-			run := runFixtureProcess(t, bins, path, nil, false)
+			run := runFixtureProcess(t, bins, path, nil, nil)
 			if run.err != nil {
 				t.Fatalf("adapter exit: %v\n%s", run.err, run.stderr)
 			}
@@ -220,7 +233,7 @@ func TestAdapterPassesApprovedFlagsToClaudeProcess(t *testing.T) {
 	argsPath := filepath.Join(t.TempDir(), "args.json")
 	run := runFixtureProcess(t, bins, filepath.Join(fixtureDir, "01-simple-text.ndjson"), []string{
 		"HX_CLAUDE_ARGS_OUT=" + argsPath,
-	}, false)
+	}, nil)
 	if run.err != nil {
 		t.Fatalf("adapter exit: %v\n%s", run.err, run.stderr)
 	}
@@ -324,7 +337,7 @@ func TestAdapterSynthesizesDoneWithoutNativeResult(t *testing.T) {
 			if tc.exitCode != "" {
 				env = append(env, "HX_CLAUDE_EXIT_CODE="+tc.exitCode)
 			}
-			run := runFixtureProcess(t, bins, fixture, env, false)
+			run := runFixtureProcess(t, bins, fixture, env, nil)
 			if run.err != nil {
 				t.Fatalf("adapter exit: %v\n%s", run.err, run.stderr)
 			}
@@ -338,7 +351,7 @@ func TestAdapterStopKillsClaudeAndSynthesizesStopped(t *testing.T) {
 	start := time.Now()
 	run := runFixtureProcess(t, bins, filepath.Join(fixtureDir, "01-simple-text.ndjson"), []string{
 		"HX_CLAUDE_DROP_RESULT=1", "HX_CLAUDE_HOLD=1",
-	}, true)
+	}, stopCommandLine(t))
 	if run.err != nil {
 		t.Fatalf("adapter exit: %v\n%s", run.err, run.stderr)
 	}
@@ -347,6 +360,44 @@ func TestAdapterStopKillsClaudeAndSynthesizesStopped(t *testing.T) {
 	}
 	assertLastDone(t, run.events, gen.DonePayloadStatusStopped,
 		"(결과 없음: subtype=missing_result, terminal_reason=abnormal_exit)", "")
+}
+
+func TestAdapterEmitsDistinctDoneForFailuresAfterReady(t *testing.T) {
+	bins := buildAdapterBinaries(t)
+	fixture := filepath.Join(fixtureDir, "01-simple-text.ndjson")
+	cases := []struct {
+		name       string
+		env        []string
+		afterReady []byte
+		result     string
+	}{
+		{
+			name:       "message unsupported",
+			env:        []string{"HX_CLAUDE_DROP_RESULT=1", "HX_CLAUDE_HOLD=1"},
+			afterReady: messageCommandLine(t),
+			result:     "(어댑터 오류: message 미지원)",
+		},
+		{
+			name:       "inbound command contract violation",
+			env:        []string{"HX_CLAUDE_DROP_RESULT=1", "HX_CLAUDE_HOLD=1"},
+			afterReady: []byte(`{"v":1,"cmd":"message","payload":{}}` + "\n"),
+			result:     "(어댑터 오류: 수신 command 계약 위반)",
+		},
+		{
+			name:   "native stream contract violation",
+			env:    []string{"HX_CLAUDE_DUPLICATE_FIRST=1"},
+			result: "(어댑터 오류: native stream 계약 위반)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			run := runFixtureProcess(t, bins, fixture, tc.env, tc.afterReady)
+			if run.err == nil {
+				t.Fatalf("adapter unexpectedly succeeded; stderr=%s", run.stderr)
+			}
+			assertLastDone(t, run.events, gen.DonePayloadStatusError, tc.result, "")
+		})
+	}
 }
 
 func assertLastDone(t *testing.T, events []gen.Event, status gen.DonePayloadStatus, result, raw string) {
