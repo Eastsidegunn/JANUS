@@ -159,9 +159,6 @@ func (p *Parser) ParseLine(line []byte) ([]Event, error) {
 	if err := json.Unmarshal(line, &n); err != nil {
 		return nil, fmt.Errorf("claudecode: JSON 파싱: %w", err)
 	}
-	if !p.sawInit && !(n.Type == "system" && n.Subtype == "init") {
-		return nil, fmt.Errorf("claudecode: 첫 native 줄은 system/init이어야 함 (got type=%q subtype=%q)", n.Type, n.Subtype)
-	}
 	if isolationViolationTypes[n.Type] {
 		return nil, fmt.Errorf("claudecode: %s 출현 — 격리 계약 위반(자동 훅 발견이 차단돼야 함)", n.Type)
 	}
@@ -171,6 +168,17 @@ func (p *Parser) ParseLine(line []byte) ([]Event, error) {
 	if ignoredTypes[n.Type] {
 		p.disposition = "ignored:" + n.Type
 		return nil, nil
+	}
+	if n.Type == "system" && ignoredSystemSubtypes[n.Subtype] {
+		p.disposition = "ignored:system/" + n.Subtype
+		return nil, nil
+	}
+	// init은 매핑 대상 이벤트보다 먼저 와야 한다 — 그래야 ready가 §5.2의 첫
+	// 이벤트가 된다. 무시 대상(rate_limit_event, thinking_tokens, api_retry)은
+	// 실제 세션에서 init보다 앞설 수 있으므로(smoke 실측: claude 2.1.235의 첫
+	// 줄은 rate_limit_event) 이 검사 앞에서 걸러진다.
+	if !p.sawInit && !(n.Type == "system" && n.Subtype == "init") {
+		return nil, fmt.Errorf("claudecode: system/init보다 먼저 매핑 대상 이벤트가 옴 (type=%q subtype=%q)", n.Type, n.Subtype)
 	}
 
 	switch n.Type {
@@ -213,9 +221,6 @@ func (p *Parser) parseSystem(n nativeLine, line []byte) ([]Event, error) {
 			Status: gen.AgentToolResultPayloadStatusRejected,
 			Reason: &reason,
 		}, line)
-	case ignoredSystemSubtypes[n.Subtype]:
-		p.disposition = "ignored:system/" + n.Subtype
-		return nil, nil
 	}
 	return nil, fmt.Errorf("claudecode: 미지의 system subtype=%q", n.Subtype)
 }

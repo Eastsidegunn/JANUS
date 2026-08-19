@@ -30,6 +30,7 @@ type Process struct {
 
 	writeMu   sync.Mutex
 	closeOnce sync.Once
+	stdinOnce sync.Once
 	done      chan struct{}
 	exitErr   error // written before done is closed; read only after Done
 }
@@ -148,11 +149,21 @@ func (p *Process) DrainLines(maxBytes int, handler func([]byte) error) DrainResu
 
 // ClosePipes is an idempotent auxiliary cleanup operation. DrainLines invokes
 // it automatically; callers use it only on failures before draining begins.
-func (p *Process) ClosePipes() {
-	p.closeOnce.Do(func() {
+// CloseStdin closes only the child's stdin. Callers that pass their whole
+// input on argv (the Claude adapter) must close it right after Start, or the
+// child waits for stdin that never arrives. Idempotent and safe alongside
+// ClosePipes.
+func (p *Process) CloseStdin() {
+	p.stdinOnce.Do(func() {
 		p.writeMu.Lock()
 		p.stdin.Close()
 		p.writeMu.Unlock()
+	})
+}
+
+func (p *Process) ClosePipes() {
+	p.closeOnce.Do(func() {
+		p.CloseStdin()
 		p.stdout.Close()
 	})
 }

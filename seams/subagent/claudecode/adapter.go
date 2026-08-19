@@ -152,6 +152,9 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 	if err != nil {
 		return fmt.Errorf("claudecode: Claude 실행: %w", err)
 	}
+	// 지시는 argv(-p)로 전달하므로 Claude의 stdin은 쓰지 않는다. 열어두면
+	// Claude가 stdin 입력을 3초간 기다린 뒤 경고와 함께 진행한다(smoke 실측).
+	native.CloseStdin()
 	approvals.attach(native.Done(), native.Kill)
 
 	parser := NewParser()

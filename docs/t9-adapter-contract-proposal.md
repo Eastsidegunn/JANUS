@@ -212,6 +212,13 @@ oneOf:
 | `system/plugin_install`, `hook_started`/`hook_progress`/`hook_response` | **오류(격리 위반)** | 우리 플래그는 플러그인·자동 훅 발견을 차단한다. 나타나면 격리·플래그 계약이 깨진 것이므로 조용히 무시하면 안 된다 |
 | 그 외 미지 type/subtype | **오류** | 조용한 무시 금지 |
 
+**init 순서 규약 (2026-08-19 smoke 실측 반영)**: `system/init`은 **매핑 대상
+이벤트보다 먼저** 와야 한다(그래야 `ready`가 §5.2의 첫 이벤트가 된다). 단
+무시 대상(`rate_limit_event`, `thinking_tokens`, `api_retry`)은 init보다
+앞설 수 있다 — 실제 세션(claude 2.1.235)의 첫 줄이 `rate_limit_event`였다.
+T8 픽스처 8/8이 `system/init`으로 시작한 것은 `--safe-mode` 녹화 조건의
+산물이며 일반화되지 않는다.
+
 ---
 
 ## 4. raw 의미

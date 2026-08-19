@@ -24,7 +24,7 @@ func TestFailClosedCases(t *testing.T) {
 	}{
 		{"빈 줄", []string{""}, "빈 줄"},
 		{"잘못된 JSON", []string{`{"type":`}, "JSON 파싱"},
-		{"init 없이 assistant", []string{`{"type":"assistant","message":{"content":[{"type":"text","text":"too early"}]}}`}, "첫 native 줄은 system/init"},
+		{"init 없이 assistant", []string{`{"type":"assistant","message":{"content":[{"type":"text","text":"too early"}]}}`}, "system/init보다 먼저 매핑 대상 이벤트"},
 		{"미지 native type", []string{initLine, `{"type":"telemetry"}`}, "미지의 네이티브 이벤트"},
 		{"미지 system subtype", []string{initLine, `{"type":"system","subtype":"mystery"}`}, "미지의 system subtype"},
 		{"미지 assistant block", []string{initLine,
@@ -70,6 +70,33 @@ func TestFailClosedCases(t *testing.T) {
 				t.Fatalf("오류 %q에 %q 없음", lastErr, c.wantErr)
 			}
 		})
+	}
+}
+
+// smoke 실측 회귀: 실제 세션(claude 2.1.235)의 첫 줄은 system/init이 아니라
+// rate_limit_event였다. 무시 대상 이벤트는 init보다 앞설 수 있어야 하고,
+// 매핑 대상 이벤트만 init 뒤로 강제된다.
+func TestIgnoredEventsMayPrecedeInit(t *testing.T) {
+	p := NewParser()
+	for _, line := range []string{
+		`{"type":"rate_limit_event","rate_limit_info":{}}`,
+		`{"type":"system","subtype":"thinking_tokens","tokens":1}`,
+		`{"type":"system","subtype":"api_retry","attempt":1}`,
+	} {
+		evs, err := p.ParseLine([]byte(line))
+		if err != nil {
+			t.Fatalf("init 이전 무시 대상이 거부됨(%s): %v", line, err)
+		}
+		if len(evs) != 0 {
+			t.Fatalf("무시 대상이 이벤트를 만듦: %+v", evs)
+		}
+	}
+	evs, err := p.ParseLine([]byte(initLine))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 || evs[0].Kind != "subagent/ready" {
+		t.Fatalf("init 이후 ready가 나오지 않음: %+v", evs)
 	}
 }
 

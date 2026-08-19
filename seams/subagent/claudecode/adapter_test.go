@@ -433,7 +433,7 @@ func TestAdapterRejectsNativeEventBeforeInitWithoutBrokenOutput(t *testing.T) {
 	if len(run.events) != 0 {
 		t.Fatalf("pre-ready failure emitted out-of-order events: %+v", run.events)
 	}
-	if !strings.Contains(run.stderr, "첫 native 줄은 system/init이어야 함") {
+	if !strings.Contains(run.stderr, "system/init보다 먼저 매핑 대상 이벤트") {
 		t.Fatalf("stderr lost native cause: %q", run.stderr)
 	}
 }
