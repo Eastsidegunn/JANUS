@@ -1,0 +1,92 @@
+# T10 착수 전 일회성 조사. FR-SBX 요구가 Linux CI에서 성립하는지와
+# 디스크 실측치를 얻는 것이 목적이며, 결과를 제안서에 옮긴 뒤 삭제한다.
+name: t10-runtime-probe
+
+on:
+  push:
+    branches: [t10/runtime-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 러너 기본 정보
+        run: |
+          echo "## 러너"; uname -a; cat /etc/os-release | head -2
+          echo "## 디스크 (시작)"; df -h / /home /mnt 2>/dev/null
+          echo "## 메모리"; free -h
+
+      - name: 런타임 존재 여부
+        run: |
+          for c in podman docker buildah skopeo runc crun slirp4netns pasta fuse-overlayfs; do
+            if command -v $c >/dev/null 2>&1; then
+              printf '있음  %-16s %s\n' "$c" "$($c --version 2>&1 | head -1)"
+            else
+              printf '없음  %s\n' "$c"
+            fi
+          done
+
+      - name: rootless 전제 (FR-SBX-01 SHOULD)
+        run: |
+          echo "uid=$(id -u) user=$(whoami)"
+          echo "## subuid/subgid"; grep "^$(whoami):" /etc/subuid /etc/subgid || echo "항목 없음"
+          echo "## user namespaces"; cat /proc/sys/user/max_user_namespaces 2>/dev/null
+          echo "## unprivileged_userns_clone"; cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo "(키 없음 = 최신 커널 기본 허용)"
+
+      - name: podman info — 스토리지 드라이버 (FR-SBX-02)
+        continue-on-error: true
+        run: |
+          podman info --format '{{json .Store}}' | python3 -m json.tool | head -30
+          echo "## rootless 여부"; podman info --format '{{.Host.Security.Rootless}}'
+          echo "## graph driver"; podman info --format '{{.Store.GraphDriverName}}'
+          echo "## native overlay diff"; podman info --format '{{json .Store.GraphStatus}}'
+
+      - name: 이미지 용량 실측
+        continue-on-error: true
+        run: |
+          STORE=$(podman info --format '{{.Store.GraphRoot}}')
+          echo "graph root: $STORE"
+          base=$(sudo du -sm "$STORE" 2>/dev/null | cut -f1); echo "시작 스토리지: ${base}MB"
+          prev=$base
+          for img in alpine:3.20 debian:bookworm-slim ubuntu:24.04 node:22-slim; do
+            podman pull -q "$img" >/dev/null 2>&1 || { echo "$img 실패"; continue; }
+            now=$(sudo du -sm "$STORE" 2>/dev/null | cut -f1)
+            printf '%-24s 누적 %5sMB  증분 %5sMB\n' "$img" "$now" "$((now - prev))"
+            prev=$now
+          done
+          echo "## podman system df"; podman system df
+          echo "## 이미지 목록"; podman images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}'
+
+      - name: overlayfs 상한/하한 분리 실측 (FR-SBX-02)
+        continue-on-error: true
+        run: |
+          ws=$(mktemp -d); echo "원본" > "$ws/original.txt"
+          STORE=$(podman info --format '{{.Store.GraphRoot}}')
+          before=$(sudo du -sm "$STORE" | cut -f1)
+          # 컨테이너 안에서 100MB 생성 — 원본(lower)은 그대로여야 한다
+          podman run --rm -v "$ws:/workspace:z" alpine:3.20 \
+            sh -c 'dd if=/dev/zero of=/tmp/blob bs=1M count=100 2>/dev/null; echo 컨테이너변경 >> /workspace/original.txt; ls -la /workspace'
+          after=$(sudo du -sm "$STORE" | cut -f1)
+          echo "컨테이너 쓰기 후 스토리지 증가: $((after - before))MB"
+          echo "## 호스트 원본 파일 내용"; cat "$ws/original.txt"
+
+      - name: 네트워크 기본 차단 (FR-SBX-03)
+        continue-on-error: true
+        run: |
+          echo "## --network=none"
+          podman run --rm --network=none alpine:3.20 \
+            sh -c 'wget -q -T3 -O- https://example.com >/dev/null 2>&1 && echo "통과(문제)" || echo "차단됨(기대)"'
+          echo "## 기본 네트워크"
+          podman run --rm alpine:3.20 \
+            sh -c 'wget -q -T5 -O- https://example.com >/dev/null 2>&1 && echo "통과(기본 허용 — 명시 차단 필요)" || echo "차단됨"'
+
+      - name: 디스크 총계
+        if: always()
+        run: |
+          echo "## 디스크 (종료)"; df -h / /home /mnt 2>/dev/null
+          STORE=$(podman info --format '{{.Store.GraphRoot}}' 2>/dev/null)
+          [ -n "$STORE" ] && sudo du -sh "$STORE" 2>/dev/null || true
