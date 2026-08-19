@@ -70,9 +70,13 @@ A가 실패하면 B의 결과는 어떤 값이든 증거가 아니다 — 테스
 fatal로 멈추고 5.2로 안내한다. B에서 우리 훅의 `approval_request`가 안 보여도
 fatal이다(세션이 죽어서 마커가 없는 것을 격리 성공으로 읽지 않기 위해서다).
 
-macOS에서 자격증명은 Keychain에 있어 config 디렉터리 교체와 무관할 것으로
-보지만, 실측으로 확인되지 않았다. 인증이 깨지면 A가 실패하므로 잘못된 결론이
-나오지는 않는다.
+자격증명은 Keychain에 있어(2026-08-19 실측: `Claude Code-credentials` 항목 존재)
+config 디렉터리 교체와 무관하다.
+
+신규 config 디렉터리는 온보딩·작업공간 신뢰 상태가 비어 있어 그대로 두면 `-p`
+실행이 `system/init` 직후 exit 1로 죽는다(1차 시도에서 실제로 겪었다). 테스트가
+`.claude.json`에 `hasCompletedOnboarding`과 해당 작업공간의
+`hasTrustDialogAccepted`만 심는다 — 개인 설정을 복사하지 않는다.
 
 ### 5.2 대조군이 실패하면 — 개인 설정 임시 수정 (수동)
 
