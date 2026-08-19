@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
@@ -36,6 +38,8 @@ var (
 	errDuplicateTask      = errors.New("task 중복")
 	errCommandRead        = errors.New("command 읽기 실패")
 	errCommandInputClosed = errors.New("실행 중 stdin 종료")
+	errApprovalHandshake  = errors.New("승인 handshake 실패")
+	errDuplicateApproval  = errors.New("중복 approval_response")
 )
 
 // Config contains host-controlled process settings. ClaudeBin is a single
@@ -52,7 +56,25 @@ func ConfigFromEnv() Config {
 	if bin == "" {
 		bin = defaultClaudeExecutable
 	}
-	return Config{ClaudeBin: bin, Env: os.Environ()}
+	env := os.Environ()
+	// hxapprove is installed beside the adapter binary. Prepending exactly that
+	// directory keeps the approved inline hook command constant in one place.
+	if executable, err := os.Executable(); err == nil {
+		dir := filepath.Dir(executable)
+		env = replaceEnv(env, "PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+	return Config{ClaudeBin: bin, Env: env}
+}
+
+func replaceEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if !strings.HasPrefix(item, prefix) {
+			out = append(out, item)
+		}
+	}
+	return append(out, prefix+value)
 }
 
 // wireWriter serializes and validates every adapter → core event.
@@ -114,21 +136,29 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 		return fmt.Errorf("claudecode: task payload: %w", err)
 	}
 
+	w := &wireWriter{out: out, vals: vals}
+	approvals, err := newApprovalServer(w)
+	if err != nil {
+		return fmt.Errorf("claudecode: approval socket: %w", err)
+	}
+	defer approvals.Close()
+
 	// task.Workspace는 policy/T10이 준비한 pristine 작업공간이다. Claude의
 	// cwd를 이 경로로 고정하고 user settings는 flag로 제외한다.
 	native, err := procgroup.Start(ctx, procgroup.Options{
-		Command: claudeCommand(cfg, task), Dir: task.Workspace, Env: cfg.Env, Stderr: stderr,
+		Command: claudeCommand(cfg, task), Dir: task.Workspace,
+		Env: approvals.environment(cfg.Env), Stderr: stderr,
 	})
 	if err != nil {
 		return fmt.Errorf("claudecode: Claude 실행: %w", err)
 	}
+	approvals.attach(native.Done(), native.Kill)
 
 	parser := NewParser()
-	w := &wireWriter{out: out, vals: vals}
 	readyEmitted := false
 	adapterDone := make(chan struct{})
 	commandErr := make(chan error, 1)
-	go monitorCommands(scanner, vals, parser, native, adapterDone, commandErr)
+	go monitorCommands(scanner, vals, parser, native, approvals, adapterDone, commandErr)
 
 	var pendingDone *Event
 	drain := native.DrainLines(MaxLineBytes, func(line []byte) error {
@@ -148,6 +178,7 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 			}
 			if e.Kind == gen.EventKindSubagentReady {
 				readyEmitted = true
+				approvals.markReady()
 			}
 		}
 		return nil
@@ -164,6 +195,11 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 	terminalErr := finishErr // B-7: native handler/scan failure precedes command-side failure.
 	if terminalErr == nil {
 		terminalErr = cmdErr
+	}
+	if terminalErr == nil {
+		if approvalErr := approvals.failure(); approvalErr != nil {
+			terminalErr = fmt.Errorf("claudecode: %w: %v", errApprovalHandshake, approvalErr)
+		}
 	}
 	if terminalErr != nil {
 		if readyEmitted {
@@ -182,6 +218,7 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 			return err
 		}
 		readyEmitted = true
+		approvals.markReady()
 	}
 	return w.emit(doneEvent.Kind, doneEvent.Payload, doneEvent.Raw)
 }
@@ -214,6 +251,8 @@ func terminalCause(err error) string {
 		{errDuplicateTask, "task 중복"},
 		{errCommandRead, "command 읽기 실패"},
 		{errCommandInputClosed, "실행 중 stdin 종료"},
+		{errApprovalHandshake, "승인 handshake 실패"},
+		{errDuplicateApproval, "중복 approval_response"},
 	} {
 		if errors.Is(err, item.target) {
 			return item.text
@@ -240,10 +279,11 @@ func readCommand(scanner *bufio.Scanner, vals *validate.Validators) (gen.Command
 	return cmd, nil
 }
 
-func monitorCommands(scanner *bufio.Scanner, vals *validate.Validators, parser *Parser, native *procgroup.Process, adapterDone <-chan struct{}, result chan<- error) {
+func monitorCommands(scanner *bufio.Scanner, vals *validate.Validators, parser *Parser, native *procgroup.Process, approvals *approvalServer, adapterDone <-chan struct{}, result chan<- error) {
 	fail := func(err error) {
 		// Publish the cause before kill: DrainLines may finish immediately after
 		// the signal, and the adapter must not lose the command-side error.
+		approvals.denyAll("어댑터 command 오류", true)
 		result <- err
 		native.Kill()
 	}
@@ -260,6 +300,7 @@ func monitorCommands(scanner *bufio.Scanner, vals *validate.Validators, parser *
 		}
 		switch cmd.Cmd {
 		case gen.CommandCmdStop:
+			approvals.denyAll("중단 요청", true)
 			parser.NoteStop()
 			result <- nil
 			native.Kill()
@@ -268,8 +309,15 @@ func monitorCommands(scanner *bufio.Scanner, vals *validate.Validators, parser *
 			fail(fmt.Errorf("claudecode: %w — Claude 단발 print 세션에서 지원되지 않음", errMessageUnsupported))
 			return
 		case gen.CommandCmdApprovalResponse:
-			fail(fmt.Errorf("claudecode: %w", errUnmatchedApproval))
-			return
+			var response gen.ApprovalResponsePayload
+			if err := json.Unmarshal(cmd.Payload, &response); err != nil {
+				fail(fmt.Errorf("claudecode: %w: %v", errInboundContract, err))
+				return
+			}
+			if err := approvals.resolve(response); err != nil {
+				fail(err)
+				return
+			}
 		case gen.CommandCmdTask:
 			fail(fmt.Errorf("claudecode: %w", errDuplicateTask))
 			return

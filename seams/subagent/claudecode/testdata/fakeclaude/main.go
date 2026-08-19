@@ -6,9 +6,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"time"
 )
@@ -34,6 +36,7 @@ func main() {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	first := true
+	hookRan := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if first && os.Getenv("HX_CLAUDE_SKIP_FIRST") == "1" {
@@ -57,6 +60,36 @@ func main() {
 			}
 		}
 		first = false
+		if !hookRan && os.Getenv("HX_CLAUDE_RUN_HOOK") == "1" {
+			hookRan = true
+			raw := []byte(os.Getenv("HX_CLAUDE_HOOK_INPUT"))
+			if len(raw) == 0 {
+				raw = []byte(`{"hook_event_name":"PreToolUse","tool_use_id":"call-1","tool_name":"Bash","tool_input":{"command":"true"}}`)
+			}
+			cmd := exec.Command("hxapprove")
+			cmd.Env = os.Environ()
+			cmd.Stdin = bytes.NewReader(raw)
+			var stdout, stderr bytes.Buffer
+			var hookFile *os.File
+			if path := os.Getenv("HX_CLAUDE_HOOK_OUT"); path != "" {
+				hookFile, err = os.Create(path)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "fakeclaude: hook output:", err)
+					os.Exit(3)
+				}
+				cmd.Stdout = hookFile
+			} else {
+				cmd.Stdout = &stdout
+			}
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				fmt.Fprintln(os.Stderr, "fakeclaude: hook:", err, stderr.String())
+				os.Exit(3)
+			}
+			if hookFile != nil {
+				hookFile.Close()
+			}
+		}
 	}
 	f.Close()
 	if err := scanner.Err(); err != nil {

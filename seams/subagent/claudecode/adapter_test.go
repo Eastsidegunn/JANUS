@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +24,7 @@ import (
 type adapterBinaries struct {
 	adapter string
 	fake    string
+	approve string
 }
 
 func buildAdapterBinaries(t *testing.T) adapterBinaries {
@@ -39,6 +42,7 @@ func buildAdapterBinaries(t *testing.T) adapterBinaries {
 	return adapterBinaries{
 		adapter: build("claudecode", "./cmd/claudecode"),
 		fake:    build("fakeclaude", "./testdata/fakeclaude"),
+		approve: build("hxapprove", "./hxapprove"),
 	}
 }
 
@@ -152,6 +156,24 @@ func messageCommandLine(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	line, err := json.Marshal(gen.Command{V: 1, Cmd: gen.CommandCmdMessage, Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(line, '\n')
+}
+
+func approvalResponseLine(t *testing.T, requestID string, decision gen.ApprovalResponsePayloadDecision) []byte {
+	t.Helper()
+	payload := gen.ApprovalResponsePayload{RequestID: requestID, Decision: decision}
+	if decision == gen.ApprovalResponsePayloadDecisionDeny {
+		reason := "테스트 거부"
+		payload.Reason = &reason
+	}
+	p, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := json.Marshal(gen.Command{V: 1, Cmd: gen.CommandCmdApprovalResponse, Payload: p})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,6 +436,222 @@ func TestAdapterRejectsNativeEventBeforeInitWithoutBrokenOutput(t *testing.T) {
 	if !strings.Contains(run.stderr, "첫 native 줄은 system/init이어야 함") {
 		t.Fatalf("stderr lost native cause: %q", run.stderr)
 	}
+}
+
+type approvalProcessRun struct {
+	processRun
+	hookRaw    []byte
+	hookOutput map[string]any
+	requestID  string
+}
+
+func runApprovalFixtureProcess(t *testing.T, bins adapterBinaries, decision gen.ApprovalResponsePayloadDecision, duplicate, stop bool) approvalProcessRun {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bins.adapter)
+	fixture, err := filepath.Abs(filepath.Join(fixtureDir, "01-simple-text.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookRaw := []byte("{\n  \"hook_event_name\": \"PreToolUse\", \"tool_use_id\": \"call-1\",\n  \"tool_name\": \"Bash\", \"tool_input\": {\"command\":\"true\"}\n}\n")
+	hookOut := filepath.Join(t.TempDir(), "hook-output.json")
+	cmd.Env = append(os.Environ(),
+		"HX_CLAUDE_BIN="+bins.fake,
+		"HX_CLAUDE_FIXTURE="+fixture,
+		"HX_CLAUDE_RUN_HOOK=1",
+		"HX_CLAUDE_HOOK_INPUT="+string(hookRaw),
+		"HX_CLAUDE_HOOK_OUT="+hookOut,
+	)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdin.Write(taskCommandLine(t, t.TempDir())); err != nil {
+		t.Fatal(err)
+	}
+	vals, err := validate.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []gen.Event
+	var requestID string
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxLineBytes)
+	for scanner.Scan() {
+		line := append([]byte(nil), scanner.Bytes()...)
+		if err := vals.ValidateEvent(line); err != nil {
+			t.Fatalf("adapter event contract: %v\n%s", err, line)
+		}
+		var event gen.Event
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+		if event.Kind != gen.EventKindSubagentApprovalRequest {
+			continue
+		}
+		var request gen.ApprovalRequestPayload
+		if err := json.Unmarshal(event.Payload, &request); err != nil {
+			t.Fatal(err)
+		}
+		requestID = request.RequestID
+		decodedRaw, err := base64.StdEncoding.DecodeString(event.Raw)
+		if err != nil || !bytes.Equal(decodedRaw, hookRaw) {
+			t.Fatalf("approval raw mismatch err=%v\ngot=%q\nwant=%q", err, decodedRaw, hookRaw)
+		}
+		if stop {
+			if _, err := stdin.Write(stopCommandLine(t)); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		response := approvalResponseLine(t, requestID, decision)
+		if duplicate {
+			response = append(response, response...)
+		}
+		if _, err := stdin.Write(response); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	waitErr := cmd.Wait()
+	stdin.Close()
+	if ctx.Err() != nil {
+		t.Fatalf("adapter timeout: %v\n%s", ctx.Err(), stderr.String())
+	}
+	var output map[string]any
+	if b, err := os.ReadFile(hookOut); err == nil && len(b) > 0 {
+		if err := json.Unmarshal(b, &output); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return approvalProcessRun{
+		processRun: processRun{events: events, stderr: stderr.String(), err: waitErr},
+		hookRaw:    hookRaw, hookOutput: output, requestID: requestID,
+	}
+}
+
+func TestApprovalHandshakeAllowAndDenyPreservesRaw(t *testing.T) {
+	bins := buildAdapterBinaries(t)
+	for _, decision := range []gen.ApprovalResponsePayloadDecision{
+		gen.ApprovalResponsePayloadDecisionAllow,
+		gen.ApprovalResponsePayloadDecisionDeny,
+	} {
+		t.Run(string(decision), func(t *testing.T) {
+			run := runApprovalFixtureProcess(t, bins, decision, false, false)
+			if run.err != nil {
+				t.Fatalf("adapter exit: %v\n%s", run.err, run.stderr)
+			}
+			if run.requestID == "" || run.hookOutput == nil {
+				t.Fatalf("request/hook output missing: %+v", run)
+			}
+			specific, ok := run.hookOutput["hookSpecificOutput"].(map[string]any)
+			if !ok || specific["hookEventName"] != "PreToolUse" || specific["permissionDecision"] != string(decision) {
+				t.Fatalf("hook output=%v", run.hookOutput)
+			}
+		})
+	}
+}
+
+func TestApprovalResponseCorrelationViolations(t *testing.T) {
+	bins := buildAdapterBinaries(t)
+	fixture := filepath.Join(fixtureDir, "01-simple-text.ndjson")
+	t.Run("unmatched", func(t *testing.T) {
+		line := approvalResponseLine(t, "22222222-2222-4222-8222-222222222222", gen.ApprovalResponsePayloadDecisionAllow)
+		run := runFixtureProcess(t, bins, fixture, []string{"HX_CLAUDE_DROP_RESULT=1", "HX_CLAUDE_HOLD=1"}, line)
+		if run.err == nil {
+			t.Fatal("unmatched approval_response succeeded")
+		}
+		assertLastDone(t, run.events, gen.DonePayloadStatusError, "(어댑터 오류: 미상관 approval_response)", "")
+	})
+	t.Run("duplicate", func(t *testing.T) {
+		run := runApprovalFixtureProcess(t, bins, gen.ApprovalResponsePayloadDecisionAllow, true, false)
+		if run.err == nil {
+			t.Fatal("duplicate approval_response succeeded")
+		}
+		assertLastDone(t, run.events, gen.DonePayloadStatusError, "(어댑터 오류: 중복 approval_response)", "")
+	})
+}
+
+func TestStopDeniesPendingHookBeforeNativeTermination(t *testing.T) {
+	bins := buildAdapterBinaries(t)
+	run := runApprovalFixtureProcess(t, bins, gen.ApprovalResponsePayloadDecisionDeny, false, true)
+	if run.err != nil {
+		t.Fatalf("stop exit: %v\n%s", run.err, run.stderr)
+	}
+	specific, ok := run.hookOutput["hookSpecificOutput"].(map[string]any)
+	if !ok || specific["permissionDecision"] != "deny" {
+		t.Fatalf("pending hook did not receive deny: %v", run.hookOutput)
+	}
+	assertLastDone(t, run.events, gen.DonePayloadStatusStopped,
+		"(결과 없음: subtype=missing_result, terminal_reason=abnormal_exit)", "")
+}
+
+func TestContextCancellationCleansPendingHookViaProcessDone(t *testing.T) {
+	bins := buildAdapterBinaries(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+	fixture, err := filepath.Abs(filepath.Join(fixtureDir, "01-simple-text.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := append(os.Environ(),
+		"HX_CLAUDE_FIXTURE="+fixture,
+		"HX_CLAUDE_RUN_HOOK=1",
+	)
+	env = replaceEnv(env, "PATH", filepath.Dir(bins.approve)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var stderr bytes.Buffer
+	result := make(chan error, 1)
+	go func() {
+		err := Run(ctx, inReader, outWriter, &stderr, Config{ClaudeBin: bins.fake, Env: env})
+		outWriter.Close()
+		result <- err
+	}()
+	if _, err := inWriter.Write(taskCommandLine(t, t.TempDir())); err != nil {
+		t.Fatal(err)
+	}
+	scanner := bufio.NewScanner(outReader)
+	var events []gen.Event
+	canceled := false
+	for scanner.Scan() {
+		var event gen.Event
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+		if event.Kind == gen.EventKindSubagentApprovalRequest && !canceled {
+			cancel() // procgroup converts this single signal into native Done.
+			canceled = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-result:
+	case <-time.After(2 * time.Second):
+		t.Fatal("context cancellation left hook/socket/process pending")
+	}
+	inWriter.Close()
+	if !canceled {
+		t.Fatalf("approval request not observed; stderr=%s", stderr.String())
+	}
+	assertLastDone(t, events, gen.DonePayloadStatusError,
+		"(결과 없음: subtype=missing_result, terminal_reason=abnormal_exit)", "")
 }
 
 func assertLastDone(t *testing.T, events []gen.Event, status gen.DonePayloadStatus, result, raw string) {
