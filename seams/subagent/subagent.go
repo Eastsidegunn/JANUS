@@ -19,6 +19,7 @@ import (
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/contracts/validate"
 	"github.com/Eastsidegunn/JANUS/core/logd"
+	"github.com/Eastsidegunn/JANUS/core/policy"
 	"github.com/Eastsidegunn/JANUS/seams/subagent/internal/procgroup"
 )
 
@@ -30,15 +31,19 @@ type Spec struct {
 	Workspace   string
 	Budget      gen.Budget // 정책 병합이 끝난 실효 예산 (§5.2)
 	Depth       int64      // 현재 spawn 깊이
+	ProfileID   string
+	Approval    policy.ApprovalMode
+	Decider     policy.ApprovalDecider
 }
 
 // Subagent는 실행 중인 어댑터 프로세스 핸들이다.
 type Subagent struct {
-	actor    string
-	proc     *procgroup.Process
-	vals     *validate.Validators
-	doneCh   chan waitResult
-	childSpn string
+	actor     string
+	proc      *procgroup.Process
+	vals      *validate.Validators
+	doneCh    chan waitResult
+	childSpn  string
+	approvals *approvalCoordinator
 }
 
 type waitResult struct {
@@ -97,6 +102,7 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 		actor: actor, proc: proc, vals: vals,
 		doneCh: make(chan waitResult, 1), childSpn: childSpan,
 	}
+	s.approvals = newApprovalCoordinator(s, w, traceID, parentSpan, spec)
 	if err := s.sendCommand(gen.CommandCmdTask, gen.TaskPayload{
 		Instruction: spec.Instruction,
 		Workspace:   spec.Workspace,
@@ -207,6 +213,15 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string) {
 		if _, err := w.Submit(context.Background(), rec); err != nil {
 			return fmt.Errorf("subagent: 이벤트 기록: %w", err)
 		}
+		if ev.Kind == gen.KindSubagentApprovalRequest {
+			var request gen.ApprovalRequestPayload
+			if err := json.Unmarshal(ev.Payload, &request); err != nil {
+				return err
+			}
+			if err := s.approvals.start(request); err != nil {
+				return err
+			}
+		}
 		if ev.Kind == gen.KindSubagentDone {
 			var d gen.DonePayload
 			if err := json.Unmarshal(ev.Payload, &d); err != nil {
@@ -218,7 +233,10 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string) {
 		return nil
 	})
 
+	approvalErr := s.approvals.fatal()
 	switch {
+	case approvalErr != nil:
+		s.doneCh <- waitResult{err: approvalErr}
 	case drain.HandlerErr != nil:
 		s.doneCh <- waitResult{err: drain.HandlerErr}
 	case drain.ScanErr != nil:

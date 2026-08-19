@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -14,13 +15,15 @@ import (
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/core/logd"
+	"github.com/Eastsidegunn/JANUS/core/policy"
 )
 
 // FakeStore는 테스트 전용 인메모리 store다.
 type FakeStore struct {
-	mu      sync.Mutex
-	events  []gen.EventRecord
-	lastSeq int64
+	mu       sync.Mutex
+	events   []gen.EventRecord
+	lastSeq  int64
+	failKind gen.Kind
 }
 
 func (s *FakeStore) LastSeq(ctx context.Context) (int64, error) {
@@ -32,9 +35,96 @@ func (s *FakeStore) LastSeq(ctx context.Context) (int64, error) {
 func (s *FakeStore) Append(ctx context.Context, rec gen.EventRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if rec.Kind == s.failKind {
+		return errors.New("injected store failure")
+	}
 	s.events = append(s.events, rec)
 	s.lastSeq = rec.Seq
 	return nil
+}
+
+type fakeDecider struct {
+	decision policy.ApprovalDecision
+	err      error
+	entered  chan policy.ApprovalRequest
+	release  <-chan struct{}
+}
+
+func (d *fakeDecider) Decide(ctx context.Context, req policy.ApprovalRequest) (policy.ApprovalDecision, error) {
+	if d.entered != nil {
+		d.entered <- req
+	}
+	if d.release != nil {
+		select {
+		case <-d.release:
+		case <-ctx.Done():
+			return policy.ApprovalDecision{}, ctx.Err()
+		}
+	}
+	return d.decision, d.err
+}
+
+const approvalRequestID = "11111111-1111-4111-8111-111111111111"
+
+func approvalAdapterScript(emitMessage bool) string {
+	message := ""
+	if emitMessage {
+		message = `printf '%s\n' '{"v":1,"kind":"subagent/message","payload":{"text":"pump-progress"},"raw":""}'` + "\n"
+	}
+	return `read task
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/approval_request","payload":{"request_id":"` + approvalRequestID + `","call_id":"call-1","name":"Bash","args":{"command":"true"}},"raw":"eyJ0b29sX25hbWUiOiJCYXNoIn0="}'
+` + message + `read response
+printf '%s' "$response" > "$1"
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"ok","result":"approved"},"raw":""}'`
+}
+
+func decodeApprovalResponse(t *testing.T, path string) gen.ApprovalResponsePayload {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var b []byte
+	var err error
+	for time.Now().Before(deadline) {
+		b, err = os.ReadFile(path)
+		if err == nil && len(b) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err != nil || len(b) == 0 {
+		t.Fatalf("approval response not captured: %v", err)
+	}
+	var cmd gen.Command
+	if err := json.Unmarshal(b, &cmd); err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Cmd != gen.CommandCmdApprovalResponse {
+		t.Fatalf("cmd=%s", cmd.Cmd)
+	}
+	var response gen.ApprovalResponsePayload
+	if err := json.Unmarshal(cmd.Payload, &response); err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func spawnApprovalAdapter(t *testing.T, store *FakeStore, mode policy.ApprovalMode, decider policy.ApprovalDecider, emitMessage bool) (*Subagent, *logd.Writer, string) {
+	t.Helper()
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responsePath := filepath.Join(t.TempDir(), "response.json")
+	spec := spawnSpec([]string{"/bin/sh", "-c", approvalAdapterScript(emitMessage), "sh", responsePath}, "지시")
+	spec.ProfileID = "profile-1"
+	spec.Approval = mode
+	spec.Decider = decider
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1, spec)
+	if err != nil {
+		w.Close()
+		t.Fatal(err)
+	}
+	return sub, w, responsePath
 }
 
 func (s *FakeStore) AppendBatch(ctx context.Context, recs []gen.EventRecord) error {
@@ -103,6 +193,129 @@ printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"stopped","resu
 	}
 	if done.Status != gen.DonePayloadStatusStopped {
 		t.Fatalf("status = %s (stopped 기대)", done.Status)
+	}
+}
+
+func TestApprovalPolicyModesAndDurableAttribution(t *testing.T) {
+	cases := []struct {
+		name       string
+		mode       policy.ApprovalMode
+		decider    policy.ApprovalDecider
+		decision   gen.ApprovalResponsePayloadDecision
+		reasonPart string
+	}{
+		{"explicit auto", policy.ApprovalAuto, nil, gen.ApprovalResponsePayloadDecisionAllow, ""},
+		{"manual nil defaults deny", policy.ApprovalManual, nil, gen.ApprovalResponsePayloadDecisionDeny, "승인 결정자 미배선"},
+		{"manual decider allow", policy.ApprovalManual, &fakeDecider{decision: policy.ApprovalDecision{Allow: true}}, gen.ApprovalResponsePayloadDecisionAllow, ""},
+		{"decider error denies", policy.ApprovalManual, &fakeDecider{err: errors.New("ui unavailable")}, gen.ApprovalResponsePayloadDecisionDeny, "ui unavailable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &FakeStore{}
+			sub, w, responsePath := spawnApprovalAdapter(t, store, tc.mode, tc.decider, false)
+			defer w.Close()
+			if _, err := sub.Wait(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			response := decodeApprovalResponse(t, responsePath)
+			if response.RequestID != approvalRequestID || response.Decision != tc.decision {
+				t.Fatalf("response=%+v", response)
+			}
+			if tc.reasonPart != "" && (response.Reason == nil || !strings.Contains(*response.Reason, tc.reasonPart)) {
+				t.Fatalf("reason=%v want %q", response.Reason, tc.reasonPart)
+			}
+
+			events, _ := store.ReadFrom(context.Background(), 1)
+			var request, decision *gen.EventRecord
+			for i := range events {
+				switch events[i].Kind {
+				case gen.KindSubagentApprovalRequest:
+					request = &events[i]
+				case gen.KindPolicyDecision:
+					decision = &events[i]
+				}
+			}
+			if request == nil || decision == nil || decision.Seq <= request.Seq {
+				t.Fatalf("approval request/decision durable order missing: %+v", events)
+			}
+			if decision.Actor != "parent" || decision.SpanID != request.SpanID || decision.ParentSpanID == nil {
+				t.Fatalf("policy attribution request=%+v decision=%+v", request, decision)
+			}
+			var payload gen.PolicyDecisionPayload
+			if err := json.Unmarshal(decision.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.ProfileID != "profile-1" || string(payload.Decision) != string(tc.decision) {
+				t.Fatalf("policy payload=%+v", payload)
+			}
+		})
+	}
+}
+
+func TestApprovalDecisionDoesNotBlockPump(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan policy.ApprovalRequest, 1)
+	decider := &fakeDecider{
+		decision: policy.ApprovalDecision{Allow: true}, entered: entered, release: release,
+	}
+	store := &FakeStore{}
+	sub, w, _ := spawnApprovalAdapter(t, store, policy.ApprovalManual, decider, true)
+	defer w.Close()
+	select {
+	case req := <-entered:
+		if req.RequestID != approvalRequestID || req.SpanID == "" {
+			t.Fatalf("request=%+v", req)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("decider not entered")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		events, _ := store.ReadFrom(context.Background(), 1)
+		found := false
+		for _, event := range events {
+			if event.Kind == gen.KindSubagentMessage {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("approval decision blocked stdout pump")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	if _, err := sub.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApprovalEmptyDenyReasonIsFatalAfterForcedDeny(t *testing.T) {
+	store := &FakeStore{}
+	decider := &fakeDecider{decision: policy.ApprovalDecision{Allow: false}}
+	sub, w, responsePath := spawnApprovalAdapter(t, store, policy.ApprovalManual, decider, false)
+	defer w.Close()
+	if _, err := sub.Wait(context.Background()); err == nil || !strings.Contains(err.Error(), "deny reason이 비어 있음") {
+		t.Fatalf("empty deny reason not fatal: %v", err)
+	}
+	response := decodeApprovalResponse(t, responsePath)
+	if response.Decision != gen.ApprovalResponsePayloadDecisionDeny || response.Reason == nil || *response.Reason == "" {
+		t.Fatalf("forced response=%+v", response)
+	}
+}
+
+func TestApprovalRecordFailureSendsDenyBeforeTermination(t *testing.T) {
+	store := &FakeStore{failKind: gen.KindPolicyDecision}
+	sub, w, responsePath := spawnApprovalAdapter(t, store, policy.ApprovalAuto, nil, false)
+	defer w.Close()
+	if _, err := sub.Wait(context.Background()); err == nil || !strings.Contains(err.Error(), "policy/decision 기록") {
+		t.Fatalf("record failure not surfaced: %v", err)
+	}
+	response := decodeApprovalResponse(t, responsePath)
+	if response.Decision != gen.ApprovalResponsePayloadDecisionDeny || response.Reason == nil || *response.Reason != "정책 판정 기록 실패" {
+		t.Fatalf("record failure response=%+v", response)
 	}
 }
 
