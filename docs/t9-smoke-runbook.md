@@ -46,10 +46,37 @@ go test -tags smoke -count=1 -v -timeout 10m ./seams/subagent/claudecode
 - **확인점 5에서 managed policy 발견**: `--setting-sources`가 통제하지 못하는
   영역이므로 격리 가정이 흔들린다. 로그에 남기고 재제안 여부를 판단한다.
 
-## 5. 확인점 1을 실제로 증명하려면 (선택)
+## 5. 확인점 1(사용자 설정 배제) 증명
 
-사용자 훅이 하나도 없으면 "발화하지 않았다"가 격리의 증거가 되지 못한다.
-증명하려면 **임시 마커 훅**을 직접 넣었다가 되돌린다. 이건 개인 설정 수정이므로
+`TestSmokeApprovalHandshake`는 확인점 2·3·4를 증명하지만 확인점 1은 증명하지
+못한다. 사용자 훅이 하나도 없으면 "발화하지 않았다"는 격리의 증거가 아니다.
+
+### 5.1 기본 절차 — 개인 설정을 건드리지 않는다
+
+```sh
+go test -tags smoke -count=1 -v -timeout 10m \
+  -run TestSmokeUserSettingIsolation ./seams/subagent/claudecode
+```
+
+`CLAUDE_CONFIG_DIR`로 사용자 설정 디렉터리를 임시 경로로 옮기고 거기에 마커
+훅을 심는다. `~/.claude`은 읽지도 쓰지도 않는다. 두 번 실행한다.
+
+| 실행 | setting-sources | 마커 기대 | 무엇을 증명하나 |
+|---|---|---|---|
+| A 대조군 | `user,project,local` | **있음** | 기법이 유효함(훅 배선·CLAUDE_CONFIG_DIR 존중) |
+| B 실제 | 어댑터 고정값 `project,local` | **없음** | 격리 성립 |
+
+A가 실패하면 B의 결과는 어떤 값이든 증거가 아니다 — 테스트가 그 자리에서
+fatal로 멈추고 5.2로 안내한다. B에서 우리 훅의 `approval_request`가 안 보여도
+fatal이다(세션이 죽어서 마커가 없는 것을 격리 성공으로 읽지 않기 위해서다).
+
+macOS에서 자격증명은 Keychain에 있어 config 디렉터리 교체와 무관할 것으로
+보지만, 실측으로 확인되지 않았다. 인증이 깨지면 A가 실패하므로 잘못된 결론이
+나오지는 않는다.
+
+### 5.2 대조군이 실패하면 — 개인 설정 임시 수정 (수동)
+
+`CLAUDE_CONFIG_DIR` 우회가 통하지 않는 버전에서만 쓴다. 개인 설정을 고치므로
 자동화하지 않는다.
 
 ```sh
@@ -57,7 +84,8 @@ cp ~/.claude/settings.json ~/.claude/settings.json.bak   # 반드시 백업
 # settings.json의 hooks에 PreToolUse 훅 하나 추가:
 #   {"type":"command","command":"touch /tmp/hx-smoke-user-hook-fired"}
 rm -f /tmp/hx-smoke-user-hook-fired
-go test -tags smoke -count=1 -v -timeout 10m ./seams/subagent/claudecode
+go test -tags smoke -count=1 -v -timeout 10m \
+  -run TestSmokeApprovalHandshake ./seams/subagent/claudecode
 ls /tmp/hx-smoke-user-hook-fired   # 없어야 격리 성립
 mv ~/.claude/settings.json.bak ~/.claude/settings.json    # 원복
 ```

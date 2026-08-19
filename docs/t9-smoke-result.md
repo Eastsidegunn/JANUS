@@ -8,7 +8,7 @@ OAuth 유지·API key 미사용)
 
 | # | 내용 | 결과 |
 |---|---|---|
-| 1 | pristine 작업공간에서 사용자 훅 미발화 | **미증명** — 이 머신의 `~/.claude/settings.json`에 hooks가 없어 배제할 대상 자체가 없었다. §잔여 위험 참조 |
+| 1 | pristine 작업공간에서 사용자 훅 미발화 | **미증명 (증명 대기)** — 이 머신의 `~/.claude/settings.json`에 hooks가 없어 배제할 대상 자체가 없었다. 전용 테스트를 추가했다. §잔여 위험 참조 |
 | 2 | 우리 훅 발화 → `approval_request` 방출 | **통과** (deny·allow 실행 모두) |
 | 3 | deny 응답 → 툴 미실행 | **통과** — `smoke-approved.txt` 생성 안 됨 |
 | 4 | allow 응답 → 실행 | **통과** — 파일 생성됨 |
@@ -45,12 +45,27 @@ subagent/ready → subagent/tool_call → subagent/approval_request
 
 ## 잔여 위험 — 확인점 1
 
-`--setting-sources project,local`이 사용자 설정을 실제로 배제하는지는 이번
-실행으로 증명되지 않았다(배제할 사용자 훅이 없었다). 증명하려면
-`docs/t9-smoke-runbook.md` §5의 임시 마커 훅 절차(개인 설정 백업·원복)를
-수행해야 한다. 이는 개인 설정 수정이므로 자동화하지 않으며, 수행 여부는
-사람의 판단이다.
+`--setting-sources project,local`이 사용자 설정을 실제로 배제하는지는 위 실행으로
+증명되지 않았다(배제할 사용자 훅이 없었다).
 
-영향 범위: 사용자 훅이 있는 환경에서 그것이 함께 발화하면 격리 가정이 약해진다.
-다만 (a) 우리 훅은 정상 발화했고 (b) managed policy는 이 머신에 없으며
-(c) 작업공간은 pristine이라 project/local 설정도 없다.
+증명용 테스트를 추가했다 — `TestSmokeUserSettingIsolation`. 개인
+`~/.claude`을 건드리지 않는다. `CLAUDE_CONFIG_DIR`로 사용자 설정 디렉터리를
+임시 경로로 옮기고 마커 훅을 심어 두 번 돌린다.
+
+| 실행 | setting-sources | 마커 기대 | 증명 대상 |
+|---|---|---|---|
+| A 대조군 | `user,project,local` | 있음 | 기법 자체의 유효성 |
+| B 실제 | 어댑터 고정값 `project,local` | 없음 | 격리 성립 |
+
+대조군을 둔 이유: 마커 부재만 보는 것은 증명이 아니다. 훅이 잘못 배선됐거나
+`CLAUDE_CONFIG_DIR`이 무시돼도 똑같이 마커가 없고, 그때 "격리 성공"으로 읽으면
+아무것도 증명하지 못한 채 증명했다고 착각하게 된다. A가 실패하면 테스트는 B의
+결과를 보지 않고 그 자리에서 멈춘다. B에서 우리 훅의 `approval_request`가 없어도
+멈춘다 — 세션이 죽어서 마커가 없는 것과 격리를 구분하기 위해서다.
+
+실행 절차는 `docs/t9-smoke-runbook.md` §5.1. [H] 사람이 실행한다.
+
+**이 결과가 나오기 전까지 확인점 1은 미증명이다.** 영향 범위: 사용자 훅이 있는
+환경에서 그것이 함께 발화하면 격리 가정이 약해진다. 다만 (a) 우리 훅은 정상
+발화했고 (b) managed policy는 이 머신에 없으며 (c) 작업공간은 pristine이라
+project/local 설정도 없다.
