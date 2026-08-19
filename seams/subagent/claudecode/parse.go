@@ -159,6 +159,9 @@ func (p *Parser) ParseLine(line []byte) ([]Event, error) {
 	if err := json.Unmarshal(line, &n); err != nil {
 		return nil, fmt.Errorf("claudecode: JSON 파싱: %w", err)
 	}
+	if !p.sawInit && !(n.Type == "system" && n.Subtype == "init") {
+		return nil, fmt.Errorf("claudecode: 첫 native 줄은 system/init이어야 함 (got type=%q subtype=%q)", n.Type, n.Subtype)
+	}
 	if isolationViolationTypes[n.Type] {
 		return nil, fmt.Errorf("claudecode: %s 출현 — 격리 계약 위반(자동 훅 발견이 차단돼야 함)", n.Type)
 	}

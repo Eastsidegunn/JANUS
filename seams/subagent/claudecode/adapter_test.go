@@ -400,6 +400,22 @@ func TestAdapterEmitsDistinctDoneForFailuresAfterReady(t *testing.T) {
 	}
 }
 
+func TestAdapterRejectsNativeEventBeforeInitWithoutBrokenOutput(t *testing.T) {
+	bins := buildAdapterBinaries(t)
+	run := runFixtureProcess(t, bins, filepath.Join(fixtureDir, "01-simple-text.ndjson"), []string{
+		"HX_CLAUDE_SKIP_FIRST=1",
+	}, nil)
+	if run.err == nil {
+		t.Fatalf("adapter unexpectedly succeeded; stderr=%s", run.stderr)
+	}
+	if len(run.events) != 0 {
+		t.Fatalf("pre-ready failure emitted out-of-order events: %+v", run.events)
+	}
+	if !strings.Contains(run.stderr, "첫 native 줄은 system/init이어야 함") {
+		t.Fatalf("stderr lost native cause: %q", run.stderr)
+	}
+}
+
 func assertLastDone(t *testing.T, events []gen.Event, status gen.DonePayloadStatus, result, raw string) {
 	t.Helper()
 	if len(events) == 0 {

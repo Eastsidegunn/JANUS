@@ -36,6 +36,10 @@ func main() {
 	first := true
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		if first && os.Getenv("HX_CLAUDE_SKIP_FIRST") == "1" {
+			first = false
+			continue
+		}
 		if os.Getenv("HX_CLAUDE_DROP_RESULT") == "1" {
 			var header struct {
 				Type string `json:"type"`
