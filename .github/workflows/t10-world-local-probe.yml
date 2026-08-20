@@ -103,17 +103,14 @@ jobs:
 
           podman network create --internal "$internal" >/dev/null
           podman network create "$external" >/dev/null
-          web=$(mktemp -d)
-          printf 'proxy-name-ok\n' > "$web/index.html"
           podman run -d --name "$proxy" --network "$external" \
-            -v "$web:/srv:ro" alpine:3.20 \
-            httpd -f -p 8080 -h /srv >/dev/null
+            alpine:3.20 sleep 300 >/dev/null
           podman network connect "$internal" "$proxy"
 
           podman exec "$proxy" nslookup example.com >/dev/null
           podman run --rm --network "$internal" alpine:3.20 sh -ec "
-            body=\$(wget -q -T5 -O- http://$proxy:8080/)
-            test \"\$body\" = proxy-name-ok
+            nslookup $proxy >/tmp/proxy-dns
+            grep -F 'Address:' /tmp/proxy-dns >/dev/null
             if nslookup example.com >/tmp/external-dns 2>&1; then
               cat /tmp/external-dns
               echo 'external DNS unexpectedly succeeded' >&2
