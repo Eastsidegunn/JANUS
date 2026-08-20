@@ -107,15 +107,18 @@ jobs:
             alpine:3.20 sleep 300 >/dev/null
           podman network connect "$internal" "$proxy"
 
-          podman exec "$proxy" nslookup example.com >/dev/null
+          echo '## proxy sidecar external DNS'
+          podman exec "$proxy" nslookup example.com
           podman run --rm --network "$internal" alpine:3.20 sh -ec "
-            nslookup $proxy >/tmp/proxy-dns
-            grep -F 'Address:' /tmp/proxy-dns >/dev/null
+            echo '## agent internal proxy-name DNS'
+            nslookup $proxy
+            echo '## agent external DNS (must fail)'
             if nslookup example.com >/tmp/external-dns 2>&1; then
               cat /tmp/external-dns
               echo 'external DNS unexpectedly succeeded' >&2
               exit 1
             fi
+            cat /tmp/external-dns
           "
 
           echo "ASSERT internal_proxy_name_resolves=true name=$proxy"
