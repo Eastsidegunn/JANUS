@@ -1,0 +1,126 @@
+# T10 제안 차단 3을 닫기 위한 일회성 실측. 결과를 제안서에 옮긴 뒤 삭제한다.
+name: t10-world-local-probe
+
+on:
+  push:
+    branches: [t10/world-local-probe2]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: rootless native overlay 전제
+        shell: bash
+        run: |
+          set -euo pipefail
+          podman --version
+          rootless=$(podman info --format '{{.Host.Security.Rootless}}')
+          graph_driver=$(podman info --format '{{.Store.GraphDriverName}}')
+          graph_status=$(podman info --format '{{json .Store.GraphStatus}}')
+          printf 'rootless=%s graph_driver=%s graph_status=%s\n' \
+            "$rootless" "$graph_driver" "$graph_status"
+          test "$rootless" = true
+          test "$graph_driver" = overlay
+          python3 - "$graph_status" <<'PY'
+          import json, sys
+          status = json.loads(sys.argv[1])
+          value = status.get("Native Overlay Diff")
+          if str(value).lower() != "true":
+              raise SystemExit(f"Native Overlay Diff is not true: {value!r}")
+          PY
+
+      - name: custom upper work keep-id 조합
+        shell: bash
+        run: |
+          set -euo pipefail
+          podman pull -q alpine:3.20 >/dev/null
+          probe_root=$(mktemp -d)
+          lower="$probe_root/lower"
+          upper="$probe_root/upper"
+          work="$probe_root/work"
+          mkdir -p "$lower" "$upper" "$work"
+          printf 'original\n' > "$lower/modify.txt"
+          printf 'delete-lower\n' > "$lower/delete-me.txt"
+          cp "$lower/modify.txt" "$probe_root/modify.expected"
+          cp "$lower/delete-me.txt" "$probe_root/delete.expected"
+
+          runner_uid=$(id -u)
+          runner_gid=$(id -g)
+          podman run --rm \
+            --userns="keep-id:uid=$runner_uid,gid=$runner_gid" \
+            --user="$runner_uid:$runner_gid" \
+            -v "$lower:/workspace:O,upperdir=$upper,workdir=$work" \
+            alpine:3.20 sh -ec '
+              printf "modified\n" >> /workspace/modify.txt
+              printf "created\n" > /workspace/create.txt
+              rm /workspace/delete-me.txt
+            '
+
+          cmp "$lower/modify.txt" "$probe_root/modify.expected"
+          cmp "$lower/delete-me.txt" "$probe_root/delete.expected"
+          test ! -e "$lower/create.txt"
+
+          test -f "$upper/create.txt"
+          grep -Fx modified "$upper/modify.txt"
+          whiteout=$(find "$upper" -mindepth 1 -maxdepth 1 -name delete-me.txt -print -quit)
+          test -n "$whiteout"
+          test "$(stat -c %u "$upper/create.txt")" = "$runner_uid"
+          test "$(stat -c %u "$upper/modify.txt")" = "$runner_uid"
+
+          echo '## upper representation'
+          find "$upper" -mindepth 1 -maxdepth 1 -printf '%P type=%y uid=%U gid=%G\n' | sort
+          echo "ASSERT lower_unchanged=true"
+          echo "ASSERT upper_create_modify_delete=true"
+          echo "ASSERT upper_owner_runner=true uid=$runner_uid"
+
+          graph_status=$(podman info --format '{{json .Store.GraphStatus}}')
+          python3 - "$graph_status" <<'PY'
+          import json, sys
+          status = json.loads(sys.argv[1])
+          value = status.get("Native Overlay Diff")
+          if str(value).lower() != "true":
+              raise SystemExit(f"Native Overlay Diff changed after run: {value!r}")
+          PY
+          echo 'ASSERT native_overlay_after_run=true'
+
+      - name: internal DNS와 dual-homed proxy 이름
+        shell: bash
+        run: |
+          set -euo pipefail
+          suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          internal="hx-internal-$suffix"
+          external="hx-external-$suffix"
+          proxy="hx-proxy-$suffix"
+          cleanup() {
+            podman rm -f "$proxy" >/dev/null 2>&1 || true
+            podman network rm -f "$internal" "$external" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          podman network create --internal "$internal" >/dev/null
+          podman network create "$external" >/dev/null
+          web=$(mktemp -d)
+          printf 'proxy-name-ok\n' > "$web/index.html"
+          podman run -d --name "$proxy" --network "$external" \
+            -v "$web:/srv:ro" alpine:3.20 \
+            httpd -f -p 8080 -h /srv >/dev/null
+          podman network connect "$internal" "$proxy"
+
+          podman exec "$proxy" nslookup example.com >/dev/null
+          podman run --rm --network "$internal" alpine:3.20 sh -ec "
+            body=\$(wget -q -T5 -O- http://$proxy:8080/)
+            test \"\$body\" = proxy-name-ok
+            if nslookup example.com >/tmp/external-dns 2>&1; then
+              cat /tmp/external-dns
+              echo 'external DNS unexpectedly succeeded' >&2
+              exit 1
+            fi
+          "
+
+          echo "ASSERT internal_proxy_name_resolves=true name=$proxy"
+          echo 'ASSERT proxy_external_dns=true'
+          echo 'ASSERT agent_external_dns_blocked=true'
