@@ -111,7 +111,7 @@ jobs:
           podman exec "$proxy" nslookup example.com
           podman run --rm --network "$internal" alpine:3.20 sh -ec "
             echo '## agent internal proxy-name DNS'
-            nslookup $proxy
+            ping -c 1 -W 3 $proxy
             echo '## agent external DNS (must fail)'
             if nslookup example.com >/tmp/external-dns 2>&1; then
               cat /tmp/external-dns
