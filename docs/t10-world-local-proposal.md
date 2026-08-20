@@ -44,6 +44,10 @@ overlayfs, 충분한 용량을 확인했다. macOS에는 런타임을 설치하�
 | proxy sidecar의 외부 DNS | `example.com` A/AAAA 해석 성공 |
 | internal agent의 외부 DNS | `example.com: NXDOMAIN` |
 
+이 표의 범위를 넘겨 인용하지 않는다. 마지막 항목이 증명한 것은 **이름 해석
+차단**이지 경로 차단이 아니다. 외부 IP 리터럴 직결 차단은 §6 통합 테스트 2번에서
+실측한다. 또한 삭제 항목의 소유자는 runner가 아니라 subordinate UID였다(§1).
+
 초기 probe 두 번은 각각 Alpine image에 `httpd`가 없었던 것과 BusyBox
 `nslookup`이 A record를 받은 뒤 host search suffix NXDOMAIN 때문에 exit 1을 낸
 probe 결함이었다. 최종 run은 이름의 실제 소비를 ping으로 단정하고 전 단계가
@@ -91,9 +95,17 @@ work       = <state root>/overlay/work
 - agent image가 선언한 숫자 UID/GID를 `AgentUID/AgentGID`로 확정하고
   `--userns=keep-id:uid=<AgentUID>,gid=<AgentGID>` 및 같은 `--user`로 실행한다.
   Podman의 keep-id는 호출한 host UID/GID를 지정 container UID/GID에 매핑하므로,
-  upper의 copy-up 결과는 host에서 rootless runner 소유로 남고 T11이 읽을 수 있다.
-  subordinate UID로 남은 entry도 collector가 못 읽으면 조용히 누락하지 않고
-  수집 실패로 처리한다.
+  생성·수정의 copy-up 결과는 host에서 rootless runner 소유로 남는다(§0.1 실측:
+  uid 1001).
+- **삭제는 소유자가 다르다. 이것은 이상이 아니라 정상 표현이다.** §0.1 실측에서
+  삭제 항목은 `type=c uid=165536 gid=165536`, 즉 subordinate UID 소유의
+  character-device whiteout으로 남았다. 판정에는 `lstat`만 필요하고(char device +
+  rdev 0,0) `open`은 필요 없으며, 부모 디렉터리가 runner 소유라 조회도 정리도
+  된다.
+  따라서 collector는 upper 항목을 **소유자로 필터링해서는 안 된다.**
+  `owner == runner`는 자연스러워 보이는 검사지만 그렇게 하면 모든 삭제가 조용히
+  누락된다 — 이 규약이 막으려는 바로 그 실패다. 읽기 불가는 소유자가 아니라
+  `lstat` 실패로만 판정하고, 그때는 조용히 누락하지 않고 수집 실패로 처리한다.
 - `UpperDir`는 agent나 어댑터에 주지 않는 host-only lease 필드다. T11 collector가
   upper의 whiteout/copy-up을 읽고 durable 이벤트 기록을 끝냈다는 ACK를 보낸 뒤에만
   world가 state root를 정리한다. agent 종료만으로 삭제하지 않는다.
@@ -445,7 +457,10 @@ ci-linux: ci world-integration
 CI integration은 최소 다음을 실제 Podman process로 확인한다.
 
 1. workspace create/modify/delete 뒤 lower hash 불변, upper diff와 owner 일치.
-2. agent의 direct external 접속 실패, allowlisted HTTP/CONNECT만 proxy 성공.
+2. agent의 direct external 접속 실패. **DNS 차단만으로 판정하지 않는다** —
+   이름 해석을 거치지 않는 외부 **IP 리터럴 직결**(TCP)이 route 부재로 실패하는
+   것을 별도로 단정한다. §0.1이 증명한 것은 NXDOMAIN까지이며 경로 차단은 아직
+   실측되지 않았다. 이어서 allowlisted HTTP/CONNECT만 proxy로 성공.
 3. 금지 domain 연결 실패 **및 같은 시도의 deny audit record 존재** (§8-4).
 4. agent에서 host adapter process/path/approval socket/Podman socket 접근 불가,
    수정 시도 뒤 adapter hash 불변 (FR-ADP-10).
