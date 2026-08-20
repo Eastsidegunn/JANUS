@@ -1,6 +1,6 @@
 # T10 사전 제안 — world local 백엔드 (rootless Podman)
 
-상태: **승인 대기** (2026-08-20). 이 PR은 제안서 한 파일만 추가한다. 코드,
+상태: **재승인 대기** (2026-08-20, 1차 리뷰 차단 4건 반영). 이 PR은 제안서 한 파일만 추가한다. 코드,
 워크플로, `contracts/`, 픽스처, Go 모듈은 변경하지 않는다. 대상 요구사항은
 FR-SBX-01~06, FR-ADP-10, FR-POL-05이며, 릴리스 게이트는 §8-4다.
 
@@ -18,13 +18,36 @@ overlayfs, 충분한 용량을 확인했다. macOS에는 런타임을 설치하�
 | Q2 egress | agent 전용 internal bridge + 외부망도 가진 감사 프록시 sidecar |
 | Q3 approval | 실제 T9 소켓은 호스트에 유지하고, 한 번 쓰는 tool intent와 정확히 상관되는 제한 relay만 컨테이너에 노출 |
 | Q4 world seam | `core/world` 계약 + `seams/world/local` 구현 + `surfaces/hx` 조립; 어댑터에는 backend-neutral broker endpoint만 전달 |
-| Q5 spawn metadata | 열린 payload를 유지하지 않고 별도 명세/스키마 변경 승인 후 폐쇄·필수화 |
+| Q5 spawn metadata | `world_backend` 판별 폐쇄 분기; local-Podman branch에만 sandbox metadata 필수 |
 | Q6 tests | `world-integration` 타깃을 Linux에서 fail-closed로 실행하고 CI는 `ci-linux`로 묶음 |
 | Q7 Fake | `core/world/worldtest.FakeBackend`, 테스트 파일에서만 import 가능하도록 lint 강제 |
 
 두 가지를 보안 경계로 보지 않는다. 환경변수 `HTTP_PROXY`만으로는 강제 프록시가
 되지 않으며, 컨테이너 안의 비밀 토큰만으로는 같은 UID의 에이전트와
 `hxapprove`를 구별할 수 없다. 아래 선택은 이 두 전제를 회피한다.
+
+### 0.1 문서 추론이 아니라 조합 실행으로 확인한 전제
+
+1차 리뷰의 지시에 따라 구현 전에 별도 일회성 workflow를
+`t10/world-local-probe2`에서 실행했다. 최종 성공 run은
+[32352803170](https://github.com/Eastsidegunn/JANUS/actions/runs/32352803170),
+검증 commit은 `d17a8a4`다. workflow는 결과 확인 뒤 `5502210`에서 제거했으며
+제안 PR에는 들어오지 않는다.
+
+| 단정 | ubuntu-latest 실측 |
+|---|---|
+| custom `:O,upperdir,workdir` + `--userns=keep-id` lower 불변 | pass |
+| upper에 create/modify/delete 표현 | pass |
+| upper create/modify 소유자 | runner UID `1001` |
+| 실제 조합 실행 뒤 native overlay | `Native Overlay Diff: true` 유지 |
+| internal agent의 proxy 이름 해석 | `hx-proxy-…` → `10.89.0.2`, ping 성공 |
+| proxy sidecar의 외부 DNS | `example.com` A/AAAA 해석 성공 |
+| internal agent의 외부 DNS | `example.com: NXDOMAIN` |
+
+초기 probe 두 번은 각각 Alpine image에 `httpd`가 없었던 것과 BusyBox
+`nslookup`이 A record를 받은 뒤 host search suffix NXDOMAIN 때문에 exit 1을 낸
+probe 결함이었다. 최종 run은 이름의 실제 소비를 ping으로 단정하고 전 단계가
+fail-closed로 green이다.
 
 ---
 
@@ -41,7 +64,9 @@ overlayfs, 충분한 용량을 확인했다. macOS에는 런타임을 설치하�
 
 Podman 공식 문서는 `:O`의 host source가 overlay lower, 별도 저장소가 upper라고
 정의하고, custom `upperdir`/`workdir`는 사용자가 관리하며 컨테이너 종료 때
-삭제하지 않는다고 명시한다. 따라서 world local은 다음 규약으로 구성한다.
+삭제하지 않는다고 명시한다. §0.1에서 이 옵션과 keep-id의 rootless 조합도 실제로
+lower 불변, upper 세 변경 유형, runner 소유권, native overlay 유지까지 확인했다.
+따라서 world local은 다음 규약으로 구성한다.
 
 ```text
 lower      = policy가 허용한 원본 workspace 절대 경로
@@ -107,7 +132,9 @@ forwarding과 container default route를 없애고 외부 DNS 질의도 NXDOMAIN
 응답한다. proxy sidecar만 internal과 external network 양쪽에 붙인다. agent에는
 proxy의 internal DNS 이름으로 `HTTP_PROXY`/`HTTPS_PROXY`를 주고 `NO_PROXY`는 빈
 값으로 고정하지만, 보안은 환경변수가 아니라 **직접 외부 route 부재**에서 온다.
-agent가 proxy 변수를 지우면 접근이 넓어지는 대신 전부 실패한다.
+agent가 proxy 변수를 지우면 접근이 넓어지는 대신 전부 실패한다. §0.1의 실제
+dual-homed 조합에서 agent는 proxy 이름을 `10.89.0.2`로 해석했지만 외부 이름은
+NXDOMAIN이었고, proxy container는 외부 A/AAAA를 정상 해석했다.
 
 proxy는 표준 라이브러리로 만든 repo 소유 helper를 read-only OCI image에서
 실행한다. 신규 Go 모듈이나 runner 설치는 없다. v0.1 지원 범위는 HTTP와 HTTPS
@@ -185,7 +212,14 @@ hook 연결이 intent보다 먼저 도착하면 relay는 bounded pending 상태�
 **allow하지 않는다**. 동일 intent가 native stream에 나타나야 진행한다. native
 stream이 이 상관 순서를 제공하지 않아 양쪽이 교착되는 것이 Linux integration에서
 확인되면, matching을 생략하거나 secret으로 우회하지 않고 T10을 정지해 approval
-transport를 재제안한다.
+transport를 재제안한다. T9 사람 smoke의 실제 순서는
+`ready → tool_call → approval_request`여서 현재 전제와 일치하지만, integration
+회귀를 계속 둔다.
+
+pending deadline은 `min(parent ctx deadline, 남은 time budget, 600초)`다. 명시적
+deadline이 없는 경우에도 600초를 상한으로 사용한다. intent 미출현, timeout,
+lease 종료는 모두 durable deny를 기록한 뒤 해당 hook과 나머지 pending을 deny하고
+정리한다. lease 만료까지 무기한 매달리는 상태는 없다.
 
 agent는 tool call과 args를 알고 있으므로 relay 요청 자체를 흉내낼 수 있다. 이
 설계는 그 사실을 숨기지 않는다. 그러나 일치하는 요청을 먼저 소비하면 실제
@@ -194,6 +228,21 @@ agent는 tool call과 args를 알고 있으므로 relay 요청 자체를 흉내�
 denial-of-service**이고, 존재하지 않는 tool/다른 args에 대한 allow나 approval
 decision 위조는 아니다. decision은 여전히 T9 core가 내리고
 `policy/decision`을 durable 기록한 뒤에만 반환한다.
+
+relay는 duplicate를 socket 단계에서 조용히 버리지 않는다. 모든 syntactically
+valid matching/duplicate 시도는 exact hook raw를 가진 `subagent/approval_request`와
+그 뒤 `policy/decision`으로 남긴다. duplicate는 같은 `call_id`, 새 `request_id`,
+`reason:"duplicate tool intent"`로 강제 deny하며 Decider를 다시 호출하지 않는다.
+따라서 위조 요청이 먼저 one-shot을 소비한 race의 로그는 최소한 다음을 재구성한다.
+
+```text
+approval_request(call_id=C) → policy/decision allow
+approval_request(call_id=C, reason=duplicate) → policy/decision deny(duplicate)
+→ native tool_result rejected 또는 done(error), effect 없음
+```
+
+allow 한 건만 남겨 실제 실행처럼 보이는 상태를 허용하지 않는다. duplicate deny
+기록 실패 시에도 deny 응답과 lease 오류 종료가 우선이며 실행을 허용하지 않는다.
 
 adapter 변조 방지는 별도 조건으로 고정한다.
 
@@ -294,24 +343,44 @@ adapter/surface 소비 API가 분기됨, world가 DB를 직접 여는 경우다.
 다만 이 PR에서는 `contracts/`를 수정하지 않는다. 다음 변경을 **SCP-T10-001**로
 승인 요청한다.
 
-### SCP-T10-001 — spawn payload 폐쇄 및 실행 환경 metadata 필수화
+### SCP-T10-001 — world backend 판별 spawn payload 폐쇄
 
 - 위치: §5.1 `subagent/spawn` payload 설명과
   `contracts/events.schema.json`의 해당 oneOf 분기.
-- 문제: FR-SBX-06 필수 metadata를 schema가 전혀 강제하지 않는다.
-- 단일 제안: `subagentSpawnPayload`를 추가하고 `additionalProperties:false`로
-  폐쇄한다. 현재 방출 필드도 버리지 않고 아래 항목을 필수화한다.
+- 문제 1: FR-SBX-06 필수 metadata를 schema가 전혀 강제하지 않는다.
+- 문제 2: 모든 spawn에 local-Podman metadata를 필수로 만들면 현재 T7 null 경로와
+  비샌드박스 기록을 표현할 수 없다. writer는 저장 직전 모든 record를 검증하므로
+  emitter와 schema를 함께 바꾸지 않으면 기존 관통 경로가 즉시 깨진다.
+- 기존 schema annotation은 "남은 열린 kind(session/*, assistant/chunk,
+  subagent/spawn)의 필드 확정은 해당 태스크에서 **additive**로 진행"한다고
+  적었다. 아래 폐쇄는 non-additive이므로 이 문구를 그대로 두지 않는다.
+- 단일 제안: `world_backend`를 공통 required 판별자로 두고
+  `subagentSpawnPayload`를 두 폐쇄 분기로 만든다. T9 `tool_result`와 같이 각
+  branch가 허용 property 전체를 반복하고 `additionalProperties:false`를 가진다.
 
 ```text
-adapter:       non-empty string
-instruction:   string
-depth:         int64NonNeg
-budget:        Budget
-profile_id:    non-empty string
-world_backend: const "local-podman" | 향후 명세 승인된 backend 식별자
-image_digest:  "sha256:" + lower hex 64자 (tag만 기록하는 것은 불가)
+base required: [adapter, instruction, depth, budget, world_backend]
+
+oneOf:
+  - world_backend: const "none"
+    properties: {adapter, instruction, depth, budget, world_backend}
+    additionalProperties: false
+
+  - world_backend: const "local-podman"
+    properties: {adapter, instruction, depth, budget, world_backend,
+                 profile_id, image_digest, mounts}
+    required: [profile_id, image_digest, mounts]
+    additionalProperties: false
+
+image_digest: "sha256:" + lower hex 64자 (tag만 기록하는 것은 불가)
 mounts: [{source_path, target_path, mode:"overlay", upper_ref}]
 ```
+
+`none`은 기존 null adapter·테스트·과거 비샌드박스 경로를 명시적으로 표현한다.
+schema가 `none`을 허용하는 것이 production 권한은 아니다. T10 이후 production
+surface는 FR-SBX-01에 따라 `local-podman`만 선택하고 `none`을 거부한다. 향후
+`remote-microvm`은 같은 판별 구조에 새 폐쇄 branch를 추가하며 consumer API는
+바꾸지 않는다.
 
 `source_path`는 정책 평가 뒤 정규화된 host workspace, `target_path`는
 `/workspace`, `upper_ref`는 session state root에 상대적인 stable artifact ID다.
@@ -319,11 +388,21 @@ mounts: [{source_path, target_path, mode:"overlay", upper_ref}]
 않고 lease 내부 mapping으로만 보유한다. 자격증명 값, proxy token, socket path도
 기록하지 않는다.
 
-- 구현 영향(승인 뒤 별도 커밋): events schema 변경 → `make codegen` → mirror가
-  필요한 경우 wire와 함께 검토 → validate 유효/위반 회귀 → T2 generator와 기존
-  spawn sample 갱신 → drift gate. 생성 타입은 손으로 수정하지 않는다.
-- 변경 성격: 기존 열린 payload를 폐쇄하므로 additive가 아닌 **계약 강화**다.
-  명세 소유자의 [H] 승인 전 구현하지 않는다.
+- 구현 영향(승인 뒤 한 원자적 커밋): 명세와 events schema 변경 → 모든 기존
+  emitter에 `world_backend:"none"` 추가 → `make codegen` → validate 유효/위반
+  회귀 → T2 generator와 기존 spawn sample 갱신 → drift gate. `subagent/spawn`은
+  adapter→core wire kind가 아니므로 wire mirror를 만들지 않는다. 생성 타입은
+  손으로 수정하지 않는다.
+- schema의 기존 annotation은 session/*와 assistant/chunk만 향후 additive 확정
+  대상으로 남기고, `subagent/spawn`은 "T10에서 world_backend 판별 branch로
+  non-additive 폐쇄(승인일 기록)"라고 개정한다. annotation과 실제 계약을 같은
+  커밋에서 바꾼다.
+- `contracts/validate/validate_test.go`의 "어댑터가 못 내는 kind"는 payload가 새
+  `none` branch에 유효한 sample로 갱신한다. 같은 payload의 full EventRecord가
+  `ValidateRecord`를 통과하고 wire `ValidateEvent`만 kind 때문에 실패함을 함께
+  단정해, payload 폐쇄라는 다른 이유로 우연히 green이 되는 것을 막는다.
+- 변경 성격: 기존 열린 payload를 폐쇄하고 판별자를 필수화하는
+  **non-additive 계약 강화**다. 명세 소유자의 [H] 승인 전 구현하지 않는다.
 - 실패 모드: tag만 기록해 image가 바뀜, host 임시 upper 절대 경로 누출,
   metadata 기록 전에 container 시작, schema 실패를 무시하고 spawn 계속이다.
 
@@ -371,7 +450,9 @@ CI integration은 최소 다음을 실제 Podman process로 확인한다.
 4. agent에서 host adapter process/path/approval socket/Podman socket 접근 불가,
    수정 시도 뒤 adapter hash 불변 (FR-ADP-10).
 5. Q3 unmatched/duplicate/mismatched relay request는 deny, matching one-shot만 core
-   decision으로 진행, forged race는 실행 권한이 아니라 deny/DoS로 끝남.
+   decision으로 진행한다. forged race 뒤 로그에서 첫 allow와 같은 call_id의
+   duplicate-deny가 **둘 다** 재구성되고 native rejected/done과 effect 없음까지
+   단정한다. allow만 남으면 테스트 실패다.
 6. stop/crash에서도 proxy audit drain과 upper 보존이 먼저이고 cleanup은 마지막.
 
 단위 테스트 green이나 FakeBackend 결과를 위 통합 게이트의 대체물로 인정하지
@@ -411,7 +492,8 @@ Fake test를 FR-SBX acceptance 근거로 인용, Fake가 실제 subprocess를 �
 
 승인 뒤에도 한 커밋에 섞지 않는다.
 
-1. **[H] SCP-T10-001 승인** → spec/schema/codegen/validate/generator만 변경.
+1. **[H] SCP-T10-001 승인** → spec/schema annotation/codegen/모든 emitter/
+   validate/generator를 한 원자적 커밋으로 변경.
 2. `core/world` 계약 + `worldtest.Fake*` + boundarylint production-import gate.
 3. world local의 rootless Podman lifecycle과 Q1 overlay.
 4. Q2 proxy sidecar와 audit stream(아직 collector 이벤트로 쓰지 않음).
@@ -421,7 +503,8 @@ Fake test를 FR-SBX acceptance 근거로 인용, Fake가 실제 subprocess를 �
 
 다음 경우 우회하지 않고 `BLOCKED.md`에 기록하고 멈춘다.
 
-- custom upper/work가 조사 환경과 달리 rootless native overlay에서 성립하지 않음.
+- custom upper/work가 성공 probe run 32352803170과 달리 rootless native overlay에서
+  성립하지 않음.
 - internal bridge의 agent가 proxy를 우회해 외부에 도달함.
 - native stream과 PreToolUse hook 순서상 host intent correlation이 성립하지 않음.
 - adapter를 container에 넣지 않고는 backend-neutral broker를 구성할 수 없음.
@@ -439,7 +522,7 @@ T10은 upper/effect stream의 안전한 인터페이스까지만 남긴다.
 | 2 | Q2 internal-only agent + dual-homed stdlib proxy sidecar | 보안/설계 결정 |
 | 3 | Q3 direct socket 금지 + host intent-correlated relay, residual DoS 허용 | 보안 경계 결정 |
 | 4 | Q4 `core/world` 계약 + world broker + surface 조립 | 구조 결정 |
-| 5 | **SCP-T10-001** spawn payload 폐쇄·필수 metadata | **명세/contracts [H]** |
+| 5 | **SCP-T10-001** world backend 판별 폐쇄 + local branch metadata 필수 | **명세/contracts [H]** |
 | 6 | Q6 `ci-linux`/`world-integration`, ubuntu 전용 fail-closed gate | CI 결정 |
 | 7 | Q7 `core/world/worldtest.Fake*`와 production import 금지 | 테스트 경계 결정 |
 
@@ -449,6 +532,8 @@ T10은 upper/effect stream의 안전한 인터페이스까지만 남긴다.
   FR-ADP-10, FR-POL-05, FR-COL-02~03, §8-4.
 - 실행 환경: `t10/runtime-probe`의 `docs/t10-runtime-findings.md`, GitHub Actions
   run 32270359463 (2026-08-20).
+- Q1/Q2 조합 probe: branch `t10/world-local-probe2`, commit `d17a8a4`, GitHub
+  Actions run 32352803170 (2026-08-20, workflow는 `5502210`에서 제거).
 - Podman `:O`, custom upper/work, keep-id:
   <https://docs.podman.io/en/latest/markdown/podman-run.1.html>
 - Podman bridge `--internal`:
