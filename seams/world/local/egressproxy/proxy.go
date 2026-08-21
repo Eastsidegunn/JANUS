@@ -118,7 +118,11 @@ func (p *Proxy) serveHTTP(w http.ResponseWriter, request *http.Request) {
 		p.denyWithoutDomain(w, request, "HTTP proxy는 absolute http URL만 허용")
 		return
 	}
-	domain, port, ip, ok := p.authorize(request.Context(), request.URL.Host, request.Method, requestBytes(request))
+	domain, port, ip, ok, auditErr := p.authorize(request.Context(), request.URL.Host, request.Method, requestBytes(request))
+	if auditErr != nil {
+		writeAuditUnavailable(w)
+		return
+	}
 	if !ok {
 		http.Error(w, "egress denied", http.StatusForbidden)
 		return
@@ -150,7 +154,11 @@ func (p *Proxy) serveHTTP(w http.ResponseWriter, request *http.Request) {
 }
 
 func (p *Proxy) serveConnect(w http.ResponseWriter, request *http.Request) {
-	_, port, ip, ok := p.authorize(request.Context(), request.Host, request.Method, 0)
+	_, port, ip, ok, auditErr := p.authorize(request.Context(), request.Host, request.Method, 0)
+	if auditErr != nil {
+		writeAuditUnavailable(w)
+		return
+	}
 	if !ok {
 		http.Error(w, "egress denied", http.StatusForbidden)
 		return
@@ -205,15 +213,13 @@ func tunnel(client, upstream net.Conn) {
 	<-done
 }
 
-func (p *Proxy) authorize(ctx context.Context, target, method string, size int64) (string, string, net.IP, bool) {
+func (p *Proxy) authorize(ctx context.Context, target, method string, size int64) (string, string, net.IP, bool, error) {
 	domain, port, err := splitTarget(target, method)
 	if err != nil {
-		p.auditDeny(ctx, domain, method, size, err.Error())
-		return "", "", nil, false
+		return "", "", nil, false, p.auditDeny(ctx, domain, method, size, err.Error())
 	}
 	if !p.allowed(domain) {
-		p.auditDeny(ctx, domain, method, size, "domain이 allowlist 밖")
-		return "", "", nil, false
+		return "", "", nil, false, p.auditDeny(ctx, domain, method, size, "domain이 allowlist 밖")
 	}
 	addresses, err := p.resolver.LookupIPAddr(ctx, domain)
 	if err != nil || len(addresses) == 0 {
@@ -221,39 +227,47 @@ func (p *Proxy) authorize(ctx context.Context, target, method string, size int64
 		if err != nil {
 			reason = "DNS 해석 실패"
 		}
-		p.auditDeny(ctx, domain, method, size, reason)
-		return "", "", nil, false
+		return "", "", nil, false, p.auditDeny(ctx, domain, method, size, reason)
 	}
 	for _, address := range addresses {
 		if !isPublicIP(address.IP) {
-			p.auditDeny(ctx, domain, method, size, "private/loopback/link-local/metadata 주소")
-			return "", "", nil, false
+			return "", "", nil, false, p.auditDeny(ctx, domain, method, size, "private/loopback/link-local/metadata 주소")
 		}
 	}
 	if method == http.MethodConnect && port != connectPort {
-		p.auditDeny(ctx, domain, method, size, "CONNECT는 port 443만 허용")
-		return "", "", nil, false
+		return "", "", nil, false, p.auditDeny(ctx, domain, method, size, "CONNECT는 port 443만 허용")
 	}
 	attempt := Attempt{
 		Domain: domain, Method: method, RequestBytes: size,
 		AtUnixMs: p.now().UnixMilli(), Decision: DecisionAllow,
 	}
 	if err := p.audit.Submit(ctx, attempt); err != nil {
-		return "", "", nil, false
+		return "", "", nil, false, err
 	}
-	return domain, port, addresses[0].IP, true
+	return domain, port, addresses[0].IP, true, nil
 }
 
-func (p *Proxy) auditDeny(ctx context.Context, domain, method string, size int64, reason string) {
-	_ = p.audit.Submit(ctx, Attempt{
+func (p *Proxy) auditDeny(ctx context.Context, domain, method string, size int64, reason string) error {
+	return p.audit.Submit(ctx, Attempt{
 		Domain: domain, Method: method, RequestBytes: size,
 		AtUnixMs: p.now().UnixMilli(), Decision: DecisionDeny, Reason: reason,
 	})
 }
 
 func (p *Proxy) denyWithoutDomain(w http.ResponseWriter, request *http.Request, reason string) {
-	p.auditDeny(request.Context(), "", request.Method, requestBytes(request), reason)
+	if err := p.auditDeny(request.Context(), "", request.Method, requestBytes(request), reason); err != nil {
+		writeAuditUnavailable(w)
+		return
+	}
 	http.Error(w, "egress denied", http.StatusForbidden)
+}
+
+func writeAuditUnavailable(w http.ResponseWriter) {
+	// The request must not be mistaken for an audited ordinary denial when the
+	// bounded audit channel is unavailable. Close the client connection after
+	// surfacing the distinct failure; no dial has occurred at this point.
+	w.Header().Set("Connection", "close")
+	http.Error(w, "egress audit unavailable", http.StatusServiceUnavailable)
 }
 
 func (p *Proxy) allowed(domain string) bool {

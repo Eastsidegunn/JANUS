@@ -2,6 +2,9 @@ package local
 
 import (
 	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -40,6 +43,28 @@ func TestAuditBrokerBackpressureAndDrainGate(t *testing.T) {
 	}
 	if err := sink.Submit(ctx, auditAttempt("third.example", 30, egressproxy.DecisionAllow, "")); err == nil {
 		t.Fatal("bounded audit queue 포화가 성공으로 응답함")
+	}
+
+	dials := 0
+	proxy, err := egressproxy.New(egressproxy.Config{
+		Allowlist: []string{"allowed.example"},
+		Audit:     sink,
+		Dial: func(context.Context, string, string) (net.Conn, error) {
+			dials++
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://blocked.example/", nil))
+	if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Connection") != "close" {
+		t.Fatalf("포화 뒤 deny audit 실패가 조용히 사라짐: status=%d connection=%q body=%q",
+			recorder.Code, recorder.Header().Get("Connection"), recorder.Body.String())
+	}
+	if dials != 0 {
+		t.Fatalf("deny audit 실패 뒤 dial 호출됨: %d", dials)
 	}
 
 	shutdown := make(chan error, 1)
