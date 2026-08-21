@@ -40,6 +40,7 @@ type nativeHookInput struct {
 type pendingApproval struct {
 	decision  chan hookSocketDecision
 	delivered chan struct{}
+	responded bool
 }
 
 type approvalServer struct {
@@ -65,6 +66,7 @@ type approvalServer struct {
 }
 
 func newApprovalServer(w *wireWriter) (*approvalServer, error) {
+	s := newApprovalState(w)
 	dir, err := os.MkdirTemp("/tmp", "hxapprove-")
 	if err != nil {
 		return nil, err
@@ -75,16 +77,18 @@ func newApprovalServer(w *wireWriter) (*approvalServer, error) {
 		os.RemoveAll(dir)
 		return nil, err
 	}
-	s := &approvalServer{
-		dir: dir, path: path, listener: listener, writer: w,
-		ready:   make(chan struct{}),
-		done:    make(chan struct{}),
-		pending: map[string]*pendingApproval{}, completed: map[string]bool{},
-		conns: map[net.Conn]struct{}{},
-	}
+	s.dir, s.path, s.listener = dir, path, listener
 	s.wg.Add(1)
 	go s.accept()
 	return s, nil
+}
+
+func newApprovalState(w *wireWriter) *approvalServer {
+	return &approvalServer{
+		writer: w, ready: make(chan struct{}), done: make(chan struct{}),
+		pending: map[string]*pendingApproval{}, completed: map[string]bool{},
+		conns: map[net.Conn]struct{}{},
+	}
 }
 
 func (s *approvalServer) attach(done <-chan struct{}, kill func()) {
@@ -147,60 +151,13 @@ func (s *approvalServer) handle(conn net.Conn) {
 		s.report(fmt.Errorf("claudecode: hxapprove 요청: %w", err))
 		return
 	}
-	if len(request.Raw) == 0 || len(request.Raw) > MaxLineBytes {
-		s.report(fmt.Errorf("claudecode: hxapprove raw 크기 위반: %d", len(request.Raw)))
-		return
-	}
-	var input nativeHookInput
-	if err := json.Unmarshal(request.Raw, &input); err != nil {
-		s.report(fmt.Errorf("claudecode: hxapprove raw JSON: %w", err))
-		return
-	}
-	if input.HookEventName != "PreToolUse" || input.ToolUseID == "" || input.ToolName == "" || !isJSONObject(input.ToolInput) {
-		s.report(fmt.Errorf("claudecode: hxapprove PreToolUse 입력 계약 위반"))
-		return
-	}
-
-	select {
-	case <-s.ready:
-	case <-s.done:
-		s.writeDecision(conn, hookSocketDecision{Decision: "deny", Reason: strPtr("ready 전 Claude 종료")})
-		return
-	}
-	requestID, err := newRequestID()
+	requestID, pending, err := s.begin(request.Raw, "", nil)
 	if err != nil {
-		s.report(err)
-		return
-	}
-	pending := &pendingApproval{decision: make(chan hookSocketDecision, 1), delivered: make(chan struct{})}
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return
-	}
-	s.pending[requestID] = pending
-	s.mu.Unlock()
-
-	payload, err := json.Marshal(gen.ApprovalRequestPayload{
-		RequestID: requestID, CallID: input.ToolUseID, Name: input.ToolName, Args: input.ToolInput,
-	})
-	if err != nil {
-		s.report(err)
-		return
-	}
-	// Unlike synthetic lifecycle events, this event has an upstream source:
-	// raw is the exact hook stdin byte sequence received from hxapprove (C-3).
-	if err := s.writer.emit(gen.EventKindSubagentApprovalRequest, payload, request.Raw); err != nil {
-		s.report(fmt.Errorf("claudecode: approval_request 방출: %w", err))
+		s.report(fmt.Errorf("claudecode: hxapprove 처리: %w", err))
 		return
 	}
 
-	var decision hookSocketDecision
-	select {
-	case decision = <-pending.decision:
-	case <-s.done:
-		decision = hookSocketDecision{Decision: "deny", Reason: strPtr("Claude 프로세스 종료")}
-	}
+	decision := s.awaitDecision(pending)
 	if err := s.writeDecision(conn, decision); err != nil {
 		s.report(fmt.Errorf("claudecode: hxapprove 판정 전달: %w", err))
 		return
@@ -214,7 +171,83 @@ func (s *approvalServer) handle(conn net.Conn) {
 		return
 	}
 	close(pending.delivered)
+	s.complete(requestID)
 }
+
+// begin validates one exact hook input and emits its approval_request. A
+// world relay supplies requestID and an optional forced-deny reason; the local
+// socket leaves both empty and receives a freshly generated request ID.
+func (s *approvalServer) begin(raw []byte, requestID string, forcedReason *string) (string, *pendingApproval, error) {
+	if len(raw) == 0 || len(raw) > MaxLineBytes {
+		return "", nil, fmt.Errorf("hxapprove raw 크기 위반: %d", len(raw))
+	}
+	var input nativeHookInput
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return "", nil, fmt.Errorf("hxapprove raw JSON: %w", err)
+	}
+	if input.HookEventName != "PreToolUse" || input.ToolUseID == "" || input.ToolName == "" || !isJSONObject(input.ToolInput) {
+		return "", nil, fmt.Errorf("hxapprove PreToolUse 입력 계약 위반")
+	}
+	select {
+	case <-s.ready:
+	case <-s.done:
+		return "", nil, fmt.Errorf("ready 전 Claude 종료")
+	}
+	if requestID == "" {
+		var err error
+		requestID, err = newRequestID()
+		if err != nil {
+			return "", nil, err
+		}
+	}
+	pending := &pendingApproval{decision: make(chan hookSocketDecision, 1), delivered: make(chan struct{})}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return "", nil, fmt.Errorf("approval state 종료")
+	}
+	if _, exists := s.pending[requestID]; exists || s.completed[requestID] {
+		s.mu.Unlock()
+		return "", nil, fmt.Errorf("중복 relay request_id %s", requestID)
+	}
+	s.pending[requestID] = pending
+	s.mu.Unlock()
+
+	payload, err := json.Marshal(gen.ApprovalRequestPayload{
+		RequestID: requestID, CallID: input.ToolUseID, Name: input.ToolName,
+		Args: input.ToolInput, Reason: forcedReason,
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	// Unlike synthetic lifecycle events, this event has an upstream source:
+	// raw is the exact hook stdin byte sequence received from hxapprove (C-3).
+	if err := s.writer.emit(gen.EventKindSubagentApprovalRequest, payload, raw); err != nil {
+		s.mu.Lock()
+		delete(s.pending, requestID)
+		s.mu.Unlock()
+		return "", nil, fmt.Errorf("approval_request 방출: %w", err)
+	}
+	return requestID, pending, nil
+}
+
+func (s *approvalServer) awaitDecision(pending *pendingApproval) hookSocketDecision {
+	select {
+	case decision := <-pending.decision:
+		return decision
+	case <-s.done:
+		return hookSocketDecision{Decision: "deny", Reason: strPtr("Claude 프로세스 종료")}
+	}
+}
+
+func (s *approvalServer) complete(requestID string) {
+	s.mu.Lock()
+	delete(s.pending, requestID)
+	s.completed[requestID] = true
+	s.mu.Unlock()
+}
+
+func (s *approvalServer) registerIntent(gen.AgentToolCallPayload) error { return nil }
 
 func (s *approvalServer) writeDecision(conn net.Conn, decision hookSocketDecision) error {
 	return json.NewEncoder(conn).Encode(decision)
@@ -230,8 +263,10 @@ func (s *approvalServer) resolve(response gen.ApprovalResponsePayload) error {
 		}
 		return fmt.Errorf("claudecode: %w request_id=%s", errUnmatchedApproval, response.RequestID)
 	}
-	delete(s.pending, response.RequestID)
-	s.completed[response.RequestID] = true
+	if pending.responded {
+		return fmt.Errorf("claudecode: %w request_id=%s", errDuplicateApproval, response.RequestID)
+	}
+	pending.responded = true
 	pending.decision <- hookSocketDecision{Decision: string(response.Decision), Reason: response.Reason}
 	return nil
 }
@@ -244,7 +279,10 @@ func (s *approvalServer) denyAll(reason string, waitDelivery bool) int {
 	for id, pending := range s.pending {
 		delete(s.pending, id)
 		s.completed[id] = true
-		items = append(items, pending)
+		if !pending.responded {
+			pending.responded = true
+			items = append(items, pending)
+		}
 	}
 	s.mu.Unlock()
 	decision := hookSocketDecision{Decision: "deny", Reason: &reason}
@@ -299,7 +337,9 @@ func (s *approvalServer) closeNetwork() {
 		return
 	}
 	s.closed = true
-	s.listener.Close()
+	if s.listener != nil {
+		s.listener.Close()
+	}
 	for conn := range s.conns {
 		conn.Close()
 	}
@@ -310,7 +350,9 @@ func (s *approvalServer) Close() {
 	s.closeOnce.Do(func() {
 		s.closeNetwork()
 		s.wg.Wait()
-		os.RemoveAll(s.dir)
+		if s.dir != "" {
+			os.RemoveAll(s.dir)
+		}
 	})
 }
 

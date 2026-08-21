@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/core/logd"
@@ -29,15 +30,23 @@ type approvalCoordinator struct {
 	fatalErr   error
 }
 
-func newApprovalCoordinator(s *Subagent, w *logd.Writer, traceID, parentSpan string, spec Spec) *approvalCoordinator {
-	ctx, cancel := context.WithCancel(context.Background())
+func newApprovalCoordinator(parent context.Context, s *Subagent, w *logd.Writer, traceID, parentSpan string, spec Spec) *approvalCoordinator {
+	deadline := time.Now().Add(600 * time.Second)
+	if spec.Budget.TimeMs < (600 * time.Second).Milliseconds() {
+		deadline = time.Now().Add(time.Duration(spec.Budget.TimeMs) * time.Millisecond)
+	}
+	if parentDeadline, ok := parent.Deadline(); ok && parentDeadline.Before(deadline) {
+		deadline = parentDeadline
+	}
+	ctx, cancel := context.WithDeadline(parent, deadline)
 	a := &approvalCoordinator{
 		sub: s, writer: w, traceID: traceID, parentSpan: parentSpan,
 		profileID: spec.ProfileID, mode: spec.Approval, decider: spec.Decider,
 		ctx: ctx, cancel: cancel, pending: map[string]struct{}{},
 	}
-	// The adapter process lifecycle is the single cancellation source. No
-	// parallel timer or stop flag is maintained here (Phase C, C-2).
+	// Process exit and the single effective approval deadline are the only
+	// cancellation sources. The deadline is min(parent, remaining budget,
+	// 600s), so a hung Decider cannot leave a relay hook pending forever.
 	go func() {
 		<-s.proc.Done()
 		cancel()
@@ -66,12 +75,25 @@ func (a *approvalCoordinator) start(p gen.ApprovalRequestPayload) error {
 		RequestID: p.RequestID, CallID: p.CallID, ToolName: p.Name,
 		Args: append(json.RawMessage(nil), p.Args...), SpanID: a.sub.childSpn,
 	}
-	go a.resolve(req)
+	forcedReason := ""
+	if p.Reason != nil {
+		forcedReason = *p.Reason
+	}
+	go a.resolve(req, forcedReason)
 	return nil
 }
 
-func (a *approvalCoordinator) resolve(req policy.ApprovalRequest) {
-	decision, fatal := a.decide(req)
+func (a *approvalCoordinator) resolve(req policy.ApprovalRequest, forcedReason string) {
+	var decision policy.ApprovalDecision
+	var fatal error
+	if forcedReason != "" {
+		// The world relay has already proven this hook is duplicate, mismatched,
+		// expired, or terminating. It still enters the durable approval stream,
+		// but must never reach the parent Decider a second time.
+		decision = policy.ApprovalDecision{Reason: forcedReason}
+	} else {
+		decision, fatal = a.decide(req)
+	}
 	reason := decision.Reason
 	payload := gen.PolicyDecisionPayload{
 		Decision:  gen.PolicyDecisionPayloadDecisionDeny,
@@ -116,6 +138,9 @@ func (a *approvalCoordinator) resolve(req policy.ApprovalRequest) {
 }
 
 func (a *approvalCoordinator) decide(req policy.ApprovalRequest) (policy.ApprovalDecision, error) {
+	if err := a.ctx.Err(); err != nil {
+		return policy.ApprovalDecision{Reason: "승인 deadline: " + err.Error()}, nil
+	}
 	if a.mode == policy.ApprovalAuto {
 		return policy.ApprovalDecision{Allow: true}, nil
 	}

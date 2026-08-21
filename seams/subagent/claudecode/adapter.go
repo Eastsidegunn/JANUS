@@ -14,13 +14,18 @@ import (
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/contracts/validate"
+	"github.com/Eastsidegunn/JANUS/core/world"
 	"github.com/Eastsidegunn/JANUS/seams/subagent/internal/procgroup"
 )
 
 const (
-	defaultClaudeExecutable = "claude"
-	claudeSettingSources    = "project,local"
-	maxCommandBytes         = 4 << 20
+	defaultClaudeExecutable  = "claude"
+	claudeSettingSources     = "project,local"
+	maxCommandBytes          = 4 << 20
+	worldBrokerNetworkEnv    = "HX_WORLD_BROKER_NETWORK"
+	worldBrokerAddressEnv    = "HX_WORLD_BROKER_ADDRESS"
+	worldBrokerCapabilityEnv = "HX_WORLD_BROKER_CAPABILITY"
+	worldBrokerSpanEnv       = "HX_WORLD_BROKER_SPAN_ID"
 
 	// C안(제안서 §7.2): user settings를 제외하고, 이 인라인 PreToolUse
 	// hook만 명시적으로 주입한다. --bare는 OAuth/keychain을 읽지 않으므로
@@ -45,8 +50,21 @@ var (
 // Config contains host-controlled process settings. ClaudeBin is a single
 // executable path, never a shell command.
 type Config struct {
-	ClaudeBin string
-	Env       []string
+	ClaudeBin     string
+	Env           []string
+	WorldEndpoint world.Endpoint
+	WorldSpanID   string
+}
+
+type approvalTransport interface {
+	attach(<-chan struct{}, func())
+	markReady()
+	environment([]string) []string
+	registerIntent(gen.AgentToolCallPayload) error
+	resolve(gen.ApprovalResponsePayload) error
+	denyAll(string, bool) int
+	failure() error
+	Close()
 }
 
 // ConfigFromEnv returns the production configuration. HX_CLAUDE_BIN exists so
@@ -57,13 +75,28 @@ func ConfigFromEnv() Config {
 		bin = defaultClaudeExecutable
 	}
 	env := os.Environ()
+	endpoint := world.NewEndpoint(
+		os.Getenv(worldBrokerNetworkEnv),
+		os.Getenv(worldBrokerAddressEnv),
+		os.Getenv(worldBrokerCapabilityEnv),
+	)
+	spanID := os.Getenv(worldBrokerSpanEnv)
+	// Broker capability and the host's real approval socket are host-adapter
+	// inputs, never native-agent environment. Direct mode adds its fresh local
+	// approval socket back below; world mode relies on the container's relay.
+	for _, key := range []string{
+		worldBrokerNetworkEnv, worldBrokerAddressEnv, worldBrokerCapabilityEnv,
+		worldBrokerSpanEnv, approvalSocketEnv,
+	} {
+		env = removeEnv(env, key)
+	}
 	// hxapprove is installed beside the adapter binary. Prepending exactly that
 	// directory keeps the approved inline hook command constant in one place.
 	if executable, err := os.Executable(); err == nil {
 		dir := filepath.Dir(executable)
 		env = replaceEnv(env, "PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
-	return Config{ClaudeBin: bin, Env: env}
+	return Config{ClaudeBin: bin, Env: env, WorldEndpoint: endpoint, WorldSpanID: spanID}
 }
 
 func replaceEnv(env []string, key, value string) []string {
@@ -75,6 +108,17 @@ func replaceEnv(env []string, key, value string) []string {
 		}
 	}
 	return append(out, prefix+value)
+}
+
+func removeEnv(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, item := range env {
+		if !strings.HasPrefix(item, prefix) {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // wireWriter serializes and validates every adapter → core event.
@@ -137,7 +181,7 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 	}
 
 	w := &wireWriter{out: out, vals: vals}
-	approvals, err := newApprovalServer(w)
+	approvals, err := newApprovalTransport(w, cfg)
 	if err != nil {
 		return fmt.Errorf("claudecode: approval socket: %w", err)
 	}
@@ -175,6 +219,15 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 				copy := e
 				pendingDone = &copy
 				continue // exit 상태를 반영한 뒤 terminal event로 마지막에 방출
+			}
+			if e.Kind == gen.EventKindSubagentToolCall {
+				var intent gen.AgentToolCallPayload
+				if err := json.Unmarshal(e.Payload, &intent); err != nil {
+					return fmt.Errorf("claudecode: tool intent decode: %w", err)
+				}
+				if err := approvals.registerIntent(intent); err != nil {
+					return fmt.Errorf("claudecode: world intent 등록: %w", err)
+				}
 			}
 			if err := w.emit(e.Kind, e.Payload, e.Raw); err != nil {
 				return err
@@ -282,7 +335,7 @@ func readCommand(scanner *bufio.Scanner, vals *validate.Validators) (gen.Command
 	return cmd, nil
 }
 
-func monitorCommands(scanner *bufio.Scanner, vals *validate.Validators, parser *Parser, native *procgroup.Process, approvals *approvalServer, adapterDone <-chan struct{}, result chan<- error) {
+func monitorCommands(scanner *bufio.Scanner, vals *validate.Validators, parser *Parser, native *procgroup.Process, approvals approvalTransport, adapterDone <-chan struct{}, result chan<- error) {
 	fail := func(err error) {
 		// Publish the cause before kill: DrainLines may finish immediately after
 		// the signal, and the adapter must not lose the command-side error.
