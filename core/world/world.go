@@ -43,6 +43,7 @@ type Lease interface {
 type EffectivePolicy struct {
 	profileID string
 	workspace string
+	fsScope   []string
 	egress    []string
 	budget    gen.Budget
 	approval  policy.ApprovalMode
@@ -54,6 +55,7 @@ func NewEffectivePolicy(cfg policy.SandboxConfig) EffectivePolicy {
 	return EffectivePolicy{
 		profileID: cfg.ProfileID,
 		workspace: cfg.Workspace,
+		fsScope:   append([]string(nil), cfg.FSScope...),
 		egress:    append([]string(nil), cfg.Egress...),
 		budget:    cfg.Budget,
 		approval:  cfg.Approval,
@@ -65,6 +67,14 @@ func (p EffectivePolicy) Workspace() string             { return p.workspace }
 func (p EffectivePolicy) Budget() gen.Budget            { return p.budget }
 func (p EffectivePolicy) Approval() policy.ApprovalMode { return p.approval }
 func (p EffectivePolicy) Egress() []string              { return append([]string(nil), p.egress...) }
+func (p EffectivePolicy) FSScope() []string             { return append([]string(nil), p.fsScope...) }
+
+// AgentIdentity is the numeric UID/GID declared by the agent image. The local
+// backend maps the invoking rootless user to this identity with keep-id.
+type AgentIdentity struct {
+	UID uint32
+	GID uint32
+}
 
 // CredentialHandle names a scoped, expiring credential held by the world
 // broker. It contains no credential value (FR-SBX-04).
@@ -84,6 +94,7 @@ type SpawnSpec struct {
 	depth       int64
 	traceID     string
 	spanID      string
+	identity    AgentIdentity
 	credentials []CredentialHandle
 }
 
@@ -93,22 +104,25 @@ func NewSpawnSpec(
 	agentArgv []string,
 	depth int64,
 	traceID, spanID string,
+	identity AgentIdentity,
 	credentials []CredentialHandle,
 ) SpawnSpec {
 	return SpawnSpec{
 		policy: policy, imageDigest: imageDigest,
 		agentArgv: append([]string(nil), agentArgv...), depth: depth,
 		traceID: traceID, spanID: spanID,
+		identity:    identity,
 		credentials: append([]CredentialHandle(nil), credentials...),
 	}
 }
 
-func (s SpawnSpec) Policy() EffectivePolicy { return s.policy }
-func (s SpawnSpec) ImageDigest() string     { return s.imageDigest }
-func (s SpawnSpec) AgentArgv() []string     { return append([]string(nil), s.agentArgv...) }
-func (s SpawnSpec) Depth() int64            { return s.depth }
-func (s SpawnSpec) TraceID() string         { return s.traceID }
-func (s SpawnSpec) SpanID() string          { return s.spanID }
+func (s SpawnSpec) Policy() EffectivePolicy      { return s.policy }
+func (s SpawnSpec) ImageDigest() string          { return s.imageDigest }
+func (s SpawnSpec) AgentArgv() []string          { return append([]string(nil), s.agentArgv...) }
+func (s SpawnSpec) Depth() int64                 { return s.depth }
+func (s SpawnSpec) TraceID() string              { return s.traceID }
+func (s SpawnSpec) SpanID() string               { return s.spanID }
+func (s SpawnSpec) AgentIdentity() AgentIdentity { return s.identity }
 func (s SpawnSpec) Credentials() []CredentialHandle {
 	return append([]CredentialHandle(nil), s.credentials...)
 }
