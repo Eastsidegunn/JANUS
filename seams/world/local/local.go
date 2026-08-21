@@ -1,6 +1,5 @@
 // Package local implements the Linux rootless-Podman execution world
-// (FR-SBX-01, FR-SBX-02). This stage intentionally uses --network=none;
-// the audited proxy network is added in T10 step 4.
+// (FR-SBX-01, FR-SBX-02, FR-SBX-03).
 package local
 
 import (
@@ -21,9 +20,19 @@ import (
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/core/policy"
 	"github.com/Eastsidegunn/JANUS/core/world"
+	"github.com/Eastsidegunn/JANUS/seams/world/local/egressproxy"
 )
 
 const podmanBinary = "podman"
+
+const (
+	proxyListenPort      = "3128"
+	proxySocketMount     = "/run/hx-audit"
+	proxySocketPath      = proxySocketMount + "/" + auditSocketName
+	proxyExecutable      = "/hxegressproxy"
+	defaultAuditCapacity = 64
+	proxyReadyTimeout    = 30 * time.Second
+)
 
 var (
 	digestPattern      = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -47,28 +56,54 @@ func (execPodman) Run(ctx context.Context, args ...string) ([]byte, error) {
 	return out, nil
 }
 
-// Backend owns the rootless Podman runtime and a host state root. The state
-// root is resolved once and must already have mode 0700.
+// Config fixes the trusted proxy helper image independently of the untrusted
+// agent image. Both must be immutable digests with numeric non-root identities.
+type Config struct {
+	StateRoot          string
+	ProxyImageDigest   string
+	ProxyIdentity      world.AgentIdentity
+	AuditQueueCapacity int
+}
+
+// Backend owns the rootless Podman runtime, per-spawn networks, the trusted
+// proxy sidecar, its host-only audit broker, and a host state root.
 type Backend struct {
-	stateRoot string
-	runner    commandRunner
-	deviceID  func(string) (uint64, error)
+	stateRoot       string
+	proxyDigest     string
+	proxyIdentity   world.AgentIdentity
+	auditCapacity   int
+	runner          commandRunner
+	deviceID        func(string) (uint64, error)
+	newEffectBroker auditBrokerFactory
 }
 
 var _ world.Backend = (*Backend)(nil)
 
 // NewBackend creates the production Linux backend. macOS is intentionally not
 // supported: Podman there runs inside a VM and is not the deployment kernel.
-func NewBackend(stateRoot string) (*Backend, error) {
+func NewBackend(config Config) (*Backend, error) {
 	if runtime.GOOS != "linux" {
 		return nil, fmt.Errorf("world/local: Linux rootless Podman 전용 backend (현재 %s)", runtime.GOOS)
 	}
-	return newBackend(stateRoot, execPodman{}, statDevice)
+	return newBackend(config, execPodman{}, statDevice, startAuditBroker)
 }
 
-func newBackend(stateRoot string, runner commandRunner, deviceID func(string) (uint64, error)) (*Backend, error) {
+func newBackend(config Config, runner commandRunner, deviceID func(string) (uint64, error), brokerFactory auditBrokerFactory) (*Backend, error) {
+	stateRoot := config.StateRoot
 	if stateRoot == "" || !filepath.IsAbs(stateRoot) {
 		return nil, fmt.Errorf("world/local: state root는 절대 경로여야 함: %q", stateRoot)
+	}
+	if !digestPattern.MatchString(config.ProxyImageDigest) {
+		return nil, fmt.Errorf("world/local: proxy image는 sha256 digest여야 함(tag 금지): %q", config.ProxyImageDigest)
+	}
+	if config.ProxyIdentity.UID == 0 || config.ProxyIdentity.GID == 0 {
+		return nil, fmt.Errorf("world/local: proxy image는 숫자 non-root UID/GID여야 함")
+	}
+	if config.AuditQueueCapacity == 0 {
+		config.AuditQueueCapacity = defaultAuditCapacity
+	}
+	if config.AuditQueueCapacity < 0 || brokerFactory == nil {
+		return nil, fmt.Errorf("world/local: audit broker 설정 위반")
 	}
 	resolved, err := filepath.EvalSymlinks(stateRoot)
 	if err != nil {
@@ -81,7 +116,11 @@ func newBackend(stateRoot string, runner commandRunner, deviceID func(string) (u
 	if info.Mode().Perm() != 0o700 {
 		return nil, fmt.Errorf("world/local: state root mode는 0700이어야 함: %04o", info.Mode().Perm())
 	}
-	return &Backend{stateRoot: resolved, runner: runner, deviceID: deviceID}, nil
+	return &Backend{
+		stateRoot: resolved, proxyDigest: config.ProxyImageDigest, proxyIdentity: config.ProxyIdentity,
+		auditCapacity: config.AuditQueueCapacity, runner: runner, deviceID: deviceID,
+		newEffectBroker: brokerFactory,
+	}, nil
 }
 
 type podmanInfo struct {
@@ -118,10 +157,18 @@ func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.
 	if len(spec.AgentArgv()) == 0 || spec.AgentArgv()[0] == "" {
 		return nil, fmt.Errorf("world/local: agent argv가 비어 있음")
 	}
+	allowlist, err := egressproxy.NormalizeAllowlist(spec.Policy().Egress())
+	if err != nil {
+		return nil, fmt.Errorf("world/local: egress policy: %w", err)
+	}
 
 	inspected, err := b.inspectImage(ctx, spec.ImageDigest(), spec.AgentIdentity())
 	if err != nil {
 		return nil, err
+	}
+	proxyDigest, err := b.inspectImage(ctx, b.proxyDigest, b.proxyIdentity)
+	if err != nil {
+		return nil, fmt.Errorf("world/local: proxy image: %w", err)
 	}
 	layout, err := b.prepareOverlay(spec)
 	if err != nil {
@@ -134,6 +181,48 @@ func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.
 		}
 	}()
 
+	broker, err := b.newEffectBroker(layout.stateDir, spec.SpanID(), b.auditCapacity)
+	if err != nil {
+		return nil, err
+	}
+	resources := runtimeResources{runner: b.runner, broker: broker}
+	defer func() {
+		if !keepState {
+			cleanupCtx, cancel := cleanupContext(ctx)
+			err = errors.Join(err, resources.cleanupOpen(cleanupCtx))
+			cancel()
+		}
+	}()
+
+	internalNetwork := "hx-" + spec.SpanID() + "-internal"
+	externalNetwork := "hx-" + spec.SpanID() + "-egress"
+	proxyName := "hx-" + spec.SpanID() + "-proxy"
+	if _, err := b.runner.Run(ctx, "network", "create", "--internal", internalNetwork); err != nil {
+		return nil, fmt.Errorf("world/local: internal network create: %w", err)
+	}
+	resources.networks = append(resources.networks, internalNetwork)
+	if _, err := b.runner.Run(ctx, "network", "create", externalNetwork); err != nil {
+		return nil, fmt.Errorf("world/local: external network create: %w", err)
+	}
+	resources.networks = append(resources.networks, externalNetwork)
+
+	proxyCIDFile := filepath.Join(layout.stateDir, "proxy.cid")
+	proxyArgs := b.proxyCreateArgs(allowlist, proxyDigest, broker.SocketDir(), proxyCIDFile, proxyName, internalNetwork, externalNetwork)
+	proxyID, err := b.createContainer(ctx, proxyArgs, proxyCIDFile)
+	if err != nil {
+		return nil, fmt.Errorf("world/local: proxy container create: %w", err)
+	}
+	resources.proxyID = proxyID
+	if _, err := b.runner.Run(ctx, "start", proxyID); err != nil {
+		return nil, fmt.Errorf("world/local: proxy container start: %w", err)
+	}
+	readyCtx, cancelReady := context.WithTimeout(ctx, proxyReadyTimeout)
+	err = broker.Ready(readyCtx)
+	cancelReady()
+	if err != nil {
+		return nil, fmt.Errorf("world/local: proxy ready: %w", err)
+	}
+
 	cidFile := filepath.Join(layout.stateDir, "container.cid")
 	identity := spec.AgentIdentity()
 	uid := strconv.FormatUint(uint64(identity.UID), 10)
@@ -141,49 +230,36 @@ func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.
 	volume := layout.lower + ":/workspace:O,upperdir=" + layout.upper + ",workdir=" + layout.work
 	args := []string{
 		"create", "--cidfile", cidFile,
-		"--pull=never", "--network=none",
+		"--pull=never", "--network", internalNetwork,
 		"--userns=keep-id:uid=" + uid + ",gid=" + gid,
 		"--user", uid + ":" + gid,
 		"--workdir", "/workspace",
+		"--env", "HTTP_PROXY=http://" + proxyName + ":" + proxyListenPort,
+		"--env", "HTTPS_PROXY=http://" + proxyName + ":" + proxyListenPort,
+		"--env", "NO_PROXY=",
+		"--env", "http_proxy=http://" + proxyName + ":" + proxyListenPort,
+		"--env", "https_proxy=http://" + proxyName + ":" + proxyListenPort,
+		"--env", "no_proxy=",
 		"--volume", volume,
 		inspected,
 	}
 	args = append(args, spec.AgentArgv()...)
-	out, createErr := b.runner.Run(ctx, args...)
-	containerID := firstContainerID(out)
-	if containerID == "" {
-		if cidBytes, readErr := os.ReadFile(cidFile); readErr == nil {
-			containerID = firstContainerID(cidBytes)
-		}
+	containerID, err := b.createContainer(ctx, args, cidFile)
+	if err != nil {
+		return nil, fmt.Errorf("world/local: agent container create: %w", err)
 	}
-	if createErr != nil {
-		var cleanupErr error
-		if containerID != "" {
-			cleanupCtx, cancel := cleanupContext(ctx)
-			_, cleanupErr = b.runner.Run(cleanupCtx, "rm", "--force", containerID)
-			cancel()
-		}
-		return nil, errors.Join(fmt.Errorf("world/local: container create: %w", createErr), cleanupErr)
-	}
-	if containerID == "" {
-		return nil, fmt.Errorf("world/local: container create가 유효한 ID를 반환하지 않음")
-	}
+	resources.agentID = containerID
 	if _, err := b.runner.Run(ctx, "start", containerID); err != nil {
-		cleanupCtx, cancel := cleanupContext(ctx)
-		_, cleanupErr := b.runner.Run(cleanupCtx, "rm", "--force", containerID)
-		cancel()
-		return nil, errors.Join(fmt.Errorf("world/local: container start: %w", err), cleanupErr)
+		return nil, fmt.Errorf("world/local: agent container start: %w", err)
 	}
 
-	effectsDone := make(chan struct{})
-	close(effectsDone) // T10-4 replaces this with the proxy audit drain/ACK gate.
-	effects := make(chan world.EffectAttempt)
-	close(effects)
 	keepState = true
 	return &lease{
-		runner: b.runner, containerID: containerID,
+		runner: b.runner, containerID: containerID, proxyID: proxyID,
+		internalNetwork: internalNetwork, externalNetwork: externalNetwork,
 		stateDir: layout.stateDir, upperDir: layout.upper, workDir: layout.work,
-		cidFile: cidFile, effects: effects, effectsDone: effectsDone,
+		cidFile: cidFile, proxyCIDFile: proxyCIDFile,
+		broker: broker, effects: broker.Effects(), effectsDone: broker.Done(),
 		closeToken: makeCloseToken(),
 		metadata: world.SpawnMetadata{
 			Backend:   gen.SubagentSpawnPayloadWorldBackendLocalPodman,
@@ -196,6 +272,79 @@ func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.
 			}},
 		},
 	}, nil
+}
+
+func (b *Backend) createContainer(ctx context.Context, args []string, cidFile string) (string, error) {
+	out, createErr := b.runner.Run(ctx, args...)
+	containerID := firstContainerID(out)
+	if containerID == "" {
+		if cidBytes, readErr := os.ReadFile(cidFile); readErr == nil {
+			containerID = firstContainerID(cidBytes)
+		}
+	}
+	if createErr != nil {
+		if containerID == "" {
+			return "", createErr
+		}
+		cleanupCtx, cancel := cleanupContext(ctx)
+		_, cleanupErr := b.runner.Run(cleanupCtx, "rm", "--force", containerID)
+		cancel()
+		return "", errors.Join(createErr, cleanupErr)
+	}
+	if containerID == "" {
+		return "", fmt.Errorf("container create가 유효한 ID를 반환하지 않음")
+	}
+	return containerID, nil
+}
+
+func (b *Backend) proxyCreateArgs(
+	allowlist []string,
+	proxyDigest, socketDir, cidFile, proxyName, internalNetwork, externalNetwork string,
+) []string {
+	uid := strconv.FormatUint(uint64(b.proxyIdentity.UID), 10)
+	gid := strconv.FormatUint(uint64(b.proxyIdentity.GID), 10)
+	args := []string{
+		"create", "--cidfile", cidFile, "--name", proxyName,
+		"--pull=never", "--network", internalNetwork, "--network", externalNetwork,
+		"--network-alias", proxyName,
+		"--userns=keep-id:uid=" + uid + ",gid=" + gid, "--user", uid + ":" + gid,
+		"--read-only", "--cap-drop=all", "--security-opt=no-new-privileges",
+		"--entrypoint", proxyExecutable,
+		"--volume", socketDir + ":" + proxySocketMount + ":ro",
+		proxyDigest,
+		"--listen", ":" + proxyListenPort, "--audit-socket", proxySocketPath,
+	}
+	for _, domain := range allowlist {
+		args = append(args, "--allow", domain)
+	}
+	return args
+}
+
+type runtimeResources struct {
+	runner   commandRunner
+	broker   effectBroker
+	agentID  string
+	proxyID  string
+	networks []string
+}
+
+func (r *runtimeResources) cleanupOpen(ctx context.Context) error {
+	var joined error
+	for _, containerID := range []string{r.agentID, r.proxyID} {
+		if containerID == "" {
+			continue
+		}
+		_, err := r.runner.Run(ctx, "rm", "--force", containerID)
+		joined = errors.Join(joined, err)
+	}
+	if r.broker != nil {
+		joined = errors.Join(joined, r.broker.Shutdown(ctx))
+	}
+	for i := len(r.networks) - 1; i >= 0; i-- {
+		_, err := r.runner.Run(ctx, "network", "rm", "--force", r.networks[i])
+		joined = errors.Join(joined, err)
+	}
+	return joined
 }
 
 func (b *Backend) preflight(ctx context.Context) error {
@@ -374,19 +523,25 @@ func firstContainerID(out []byte) string {
 }
 
 type lease struct {
-	runner      commandRunner
-	containerID string
-	stateDir    string
-	upperDir    string
-	workDir     string
-	cidFile     string
-	metadata    world.SpawnMetadata
-	effects     <-chan world.EffectAttempt
-	effectsDone <-chan struct{}
+	runner          commandRunner
+	containerID     string
+	proxyID         string
+	internalNetwork string
+	externalNetwork string
+	stateDir        string
+	upperDir        string
+	workDir         string
+	cidFile         string
+	proxyCIDFile    string
+	metadata        world.SpawnMetadata
+	broker          effectBroker
+	effects         <-chan world.EffectAttempt
+	effectsDone     <-chan struct{}
 
-	closeToken chan struct{}
-	closed     bool
-	closeErr   error
+	closeToken       chan struct{}
+	processesStopped bool
+	closed           bool
+	closeErr         error
 }
 
 var _ world.Lease = (*lease)(nil)
@@ -412,24 +567,54 @@ func (l *lease) Close(ctx context.Context) error {
 		return l.closeErr
 	}
 
-	var joined error
-	if _, err := l.runner.Run(ctx, "stop", "--time", "10", l.containerID); err != nil {
-		joined = errors.Join(joined, fmt.Errorf("world/local: container stop: %w", err))
+	joined := l.closeErr
+	if !l.processesStopped {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(joined, err)
+		}
+		for _, process := range []struct {
+			name, id string
+		}{{"agent", l.containerID}, {"proxy", l.proxyID}} {
+			if _, err := l.runner.Run(ctx, "stop", "--time", "10", process.id); err != nil {
+				joined = errors.Join(joined, fmt.Errorf("world/local: %s container stop: %w", process.name, err))
+			}
+			if _, err := l.runner.Run(ctx, "wait", process.id); err != nil {
+				joined = errors.Join(joined, fmt.Errorf("world/local: %s container wait: %w", process.name, err))
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return errors.Join(joined, err)
+		}
+		l.processesStopped, l.closeErr = true, joined
 	}
-	if _, err := l.runner.Run(ctx, "wait", l.containerID); err != nil {
-		joined = errors.Join(joined, fmt.Errorf("world/local: container wait: %w", err))
+	if err := l.broker.Shutdown(ctx); err != nil {
+		return errors.Join(joined, fmt.Errorf("world/local: audit drain/ACK: %w", err))
 	}
+	// The broker closes effectsDone only after its listener and handlers have
+	// stopped and every accepted attempt has left the bounded stream.
 	select {
 	case <-l.effectsDone:
+		joined = errors.Join(joined, l.broker.Err())
 	case <-ctx.Done():
 		return errors.Join(joined, ctx.Err())
 	}
+
 	cleanupCtx, cancel := cleanupContext(ctx)
-	_, cleanupErr := l.runner.Run(cleanupCtx, "rm", "--force", l.containerID)
+	for _, container := range []struct {
+		name, id string
+	}{{"agent", l.containerID}, {"proxy", l.proxyID}} {
+		if _, err := l.runner.Run(cleanupCtx, "rm", "--force", container.id); err != nil {
+			joined = errors.Join(joined, fmt.Errorf("world/local: %s container cleanup: %w", container.name, err))
+		}
+	}
+	for _, network := range []string{l.internalNetwork, l.externalNetwork} {
+		if _, err := l.runner.Run(cleanupCtx, "network", "rm", "--force", network); err != nil {
+			joined = errors.Join(joined, fmt.Errorf("world/local: network cleanup %s: %w", network, err))
+		}
+	}
 	cancel()
-	if cleanupErr != nil {
-		joined = errors.Join(joined, fmt.Errorf("world/local: container cleanup: %w", cleanupErr))
-		return joined
+	if err := os.RemoveAll(l.broker.SocketDir()); err != nil {
+		joined = errors.Join(joined, fmt.Errorf("world/local: audit socket cleanup: %w", err))
 	}
 	// upper is intentionally preserved for T11. Agent termination is not a
 	// collector ACK and therefore must not erase filesystem evidence.
@@ -438,6 +623,9 @@ func (l *lease) Close(ctx context.Context) error {
 	}
 	if err := os.Remove(l.cidFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 		joined = errors.Join(joined, fmt.Errorf("world/local: cidfile cleanup: %w", err))
+	}
+	if err := os.Remove(l.proxyCIDFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		joined = errors.Join(joined, fmt.Errorf("world/local: proxy cidfile cleanup: %w", err))
 	}
 	l.closed, l.closeErr = true, joined
 	return joined
