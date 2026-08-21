@@ -63,18 +63,20 @@ type Config struct {
 	ProxyImageDigest   string
 	ProxyIdentity      world.AgentIdentity
 	AuditQueueCapacity int
+	ApprovalCapacity   int
 }
 
 // Backend owns the rootless Podman runtime, per-spawn networks, the trusted
 // proxy sidecar, its host-only audit broker, and a host state root.
 type Backend struct {
-	stateRoot       string
-	proxyDigest     string
-	proxyIdentity   world.AgentIdentity
-	auditCapacity   int
-	runner          commandRunner
-	deviceID        func(string) (uint64, error)
-	newEffectBroker auditBrokerFactory
+	stateRoot        string
+	proxyDigest      string
+	proxyIdentity    world.AgentIdentity
+	auditCapacity    int
+	approvalCapacity int
+	runner           commandRunner
+	deviceID         func(string) (uint64, error)
+	newEffectBroker  auditBrokerFactory
 }
 
 var _ world.Backend = (*Backend)(nil)
@@ -105,6 +107,12 @@ func newBackend(config Config, runner commandRunner, deviceID func(string) (uint
 	if config.AuditQueueCapacity < 0 || brokerFactory == nil {
 		return nil, fmt.Errorf("world/local: audit broker 설정 위반")
 	}
+	if config.ApprovalCapacity == 0 {
+		config.ApprovalCapacity = defaultApprovalCapacity
+	}
+	if config.ApprovalCapacity < 0 {
+		return nil, fmt.Errorf("world/local: approval broker 설정 위반")
+	}
 	resolved, err := filepath.EvalSymlinks(stateRoot)
 	if err != nil {
 		return nil, fmt.Errorf("world/local: state root 실경로: %w", err)
@@ -118,7 +126,8 @@ func newBackend(config Config, runner commandRunner, deviceID func(string) (uint
 	}
 	return &Backend{
 		stateRoot: resolved, proxyDigest: config.ProxyImageDigest, proxyIdentity: config.ProxyIdentity,
-		auditCapacity: config.AuditQueueCapacity, runner: runner, deviceID: deviceID,
+		auditCapacity: config.AuditQueueCapacity, approvalCapacity: config.ApprovalCapacity,
+		runner: runner, deviceID: deviceID,
 		newEffectBroker: brokerFactory,
 	}, nil
 }
@@ -185,7 +194,12 @@ func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.
 	if err != nil {
 		return nil, err
 	}
-	resources := runtimeResources{runner: b.runner, broker: broker}
+	approval, err := startApprovalBroker(ctx, layout.stateDir, spec.SpanID(), spec.Policy().Budget().TimeMs, b.approvalCapacity)
+	if err != nil {
+		_ = broker.Shutdown(context.Background())
+		return nil, err
+	}
+	resources := runtimeResources{runner: b.runner, broker: broker, approval: approval}
 	defer func() {
 		if !keepState {
 			cleanupCtx, cancel := cleanupContext(ctx)
@@ -240,6 +254,8 @@ func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.
 		"--env", "http_proxy=http://" + proxyName + ":" + proxyListenPort,
 		"--env", "https_proxy=http://" + proxyName + ":" + proxyListenPort,
 		"--env", "no_proxy=",
+		"--env", "HX_APPROVAL_SOCKET=" + approvalRelayPath,
+		"--volume", approval.RelayDir() + ":" + approvalRelayMount + ":ro",
 		"--volume", volume,
 		inspected,
 	}
@@ -260,6 +276,7 @@ func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.
 		stateDir: layout.stateDir, upperDir: layout.upper, workDir: layout.work,
 		cidFile: cidFile, proxyCIDFile: proxyCIDFile,
 		broker: broker, effects: broker.Effects(), effectsDone: broker.Done(),
+		approval: approval, adapterEndpoint: approval.Endpoint(),
 		closeToken: makeCloseToken(),
 		metadata: world.SpawnMetadata{
 			Backend:   gen.SubagentSpawnPayloadWorldBackendLocalPodman,
@@ -323,6 +340,7 @@ func (b *Backend) proxyCreateArgs(
 type runtimeResources struct {
 	runner   commandRunner
 	broker   effectBroker
+	approval *approvalBroker
 	agentID  string
 	proxyID  string
 	networks []string
@@ -330,6 +348,9 @@ type runtimeResources struct {
 
 func (r *runtimeResources) cleanupOpen(ctx context.Context) error {
 	var joined error
+	if r.approval != nil {
+		joined = errors.Join(joined, r.approval.Cleanup())
+	}
 	for _, containerID := range []string{r.agentID, r.proxyID} {
 		if containerID == "" {
 			continue
@@ -537,6 +558,8 @@ type lease struct {
 	broker          effectBroker
 	effects         <-chan world.EffectAttempt
 	effectsDone     <-chan struct{}
+	approval        *approvalBroker
+	adapterEndpoint world.Endpoint
 
 	closeToken       chan struct{}
 	processesStopped bool
@@ -546,9 +569,7 @@ type lease struct {
 
 var _ world.Lease = (*lease)(nil)
 
-// AdapterEndpoint remains empty until the backend-neutral broker is assembled
-// in T10 step 5. No surface consumes this lease in the current stage.
-func (l *lease) AdapterEndpoint() world.Endpoint { return world.Endpoint{} }
+func (l *lease) AdapterEndpoint() world.Endpoint { return l.adapterEndpoint }
 func (l *lease) Metadata() world.SpawnMetadata   { return l.metadata.Clone() }
 
 // UpperDir may contain subordinate-UID-owned character-device whiteouts.
@@ -568,6 +589,15 @@ func (l *lease) Close(ctx context.Context) error {
 	}
 
 	joined := l.closeErr
+	// Quiesce approval before stopping the agent so every pending hook receives
+	// a durable forced deny through the host adapter. This is control-plane
+	// quiescing, not mount/network cleanup; container stop still precedes effect
+	// drain and resource removal as required by world.Lease.
+	if l.approval != nil {
+		if err := l.approval.Shutdown(ctx); err != nil {
+			joined = errors.Join(joined, fmt.Errorf("world/local: approval drain: %w", err))
+		}
+	}
 	if !l.processesStopped {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(joined, err)
@@ -615,6 +645,11 @@ func (l *lease) Close(ctx context.Context) error {
 	cancel()
 	if err := os.RemoveAll(l.broker.SocketDir()); err != nil {
 		joined = errors.Join(joined, fmt.Errorf("world/local: audit socket cleanup: %w", err))
+	}
+	if l.approval != nil {
+		if err := l.approval.Cleanup(); err != nil {
+			joined = errors.Join(joined, fmt.Errorf("world/local: approval socket cleanup: %w", err))
+		}
 	}
 	// upper is intentionally preserved for T11. Agent termination is not a
 	// collector ACK and therefore must not erase filesystem evidence.

@@ -186,8 +186,25 @@ func TestOpenBuildsRootlessOverlayAndMetadata(t *testing.T) {
 		mount.Mode != gen.SubagentSpawnMountModeOverlay || filepath.IsAbs(mount.UpperRef) {
 		t.Fatalf("mount metadata 이상: %+v", mount)
 	}
-	if got.AdapterEndpoint() != (world.Endpoint{}) {
-		t.Fatal("T10-5 이전에 broker endpoint가 노출됨")
+	endpoint := got.AdapterEndpoint()
+	if endpoint.Network() != "unix" || endpoint.Address() == "" || endpoint.Capability() == "" {
+		t.Fatalf("host adapter endpoint가 완전하지 않음: network=%q address=%q capability=%t",
+			endpoint.Network(), endpoint.Address(), endpoint.Capability() != "")
+	}
+	if strings.Contains(create, endpoint.Address()) || strings.Contains(create, endpoint.Capability()) {
+		t.Fatal("agent create args에 host adapter endpoint/capability가 노출됨")
+	}
+	if pathWithin(got.approval.RelayDir(), endpoint.Address()) {
+		t.Fatalf("host adapter socket이 agent에 mount되는 relay subtree 안에 있음: relay=%q host=%q",
+			got.approval.RelayDir(), endpoint.Address())
+	}
+	for _, required := range []string{
+		"HX_APPROVAL_SOCKET=" + approvalRelayPath,
+		":" + approvalRelayMount + ":ro",
+	} {
+		if !strings.Contains(create, required) {
+			t.Errorf("agent create args에 approval relay %q 없음: %s", required, create)
+		}
 	}
 	for _, dir := range []string{got.stateDir, got.upperDir, got.workDir} {
 		info, err := os.Stat(dir)
