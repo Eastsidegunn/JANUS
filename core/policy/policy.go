@@ -106,6 +106,9 @@ type SpawnRequest struct {
 type SandboxConfig struct {
 	ProfileID string
 	Workspace string
+	// FSScope is retained so the world backend can resolve workspace symlinks
+	// and re-check the real path against the same already-merged policy.
+	FSScope []string
 	// Egress는 요청 도메인 중 정책 평가를 통과한 것만이다 — 통과분만
 	// 실행 프로파일에 편입된다(FR-EXT-06과 동일 의미론).
 	Egress []string
@@ -165,11 +168,22 @@ func Evaluate(p Profile, req SpawnRequest) (SandboxConfig, *Denial) {
 	return SandboxConfig{
 		ProfileID:    p.ID,
 		Workspace:    workspace, // 정규화된 경로만 하류(T10)로 전달
+		FSScope:      append([]string(nil), p.FSScope...),
 		Egress:       granted,
 		DeniedEgress: denied,
 		Budget:       p.Budget,
 		Approval:     p.Approval,
 	}, nil
+}
+
+// AllowsWorkspace applies the same path-boundary rules as Evaluate. T10 uses
+// it after EvalSymlinks so a lexically allowed path cannot escape policy scope
+// through a symlink.
+func AllowsWorkspace(scope []string, workspace string) bool {
+	if workspace == "" || !path.IsAbs(workspace) {
+		return false
+	}
+	return workspaceAllowed(scope, path.Clean(workspace))
 }
 
 // workspaceAllowed는 정규화된 요청 경로가 스코프 경로와 같거나 그 하위인지

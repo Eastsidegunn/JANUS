@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/core/policy"
@@ -15,13 +16,14 @@ import (
 
 func TestEffectivePolicyAndSpawnSpecAreSnapshots(t *testing.T) {
 	egress := []string{"allowed.example"}
+	fsScope := []string{"/workspace"}
 	cfg := policy.SandboxConfig{
-		ProfileID: "p", Workspace: "/workspace", Egress: egress,
+		ProfileID: "p", Workspace: "/workspace", FSScope: fsScope, Egress: egress,
 		Budget:   gen.Budget{Tokens: 10, TimeMs: 20, MaxDepth: 2},
 		Approval: policy.ApprovalManual,
 	}
 	effective := world.NewEffectivePolicy(cfg)
-	egress[0], cfg.Egress[0] = "widened.example", "also-widened.example"
+	egress[0], cfg.Egress[0], fsScope[0] = "widened.example", "also-widened.example", "/"
 	if got := effective.Egress(); !reflect.DeepEqual(got, []string{"allowed.example"}) {
 		t.Fatalf("정책 스냅샷이 입력 slice 변형으로 넓어짐: %v", got)
 	}
@@ -30,10 +32,15 @@ func TestEffectivePolicyAndSpawnSpecAreSnapshots(t *testing.T) {
 	if effective.Egress()[0] != "allowed.example" {
 		t.Fatal("Egress 반환 slice를 통한 정책 변형이 가능함")
 	}
+	scope := effective.FSScope()
+	scope[0] = "/"
+	if effective.FSScope()[0] != "/workspace" {
+		t.Fatal("FSScope 반환 slice를 통한 정책 확장이 가능함")
+	}
 
 	argv := []string{"agent", "--json"}
 	credentials := []world.CredentialHandle{{ID: "cred-1", Scope: "repo:read", ExpiresAtUnixMs: 1000}}
-	spec := world.NewSpawnSpec(effective, "sha256:"+strings.Repeat("a", 64), argv, 0, "trace", "span", credentials)
+	spec := world.NewSpawnSpec(effective, "sha256:"+strings.Repeat("a", 64), argv, 0, "trace", "span", world.AgentIdentity{UID: 1000, GID: 1000}, credentials)
 	argv[0], credentials[0].Scope = "shell", "*"
 	if got := spec.AgentArgv(); got[0] != "agent" {
 		t.Fatalf("agent argv가 caller 변형을 공유함: %v", got)
@@ -69,7 +76,7 @@ func TestUpperDirExistsOnlyOnHostLeaseBoundary(t *testing.T) {
 func TestFakeBackendRecordsOpenAndPropagatesErrors(t *testing.T) {
 	lease := worldtest.NewFakeLease(world.Endpoint{}, world.SpawnMetadata{}, "/host/upper", nil)
 	backend := worldtest.NewFakeBackend(lease)
-	spec := world.NewSpawnSpec(world.EffectivePolicy{}, "digest", []string{"agent"}, 1, "trace", "span", nil)
+	spec := world.NewSpawnSpec(world.EffectivePolicy{}, "digest", []string{"agent"}, 1, "trace", "span", world.AgentIdentity{}, nil)
 	got, err := backend.Open(context.Background(), spec)
 	if err != nil || got != lease {
 		t.Fatalf("Open = (%v, %v), FakeLease 기대", got, err)
@@ -131,7 +138,7 @@ func TestFakeLeaseLifecycleOrderEffectsAndErrors(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() { done <- lease.Close(context.Background()) }()
-	<-lease.FakeStageReached(worldtest.FakeCloseEffectsDrain)
+	waitSignal(t, lease.FakeStageReached(worldtest.FakeCloseEffectsDrain), "effect drain 단계")
 	if got := lease.FakeCloseOrder(); !reflect.DeepEqual(got, []worldtest.FakeCloseStage{
 		worldtest.FakeCloseProcessStop, worldtest.FakeCloseEffectsDrain,
 	}) {
@@ -143,7 +150,7 @@ func TestFakeLeaseLifecycleOrderEffectsAndErrors(t *testing.T) {
 	default:
 	}
 	close(drainGate)
-	err := <-done
+	err := waitError(t, done, "Lease.Close 완료")
 	for _, want := range []error{stopErr, ackErr, cleanupErr} {
 		if !errors.Is(err, want) {
 			t.Errorf("Close 오류 체인에 %v 없음: %v", want, err)
@@ -163,5 +170,25 @@ func TestFakeLeaseLifecycleOrderEffectsAndErrors(t *testing.T) {
 	}
 	if got := lease.FakeCloseOrder(); !reflect.DeepEqual(got, wantOrder) {
 		t.Fatalf("두 번째 Close가 lifecycle을 반복함: %v", got)
+	}
+}
+
+func waitSignal(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s 대기 timeout", what)
+	}
+}
+
+func waitError(t *testing.T, ch <-chan error, what string) error {
+	t.Helper()
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s 대기 timeout", what)
+		return nil
 	}
 }
