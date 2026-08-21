@@ -12,10 +12,13 @@ import (
 func TestIntegrationBlindSpots(t *testing.T) {
 	dir := t.TempDir()
 	files := map[string]string{
-		"go.mod":           "module example.com/hx\n\ngo 1.26\n",
-		"core/core.go":     "package core\n",
-		"surfaces/doc.go":  "package surfaces\n",
-		"collector/doc.go": "package collector\n",
+		"go.mod":                        "module example.com/hx\n\ngo 1.26\n",
+		"core/core.go":                  "package core\n",
+		"core/world/worldtest/doc.go":   "package worldtest\n",
+		"surfaces/doc.go":               "package surfaces\n\nimport _ \"example.com/hx/core/world/worldtest\"\n",
+		"collector/doc.go":              "package collector\n",
+		"seams/adapter/doc.go":          "package adapter\n",
+		"seams/adapter/adapter_test.go": "package adapter\n\nimport _ \"example.com/hx/core/world/worldtest\"\n",
 		// 발견 1: 테스트 파일에서만 일어나는 위반
 		"core/core_test.go": "package core\n\nimport (\n\t\"testing\"\n\n\t_ \"example.com/hx/surfaces\"\n)\n\nfunc TestX(t *testing.T) {}\n",
 		// 발견 1 확장: 특정 GOOS에서만 빌드되는 파일의 위반
@@ -53,6 +56,7 @@ func TestIntegrationBlindSpots(t *testing.T) {
 	want := []string{
 		"core → collector", // linux 전용 파일 — GOOS 순회 없이는 darwin에서 못 잡는다
 		"core → surfaces",  // 테스트 전용 import
+		"surfaces → core/world/worldtest (worldtest는 _test.go에서만 import 가능)",
 		"미분류 최상위 디렉토리: rogue (허용: contracts|core|seams|collector|surfaces|tools)",
 	}
 	for _, w := range want {

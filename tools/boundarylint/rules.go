@@ -58,29 +58,38 @@ func Check(module string, pkgs []Pkg) []string {
 			add(fmt.Sprintf("미분류 최상위 디렉토리: %s (허용: contracts|core|seams|collector|surfaces|tools)", from))
 			continue
 		}
-		for _, imp := range allImports(p) {
+		checkImport := func(imp string, testOnly bool) {
 			to, ok := rel(module, imp)
 			if !ok {
 				if v := checkExternal(from, imp); v != "" {
 					add(v)
 				}
-				continue
+				return
+			}
+			if !testOnly && isWorldtest(to) && !isWorldtest(from) {
+				add(fmt.Sprintf("%s → %s (worldtest는 _test.go에서만 import 가능)", from, to))
+				return
 			}
 			if !allowed(from, to) {
 				add(fmt.Sprintf("%s → %s", from, to))
 			}
+		}
+		for _, imp := range p.Imports {
+			checkImport(imp, false)
+		}
+		for _, imp := range p.TestImports {
+			checkImport(imp, true)
+		}
+		for _, imp := range p.XTestImports {
+			checkImport(imp, true)
 		}
 	}
 	sort.Strings(violations)
 	return violations
 }
 
-func allImports(p Pkg) []string {
-	out := make([]string, 0, len(p.Imports)+len(p.TestImports)+len(p.XTestImports))
-	out = append(out, p.Imports...)
-	out = append(out, p.TestImports...)
-	out = append(out, p.XTestImports...)
-	return out
+func isWorldtest(path string) bool {
+	return path == "core/world/worldtest" || strings.HasPrefix(path, "core/world/worldtest/")
 }
 
 // checkExternal은 제한된 외부 모듈 import가 허용 패키지 밖에서 일어나면
