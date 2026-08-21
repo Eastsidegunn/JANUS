@@ -105,6 +105,12 @@ type SessionForkPayload struct {
 	OriginTraceID string `json:"origin_trace_id"`
 }
 
+type SpawnBudget struct {
+	MaxDepth int64 `json:"max_depth"`
+	TimeMs   int64 `json:"time_ms"`
+	Tokens   int64 `json:"tokens"`
+}
+
 type SubagentApprovalRequestPayload struct {
 	Args      json.RawMessage `json:"args"`
 	CallID    string          `json:"call_id"`
@@ -142,6 +148,43 @@ type SubagentReadyPayload struct {
 	Model           *string                   `json:"model,omitempty"`
 	NativeSessionID *string                   `json:"native_session_id,omitempty"`
 	Tools           []string                  `json:"tools,omitempty"`
+}
+
+type SubagentSpawnMountMode string
+
+const (
+	SubagentSpawnMountModeOverlay SubagentSpawnMountMode = "overlay"
+)
+
+type SubagentSpawnMountTargetPath string
+
+const (
+	SubagentSpawnMountTargetPathWorkspace SubagentSpawnMountTargetPath = "/workspace"
+)
+
+type SubagentSpawnMount struct {
+	Mode       SubagentSpawnMountMode       `json:"mode"`
+	SourcePath string                       `json:"source_path"`
+	TargetPath SubagentSpawnMountTargetPath `json:"target_path"`
+	UpperRef   string                       `json:"upper_ref"`
+}
+
+type SubagentSpawnPayloadWorldBackend string
+
+const (
+	SubagentSpawnPayloadWorldBackendNone        SubagentSpawnPayloadWorldBackend = "none"
+	SubagentSpawnPayloadWorldBackendLocalPodman SubagentSpawnPayloadWorldBackend = "local-podman"
+)
+
+type SubagentSpawnPayload struct {
+	Adapter      string                           `json:"adapter"`
+	Budget       SpawnBudget                      `json:"budget"`
+	Depth        int64                            `json:"depth"`
+	ImageDigest  *string                          `json:"image_digest,omitempty"`
+	Instruction  string                           `json:"instruction"`
+	Mounts       []SubagentSpawnMount             `json:"mounts,omitempty"`
+	ProfileID    *string                          `json:"profile_id,omitempty"`
+	WorldBackend SubagentSpawnPayloadWorldBackend `json:"world_backend"`
 }
 
 type SubagentToolCallPayload struct {

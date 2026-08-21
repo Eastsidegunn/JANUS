@@ -216,6 +216,15 @@ CREATE TABLE events (
 | 수집기 | `collector/fs_changed`, `collector/egress` |
 | 정책 | `policy/decision` (허용/거부, 적용 프로파일) |
 
+`subagent/spawn` payload는 `world_backend` 판별자로 폐쇄한다
+(SCP-T10-001, 2026-08-21 [H] 승인). 공통 필드는 `adapter`, `instruction`,
+`depth`, `budget`, `world_backend`다. `world_backend:"none"`은 기존 null adapter와
+테스트 경로를 표현하며 sandbox metadata를 허용하지 않는다.
+`world_backend:"local-podman"`은 `profile_id`, tag가 아닌
+`sha256:<64 lowercase hex>` image digest, workspace overlay `mounts`를 추가로
+필수화한다. 두 분기 모두 미지 필드를 거부한다. schema가 `none`을 허용하는 것은
+production 권한이 아니며, production surface는 FR-SBX-01에 따라 이를 거부한다.
+
 스키마 확장 규칙: 새 모델 가시 입력은 반드시 새 kind 추가로 처리한다(FR-LOG-03의 계). kind의 제거·의미 변경은 메이저 버전에서만 허용한다.
 
 ### 5.2 어댑터 와이어 프로토콜 (NDJSON over stdio)

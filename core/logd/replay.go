@@ -116,6 +116,9 @@ func Replay(events []gen.EventRecord) (*DerivedState, error) {
 		case gen.KindStepStart:
 			s.Steps++
 		case gen.KindSubagentSpawn:
+			// payload의 world_backend 판별·분기별 metadata는 writer의 저장 직전
+			// contracts 검증으로 확정된다. Replay는 backend와 무관하게 spawn 수를
+			// 투영하며 payload 원문은 이벤트 로그에 그대로 남는다.
 			s.Spawns++
 		case gen.KindUserMessage:
 			s.appendMessage(e, RoleUser)
