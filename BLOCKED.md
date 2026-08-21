@@ -31,6 +31,11 @@
 FR-SBX-01을 형식적으로만 만족시키는 우회다. adapter를 container 안에 넣는 방식도
 FR-ADP-10과 승인된 Q4를 위반하므로 사용하지 않는다.
 
+**범위 확정 (2026-08-22, [H])**: `docs/t10-scope-determination.md`. FR-SBX-01은
+재해석하지 않는다. T10은 world 기판을 **실제 컨테이너 서브에이전트**로 검증하는
+것까지이며, Claude Code의 sandbox 실행은 T15로 분리하고 자격증명 [H] 실측을 착수
+조건으로 둔다. 따라서 아래 두 조건이 T10 재개의 전제다.
+
 해소 조건:
 
 1. host adapter가 container agent의 start/stdin/stdout/stop/wait를 사용하는
