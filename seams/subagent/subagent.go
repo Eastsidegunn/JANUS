@@ -107,7 +107,7 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 		actor: actor, proc: proc, vals: vals,
 		doneCh: make(chan waitResult, 1), childSpn: childSpan,
 	}
-	s.approvals = newApprovalCoordinator(s, w, traceID, parentSpan, spec)
+	s.approvals = newApprovalCoordinator(ctx, s, w, traceID, parentSpan, spec)
 	if err := s.sendCommand(gen.CommandCmdTask, gen.TaskPayload{
 		Instruction: spec.Instruction,
 		Workspace:   spec.Workspace,

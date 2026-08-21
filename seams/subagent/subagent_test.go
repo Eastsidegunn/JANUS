@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,9 +49,11 @@ type fakeDecider struct {
 	err      error
 	entered  chan policy.ApprovalRequest
 	release  <-chan struct{}
+	calls    atomic.Int64
 }
 
 func (d *fakeDecider) Decide(ctx context.Context, req policy.ApprovalRequest) (policy.ApprovalDecision, error) {
+	d.calls.Add(1)
 	if d.entered != nil {
 		d.entered <- req
 	}
@@ -62,6 +65,125 @@ func (d *fakeDecider) Decide(ctx context.Context, req policy.ApprovalRequest) (p
 		}
 	}
 	return d.decision, d.err
+}
+
+func TestApprovalDuplicateRaceIsDurablyReconstructableWithoutSecondDecision(t *testing.T) {
+	const duplicateRequestID = "22222222-2222-4222-8222-222222222222"
+	script := `read task
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/approval_request","payload":{"request_id":"` + approvalRequestID + `","call_id":"call-1","name":"Bash","args":{"command":"true"}},"raw":"eyJ0b29sX3VzZV9pZCI6ImNhbGwtMSJ9"}'
+read first
+printf '%s\n' '{"v":1,"kind":"subagent/approval_request","payload":{"request_id":"` + duplicateRequestID + `","call_id":"call-1","name":"Bash","args":{"command":"true"},"reason":"duplicate tool intent"},"raw":"eyJ0b29sX3VzZV9pZCI6ImNhbGwtMSJ9"}'
+read second
+printf '%s\n' '{"v":1,"kind":"subagent/tool_result","payload":{"call_id":"call-1","status":"rejected","reason":"duplicate tool intent"},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"error","result":"duplicate rejected"},"raw":""}'`
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	decider := &fakeDecider{decision: policy.ApprovalDecision{Allow: true}}
+	spec := spawnSpec([]string{"/bin/sh", "-c", script}, "지시")
+	spec.ProfileID, spec.Approval, spec.Decider = "profile-1", policy.ApprovalManual, decider
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := sub.Wait(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != gen.DonePayloadStatusError || decider.calls.Load() != 1 {
+		t.Fatalf("duplicate가 Decider에 재진입하거나 native 거부가 소실됨: done=%+v calls=%d", done, decider.calls.Load())
+	}
+
+	events, _ := store.ReadFrom(context.Background(), 1)
+	var requestIDs []string
+	var decisions []gen.PolicyDecisionPayload
+	var rejected bool
+	for _, event := range events {
+		switch event.Kind {
+		case gen.KindSubagentApprovalRequest:
+			var payload gen.SubagentApprovalRequestPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			requestIDs = append(requestIDs, payload.RequestID)
+			if payload.RequestID == duplicateRequestID && (payload.Reason == nil || *payload.Reason != "duplicate tool intent") {
+				t.Fatalf("duplicate audit reason 소실: %+v", payload)
+			}
+		case gen.KindPolicyDecision:
+			var payload gen.PolicyDecisionPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			decisions = append(decisions, payload)
+		case gen.KindSubagentToolResult:
+			var payload gen.SubagentToolResultPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			rejected = payload.CallID == "call-1" && payload.Status == gen.SubagentToolResultPayloadStatusRejected
+		}
+	}
+	if len(requestIDs) != 2 || requestIDs[0] != approvalRequestID || requestIDs[1] != duplicateRequestID ||
+		len(decisions) != 2 || decisions[0].Decision != gen.PolicyDecisionPayloadDecisionAllow ||
+		decisions[1].Decision != gen.PolicyDecisionPayloadDecisionDeny || decisions[1].Reason == nil ||
+		*decisions[1].Reason != "duplicate tool intent" || !rejected {
+		t.Fatalf("위조 race 로그 재구성 실패: requests=%v decisions=%+v rejected=%t events=%+v",
+			requestIDs, decisions, rejected, events)
+	}
+}
+
+func TestApprovalRelayForcedDenialsNeverReachDecider(t *testing.T) {
+	for _, reason := range []string{"tool intent mismatch", "approval deadline 초과", "lease 종료"} {
+		t.Run(reason, func(t *testing.T) {
+			script := `read task
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/approval_request","payload":{"request_id":"` + approvalRequestID + `","call_id":"call-1","name":"Bash","args":{"command":"true"},"reason":"` + reason + `"},"raw":"eyJ0b29sX3VzZV9pZCI6ImNhbGwtMSJ9"}'
+read response
+printf '%s' "$response" > "$1"
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"error","result":"forced deny"},"raw":""}'`
+			store := &FakeStore{}
+			w, err := logd.NewWriter(context.Background(), store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Close()
+			responsePath := filepath.Join(t.TempDir(), "response.json")
+			decider := &fakeDecider{decision: policy.ApprovalDecision{Allow: true}}
+			spec := spawnSpec([]string{"/bin/sh", "-c", script, "sh", responsePath}, "지시")
+			spec.ProfileID, spec.Approval, spec.Decider = "profile-1", policy.ApprovalManual, decider
+			sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1, spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sub.Wait(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			response := decodeApprovalResponse(t, responsePath)
+			if decider.calls.Load() != 0 || response.Decision != gen.ApprovalResponsePayloadDecisionDeny ||
+				response.Reason == nil || *response.Reason != reason {
+				t.Fatalf("forced deny가 Decider에 도달하거나 사유 소실: calls=%d response=%+v", decider.calls.Load(), response)
+			}
+			events, _ := store.ReadFrom(context.Background(), 1)
+			var durable bool
+			for _, event := range events {
+				if event.Kind != gen.KindPolicyDecision {
+					continue
+				}
+				var payload gen.PolicyDecisionPayload
+				if err := json.Unmarshal(event.Payload, &payload); err != nil {
+					t.Fatal(err)
+				}
+				durable = payload.Decision == gen.PolicyDecisionPayloadDecisionDeny && payload.Reason != nil && *payload.Reason == reason
+			}
+			if !durable {
+				t.Fatalf("forced deny가 durable policy log에 없음: %+v", events)
+			}
+		})
+	}
 }
 
 const approvalRequestID = "11111111-1111-4111-8111-111111111111"
@@ -289,6 +411,80 @@ func TestApprovalDecisionDoesNotBlockPump(t *testing.T) {
 	close(release)
 	if _, err := sub.Wait(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestApprovalDeadlineDeniesAndRecordsInsteadOfWaitingForever(t *testing.T) {
+	never := make(chan struct{})
+	decider := &fakeDecider{release: never}
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	responsePath := filepath.Join(t.TempDir(), "response.json")
+	spec := spawnSpec([]string{"/bin/sh", "-c", approvalAdapterScript(false), "sh", responsePath}, "지시")
+	spec.ProfileID, spec.Approval, spec.Decider = "profile-1", policy.ApprovalManual, decider
+	spec.Budget.TimeMs = 80
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sub.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	response := decodeApprovalResponse(t, responsePath)
+	if response.Decision != gen.ApprovalResponsePayloadDecisionDeny || response.Reason == nil ||
+		!strings.Contains(*response.Reason, context.DeadlineExceeded.Error()) {
+		t.Fatalf("deadline deny가 구분되지 않음: %+v", response)
+	}
+	events, _ := store.ReadFrom(context.Background(), 1)
+	var durable bool
+	for _, event := range events {
+		if event.Kind != gen.KindPolicyDecision {
+			continue
+		}
+		var payload gen.PolicyDecisionPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		durable = payload.Decision == gen.PolicyDecisionPayloadDecisionDeny && payload.Reason != nil &&
+			strings.Contains(*payload.Reason, context.DeadlineExceeded.Error())
+	}
+	if !durable {
+		t.Fatalf("approval deadline deny가 durable log에 없음: %+v", events)
+	}
+}
+
+func TestApprovalExpiredExplicitAutoModeStillDenies(t *testing.T) {
+	script := `read task
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
+sleep 0.12
+printf '%s\n' '{"v":1,"kind":"subagent/approval_request","payload":{"request_id":"` + approvalRequestID + `","call_id":"call-1","name":"Bash","args":{"command":"true"}},"raw":"eyJ0b29sX25hbWUiOiJCYXNoIn0="}'
+read response
+printf '%s' "$response" > "$1"
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"error","result":"expired"},"raw":""}'`
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	responsePath := filepath.Join(t.TempDir(), "response.json")
+	spec := spawnSpec([]string{"/bin/sh", "-c", script, "sh", responsePath}, "지시")
+	spec.ProfileID, spec.Approval, spec.Budget.TimeMs = "profile-1", policy.ApprovalAuto, 50
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sub.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	response := decodeApprovalResponse(t, responsePath)
+	if response.Decision != gen.ApprovalResponsePayloadDecisionDeny || response.Reason == nil ||
+		!strings.Contains(*response.Reason, "deadline") {
+		t.Fatalf("만료 뒤 explicit auto가 allow됨: %+v", response)
 	}
 }
 
