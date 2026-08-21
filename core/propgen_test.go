@@ -106,7 +106,11 @@ func genEventSequence(r *rand.Rand) []gen.EventRecord {
 			subagentN++
 			child := randID(r, 16)
 			actor := fmt.Sprintf("subagent:null:%d", subagentN)
-			add(gen.KindSubagentSpawn, "parent", child, ptr(rootSpan), map[string]any{"adapter": "null"}, nil)
+			add(gen.KindSubagentSpawn, "parent", child, ptr(rootSpan), gen.SubagentSpawnPayload{
+				Adapter: "null", Instruction: "속성 생성기", Depth: 0,
+				Budget:       gen.SpawnBudget{Tokens: 100_000, TimeMs: 600_000, MaxDepth: 2},
+				WorldBackend: gen.SubagentSpawnPayloadWorldBackendNone,
+			}, nil)
 			add(gen.KindSubagentReady, actor, child, ptr(rootSpan), gen.SubagentReadyPayload{
 				Grade: gen.SubagentReadyPayloadGradeObservable,
 			}, func(e *gen.EventRecord) { e.Raw = ptr("") })

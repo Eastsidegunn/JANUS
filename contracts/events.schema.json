@@ -182,6 +182,9 @@
       "properties": {
         "kind": {
           "const": "subagent/spawn"
+        },
+        "payload": {
+          "$ref": "#/$defs/subagentSpawnPayload"
         }
       }
     },
@@ -315,7 +318,7 @@
       "$comment": "OTel SpanContext 규격: 16자리 소문자 hex이며 최소 한 바이트가 non-zero여야 유효 — all-zero ID는 스키마 수준에서 거부(FR-OBS-01). all-zero 거부는 contracts 영구 테스트 대상"
     },
     "kind": {
-      "description": "§5.1 kind 어휘 전체 (v0.1). 대화·툴 4종과 turn/step 경계 4종은 T5에서, subagent 5종(ready/message/tool_call/tool_result/approval_request)은 T9에서 확정. 남은 열린 kind(session/*, assistant/chunk, subagent/spawn)의 필드 확정은 해당 태스크에서 additive로 진행",
+      "description": "§5.1 kind 어휘 전체 (v0.1). 대화·툴 4종과 turn/step 경계 4종은 T5에서, subagent 5종(ready/message/tool_call/tool_result/approval_request)은 T9에서 확정. subagent/spawn은 T10에서 world_backend 판별 2분기로 non-additive 폐쇄(2026-08-21 [H] 승인). 남은 열린 kind(session/*, assistant/chunk)의 필드 확정은 해당 태스크에서 additive로 진행",
       "enum": [
         "session/start",
         "session/fork",
@@ -644,6 +647,171 @@
           },
           "required": [
             "error"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "spawnBudget": {
+      "type": "object",
+      "description": "subagent/spawn에 기록하는 실효 잔여 예산 — wire.schema.json budget의 거울 형태",
+      "properties": {
+        "tokens": {
+          "$ref": "#/$defs/int64NonNeg"
+        },
+        "time_ms": {
+          "$ref": "#/$defs/int64NonNeg"
+        },
+        "max_depth": {
+          "$ref": "#/$defs/int64NonNeg"
+        }
+      },
+      "required": [
+        "tokens",
+        "time_ms",
+        "max_depth"
+      ],
+      "additionalProperties": false
+    },
+    "subagentSpawnMount": {
+      "type": "object",
+      "description": "local-podman workspace overlay mount의 재현 metadata (FR-SBX-06). upper_ref는 host state root 기준 상대 식별자",
+      "properties": {
+        "source_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_path": {
+          "enum": [
+            "/workspace"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "overlay"
+          ]
+        },
+        "upper_ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "source_path",
+        "target_path",
+        "mode",
+        "upper_ref"
+      ],
+      "additionalProperties": false
+    },
+    "subagentSpawnPayload": {
+      "type": "object",
+      "description": "서브에이전트 spawn과 실행 세계 metadata (FR-SBX-06). none은 기존 null/test 경로 표현용이며 production surface 권한이 아니다",
+      "properties": {
+        "adapter": {
+          "type": "string",
+          "minLength": 1
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "depth": {
+          "$ref": "#/$defs/int64NonNeg"
+        },
+        "budget": {
+          "$ref": "#/$defs/spawnBudget"
+        },
+        "world_backend": {
+          "enum": [
+            "none",
+            "local-podman"
+          ]
+        },
+        "profile_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "image_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "$comment": "tag는 재현 근거가 아니므로 허용하지 않는다"
+        },
+        "mounts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/subagentSpawnMount"
+          }
+        }
+      },
+      "required": [
+        "adapter",
+        "instruction",
+        "depth",
+        "budget",
+        "world_backend"
+      ],
+      "oneOf": [
+        {
+          "properties": {
+            "adapter": {
+              "type": "string",
+              "minLength": 1
+            },
+            "instruction": {
+              "type": "string"
+            },
+            "depth": {
+              "$ref": "#/$defs/int64NonNeg"
+            },
+            "budget": {
+              "$ref": "#/$defs/spawnBudget"
+            },
+            "world_backend": {
+              "const": "none"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "properties": {
+            "adapter": {
+              "type": "string",
+              "minLength": 1
+            },
+            "instruction": {
+              "type": "string"
+            },
+            "depth": {
+              "$ref": "#/$defs/int64NonNeg"
+            },
+            "budget": {
+              "$ref": "#/$defs/spawnBudget"
+            },
+            "world_backend": {
+              "const": "local-podman"
+            },
+            "profile_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "image_digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "$comment": "tag는 재현 근거가 아니므로 허용하지 않는다"
+            },
+            "mounts": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/subagentSpawnMount"
+              }
+            }
+          },
+          "required": [
+            "profile_id",
+            "image_digest",
+            "mounts"
           ],
           "additionalProperties": false
         }

@@ -70,12 +70,17 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 	childSpan := logd.NewSpanID()
 	actor := fmt.Sprintf("subagent:%s:%d", spec.Adapter, n)
 
-	// spawn 이벤트 — 실행 환경 메타데이터의 진입점 (FR-SBX-06은 T10에서 확장)
-	spawnPayload, err := json.Marshal(map[string]any{
-		"adapter":     spec.Adapter,
-		"instruction": spec.Instruction,
-		"depth":       spec.Depth,
-		"budget":      spec.Budget,
+	// T10 이전 경로는 명시적인 none backend다. schema가 none을 허용하는 것은
+	// production 권한이 아니며 production surface는 T10 world 배선에서 거부한다.
+	spawnPayload, err := json.Marshal(gen.SubagentSpawnPayload{
+		Adapter:     spec.Adapter,
+		Instruction: spec.Instruction,
+		Depth:       spec.Depth,
+		Budget: gen.SpawnBudget{
+			Tokens: spec.Budget.Tokens, TimeMs: spec.Budget.TimeMs,
+			MaxDepth: spec.Budget.MaxDepth,
+		},
+		WorldBackend: gen.SubagentSpawnPayloadWorldBackendNone,
 	})
 	if err != nil {
 		return nil, err

@@ -33,7 +33,7 @@ func TestReplayMessagesProjection(t *testing.T) {
 		mkEvent(4, gen.KindAssistantMessage, "parent", root, `{"text":"응답"}`),
 		mkEvent(5, gen.KindToolCall, "parent", root, `{"name":"bash"}`),
 		mkEvent(6, gen.KindToolResult, "parent", root, `{"output":"ok"}`),
-		mkEvent(7, gen.KindSubagentSpawn, "parent", child, `{"adapter":"null"}`),
+		mkEvent(7, gen.KindSubagentSpawn, "parent", child, `{"adapter":"null","instruction":"test","depth":0,"budget":{"tokens":100,"time_ms":1000,"max_depth":1},"world_backend":"none"}`),
 		mkEvent(8, gen.KindSubagentMessage, "subagent:null:1", child, `{"text":"중간"}`),                                    // 제외 (자식 중간)
 		mkEvent(9, gen.KindSubagentToolCall, "subagent:null:1", child, `{"name":"edit"}`),                                 // 제외 (자식 중간)
 		mkEvent(10, gen.KindSubagentDone, "subagent:null:1", child, `{"status":"ok","result":"요약"}`),                      // 포함
