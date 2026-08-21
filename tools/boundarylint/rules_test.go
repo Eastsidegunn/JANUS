@@ -133,6 +133,20 @@ func TestCheckExternalRestrictions(t *testing.T) {
 	})
 }
 
+// worldtest는 여러 계층의 테스트가 공용 Fake를 재사용하기 위한 패키지지만,
+// production .go에서 import되면 Fake가 실제 backend로 승격되는 우회가 된다.
+// Imports와 TestImports/XTestImports를 구분하는 게이트를 직접 고정한다 (T10 Q7).
+func TestCheckWorldtestProductionImport(t *testing.T) {
+	pkgs := []Pkg{
+		{ImportPath: mod + "/surfaces/hx", Imports: []string{mod + "/core/world/worldtest"}},
+		{ImportPath: mod + "/seams/subagent", TestImports: []string{mod + "/core/world/worldtest"}},
+		{ImportPath: mod + "/core/world", XTestImports: []string{mod + "/core/world/worldtest"}},
+	}
+	assertViolations(t, Check(mod, pkgs), []string{
+		"surfaces/hx → core/world/worldtest (worldtest는 _test.go에서만 import 가능)",
+	})
+}
+
 func TestCheckClean(t *testing.T) {
 	pkgs := []Pkg{
 		{ImportPath: mod + "/core", Imports: []string{mod + "/contracts", "os"}},
