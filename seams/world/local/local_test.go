@@ -16,7 +16,11 @@ import (
 	"github.com/Eastsidegunn/JANUS/core/world"
 )
 
-const fakeContainerID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+const (
+	fakeAgentID     = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	fakeProxyID     = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	testProxyDigest = "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+)
 
 type fakePodman struct {
 	mu        sync.Mutex
@@ -26,13 +30,20 @@ type fakePodman struct {
 	hook      func([]string) ([]byte, error, bool)
 	digest    string
 	imageUser string
+	proxyUser string
 }
 
 func newFakePodman(digest string) *fakePodman {
-	return &fakePodman{notify: make(chan struct{}, 32), failures: map[string]error{}, digest: digest, imageUser: "1000:1001"}
+	return &fakePodman{
+		notify: make(chan struct{}, 64), failures: map[string]error{}, digest: digest,
+		imageUser: "1000:1001", proxyUser: "65532:65532",
+	}
 }
 
-func (f *fakePodman) Run(_ context.Context, args ...string) ([]byte, error) {
+func (f *fakePodman) Run(ctx context.Context, args ...string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	copyArgs := append([]string(nil), args...)
 	f.mu.Lock()
 	f.calls = append(f.calls, copyArgs)
@@ -55,9 +66,16 @@ func (f *fakePodman) Run(_ context.Context, args ...string) ([]byte, error) {
 	case "info":
 		return []byte(`{"host":{"security":{"rootless":true}},"store":{"graphDriverName":"overlay","graphStatus":{"Native Overlay Diff":"true"}}}`), nil
 	case "image inspect":
-		return []byte(`[{"Digest":"` + f.digest + `","Config":{"User":"` + f.imageUser + `"}}]`), nil
-	case "create":
-		return []byte(fakeContainerID + "\n"), nil
+		requested := args[2]
+		digest, user := f.digest, f.imageUser
+		if requested == testProxyDigest {
+			digest, user = testProxyDigest, f.proxyUser
+		}
+		return []byte(`[{"Digest":"` + digest + `","Config":{"User":"` + user + `"}}]`), nil
+	case "proxy create":
+		return []byte(fakeProxyID + "\n"), nil
+	case "agent create":
+		return []byte(fakeAgentID + "\n"), nil
 	default:
 		return nil, nil
 	}
@@ -70,7 +88,35 @@ func commandKey(args []string) string {
 	if len(args) == 0 {
 		return ""
 	}
+	if args[0] == "network" && len(args) >= 2 {
+		return "network " + args[1]
+	}
+	if args[0] == "create" {
+		if containsArgValue(args, "--name", "hx-2222222222222222-proxy") {
+			return "proxy create"
+		}
+		return "agent create"
+	}
+	if len(args) >= 2 {
+		switch args[0] {
+		case "start", "stop", "wait", "rm":
+			id := args[len(args)-1]
+			if id == fakeProxyID {
+				return "proxy " + args[0]
+			}
+			return "agent " + args[0]
+		}
+	}
 	return args[0]
+}
+
+func containsArgValue(args []string, name, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == name && args[i+1] == value {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fakePodman) snapshot() [][]string {
@@ -95,14 +141,28 @@ func TestOpenBuildsRootlessOverlayAndMetadata(t *testing.T) {
 	got := leaseValue.(*lease)
 
 	calls := runner.snapshot()
-	if gotKeys := callKeys(calls); !reflect.DeepEqual(gotKeys, []string{"info", "image inspect", "create", "start"}) {
+	if gotKeys := callKeys(calls); !reflect.DeepEqual(gotKeys, []string{
+		"info", "image inspect", "image inspect", "network create", "network create",
+		"proxy create", "proxy start", "agent create", "agent start",
+	}) {
 		t.Fatalf("Podman 호출 순서 = %v", gotKeys)
 	}
-	create := strings.Join(calls[2], " ")
+	proxyCreate := strings.Join(calls[5], " ")
 	for _, required := range []string{
-		"--pull=never", "--network=none",
+		"--network hx-2222222222222222-internal", "--network hx-2222222222222222-egress",
+		"--read-only", "--cap-drop=all", "--security-opt=no-new-privileges",
+		":/run/hx-audit:ro", testProxyDigest, proxyExecutable, "--allow api.example.com",
+	} {
+		if !strings.Contains(proxyCreate, required) {
+			t.Errorf("proxy create args에 %q 없음: %s", required, proxyCreate)
+		}
+	}
+	create := strings.Join(calls[7], " ")
+	for _, required := range []string{
+		"--pull=never", "--network hx-2222222222222222-internal",
 		"--userns=keep-id:uid=1000,gid=1001", "--user 1000:1001",
 		"--workdir /workspace", ":/workspace:O,upperdir=", ",workdir=", digest,
+		"HTTP_PROXY=http://hx-2222222222222222-proxy:3128",
 	} {
 		if !strings.Contains(create, required) {
 			t.Errorf("create args에 %q 없음: %s", required, create)
@@ -110,6 +170,9 @@ func TestOpenBuildsRootlessOverlayAndMetadata(t *testing.T) {
 	}
 	if strings.Contains(create, ":U") {
 		t.Fatalf("lower를 chown하는 :U가 포함됨: %s", create)
+	}
+	if strings.Contains(create, "hx-2222222222222222-egress") || strings.Contains(create, "/run/hx-audit") {
+		t.Fatalf("agent가 external network 또는 audit endpoint를 받음: %s", create)
 	}
 
 	metadata := got.Metadata()
@@ -125,14 +188,6 @@ func TestOpenBuildsRootlessOverlayAndMetadata(t *testing.T) {
 	}
 	if got.AdapterEndpoint() != (world.Endpoint{}) {
 		t.Fatal("T10-5 이전에 broker endpoint가 노출됨")
-	}
-	select {
-	case _, ok := <-got.Effects():
-		if ok {
-			t.Fatal("T10-4 이전 effect stream에 값이 있음")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("빈 effect stream 종료 대기 timeout")
 	}
 	for _, dir := range []string{got.stateDir, got.upperDir, got.workDir} {
 		info, err := os.Stat(dir)
@@ -153,12 +208,12 @@ func TestLeaseCloseWaitsForEffectsThenCleansContainerAndPreservesUpper(t *testin
 	}
 	got := leaseValue.(*lease)
 	effectsDone := make(chan struct{})
-	got.effectsDone = effectsDone
+	got.broker.(*fakeEffectBroker).shutdownGate = effectsDone
 
 	closeResult := make(chan error, 1)
 	go func() { closeResult <- got.Close(context.Background()) }()
-	waitForCall(t, runner, "wait")
-	if containsCall(runner.snapshot(), "rm") {
+	waitForCall(t, runner, "proxy wait")
+	if containsCall(runner.snapshot(), "agent rm") || containsCall(runner.snapshot(), "network rm") {
 		t.Fatal("effect drain/ACK 전에 container cleanup이 시작됨")
 	}
 	close(effectsDone)
@@ -166,7 +221,7 @@ func TestLeaseCloseWaitsForEffectsThenCleansContainerAndPreservesUpper(t *testin
 		t.Fatal(err)
 	}
 	keys := callKeys(runner.snapshot())
-	if !ordered(keys, "stop", "wait", "rm") {
+	if !ordered(keys, "agent stop", "agent wait", "proxy stop", "proxy wait", "agent rm", "proxy rm", "network rm", "network rm") {
 		t.Fatalf("Close Podman 순서 이상: %v", keys)
 	}
 	if _, err := os.Stat(got.upperDir); err != nil {
@@ -174,6 +229,9 @@ func TestLeaseCloseWaitsForEffectsThenCleansContainerAndPreservesUpper(t *testin
 	}
 	if _, err := os.Stat(got.workDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("container cleanup 뒤 workdir가 남음: %v", err)
+	}
+	if _, err := os.Stat(got.broker.SocketDir()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("proxy cleanup 뒤 audit socket dir가 남음: %v", err)
 	}
 	before := len(runner.snapshot())
 	if err := got.Close(context.Background()); err != nil {
@@ -189,7 +247,7 @@ func TestCloseContinuesAfterStopError(t *testing.T) {
 	lower, stateRoot := testDirs(t)
 	runner := newFakePodman(digest)
 	stopErr := errors.New("stop failed")
-	runner.failures["stop"] = stopErr
+	runner.failures["agent stop"] = stopErr
 	backend := mustBackend(t, stateRoot, runner, statDevice)
 	leaseValue, err := backend.Open(context.Background(), testSpec(lower, digest))
 	if err != nil {
@@ -199,7 +257,7 @@ func TestCloseContinuesAfterStopError(t *testing.T) {
 	if !errors.Is(err, stopErr) {
 		t.Fatalf("stop 오류 체인 소실: %v", err)
 	}
-	if !ordered(callKeys(runner.snapshot()), "stop", "wait", "rm") {
+	if !ordered(callKeys(runner.snapshot()), "agent stop", "agent wait", "proxy stop", "proxy wait", "agent rm", "proxy rm") {
 		t.Fatalf("stop 오류가 cleanup을 단락함: %v", callKeys(runner.snapshot()))
 	}
 }
@@ -215,10 +273,10 @@ func TestConcurrentCloseHonorsContextWhileLifecycleIsGated(t *testing.T) {
 	}
 	got := leaseValue.(*lease)
 	effectsDone := make(chan struct{})
-	got.effectsDone = effectsDone
+	got.broker.(*fakeEffectBroker).shutdownGate = effectsDone
 	first := make(chan error, 1)
 	go func() { first <- got.Close(context.Background()) }()
-	waitForCall(t, runner, "wait")
+	waitForCall(t, runner, "proxy wait")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -231,14 +289,57 @@ func TestConcurrentCloseHonorsContextWhileLifecycleIsGated(t *testing.T) {
 	}
 }
 
+func TestCanceledCloseCanBeRetriedWithoutSkippingProcessStop(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("6", 64)
+	lower, stateRoot := testDirs(t)
+	runner := newFakePodman(digest)
+	backend := mustBackend(t, stateRoot, runner, statDevice)
+	leaseValue, err := backend.Open(context.Background(), testSpec(lower, digest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := leaseValue.Close(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("취소 Close = %v", err)
+	}
+	if containsCall(runner.snapshot(), "agent stop") || containsCall(runner.snapshot(), "proxy stop") {
+		t.Fatal("취소된 Close가 process stop을 실행함")
+	}
+	if err := leaseValue.Close(context.Background()); err != nil {
+		t.Fatalf("재시도 Close 실패: %v", err)
+	}
+	if !ordered(callKeys(runner.snapshot()), "agent stop", "agent wait", "proxy stop", "proxy wait", "agent rm", "proxy rm") {
+		t.Fatalf("재시도 lifecycle 누락: %v", callKeys(runner.snapshot()))
+	}
+}
+
 func TestOpenFailsClosedBeforeContainerStart(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("d", 64)
+	t.Run("invalid egress allowlist", func(t *testing.T) {
+		lower, stateRoot := testDirs(t)
+		runner := newFakePodman(digest)
+		backend := mustBackend(t, stateRoot, runner, statDevice)
+		effective := world.NewEffectivePolicy(policy.SandboxConfig{
+			ProfileID: "profile", Workspace: lower, FSScope: []string{lower}, Egress: []string{"*.example.com"},
+			Budget: gen.Budget{Tokens: 10, TimeMs: 1000, MaxDepth: 2}, Approval: policy.ApprovalManual,
+		})
+		spec := world.NewSpawnSpec(
+			effective, digest, []string{"agent"}, 0, strings.Repeat("1", 32), strings.Repeat("2", 16),
+			world.AgentIdentity{UID: 1000, GID: 1001}, nil,
+		)
+		_, err := backend.Open(context.Background(), spec)
+		if err == nil || containsAnyCreate(runner.snapshot()) || containsCall(runner.snapshot(), "network create") {
+			t.Fatalf("위반 allowlist가 network/container 생성까지 도달함: err=%v calls=%v", err, callKeys(runner.snapshot()))
+		}
+	})
+
 	t.Run("tag", func(t *testing.T) {
 		lower, stateRoot := testDirs(t)
 		runner := newFakePodman(digest)
 		backend := mustBackend(t, stateRoot, runner, statDevice)
 		_, err := backend.Open(context.Background(), testSpec(lower, "alpine:latest"))
-		if err == nil || containsCall(runner.snapshot(), "create") {
+		if err == nil || containsAnyCreate(runner.snapshot()) {
 			t.Fatalf("tag가 container create까지 도달함: err=%v calls=%v", err, callKeys(runner.snapshot()))
 		}
 	})
@@ -248,7 +349,7 @@ func TestOpenFailsClosedBeforeContainerStart(t *testing.T) {
 		runner := newFakePodman("sha256:" + strings.Repeat("e", 64))
 		backend := mustBackend(t, stateRoot, runner, statDevice)
 		_, err := backend.Open(context.Background(), testSpec(lower, digest))
-		if err == nil || containsCall(runner.snapshot(), "create") {
+		if err == nil || containsAnyCreate(runner.snapshot()) {
 			t.Fatalf("digest 불일치가 create까지 도달함: err=%v", err)
 		}
 	})
@@ -263,7 +364,7 @@ func TestOpenFailsClosedBeforeContainerStart(t *testing.T) {
 			runner.imageUser = imageUser
 			backend := mustBackend(t, stateRoot, runner, statDevice)
 			_, err := backend.Open(context.Background(), testSpec(lower, digest))
-			if err == nil || containsCall(runner.snapshot(), "create") {
+			if err == nil || containsAnyCreate(runner.snapshot()) {
 				t.Fatalf("부적합 image user가 create까지 도달함: err=%v", err)
 			}
 		})
@@ -285,7 +386,7 @@ func TestOpenFailsClosedBeforeContainerStart(t *testing.T) {
 		backend := mustBackend(t, stateRoot, runner, statDevice)
 		spec := specWithScope(link, []string{scope}, digest)
 		_, err := backend.Open(context.Background(), spec)
-		if err == nil || containsCall(runner.snapshot(), "create") {
+		if err == nil || containsAnyCreate(runner.snapshot()) {
 			t.Fatalf("symlink 탈출이 create까지 도달함: err=%v", err)
 		}
 	})
@@ -297,7 +398,7 @@ func TestOpenFailsClosedBeforeContainerStart(t *testing.T) {
 		runner := newFakePodman(digest)
 		backend := mustBackend(t, stateRoot, runner, statDevice)
 		_, err := backend.Open(context.Background(), testSpec(lower, digest))
-		if err == nil || containsCall(runner.snapshot(), "create") {
+		if err == nil || containsAnyCreate(runner.snapshot()) {
 			t.Fatalf("lower 내부 state root가 create까지 도달함: err=%v", err)
 		}
 	})
@@ -312,7 +413,7 @@ func TestOpenFailsClosedBeforeContainerStart(t *testing.T) {
 		}
 		backend := mustBackend(t, stateRoot, runner, device)
 		_, err := backend.Open(context.Background(), testSpec(lower, digest))
-		if err == nil || containsCall(runner.snapshot(), "create") {
+		if err == nil || containsAnyCreate(runner.snapshot()) {
 			t.Fatalf("device mismatch가 create까지 도달함: err=%v", err)
 		}
 	})
@@ -326,7 +427,7 @@ func TestOpenFailsClosedBeforeContainerStart(t *testing.T) {
 		runner := newFakePodman(digest)
 		backend := mustBackend(t, stateRoot, runner, statDevice)
 		_, err := backend.Open(context.Background(), testSpec(lower, digest))
-		if err == nil || containsCall(runner.snapshot(), "create") {
+		if err == nil || containsAnyCreate(runner.snapshot()) {
 			t.Fatalf("unsafe path가 create까지 도달함: err=%v", err)
 		}
 	})
@@ -334,10 +435,26 @@ func TestOpenFailsClosedBeforeContainerStart(t *testing.T) {
 
 func TestBackendAndPodmanPreconditionsFailClosed(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("9", 64)
+	t.Run("proxy image tag", func(t *testing.T) {
+		_, stateRoot := testDirs(t)
+		config := testConfig(stateRoot)
+		config.ProxyImageDigest = "hxegressproxy:latest"
+		if _, err := newBackend(config, newFakePodman(digest), statDevice, newFakeEffectBroker); err == nil {
+			t.Fatal("proxy image tag를 수용함")
+		}
+	})
+	t.Run("root proxy identity", func(t *testing.T) {
+		_, stateRoot := testDirs(t)
+		config := testConfig(stateRoot)
+		config.ProxyIdentity = world.AgentIdentity{}
+		if _, err := newBackend(config, newFakePodman(digest), statDevice, newFakeEffectBroker); err == nil {
+			t.Fatal("root/영값 proxy identity를 수용함")
+		}
+	})
 	t.Run("state root mode", func(t *testing.T) {
 		stateRoot := filepath.Join(t.TempDir(), "state")
 		mustMkdir(t, stateRoot, 0o755)
-		if _, err := newBackend(stateRoot, newFakePodman(digest), statDevice); err == nil {
+		if _, err := newBackend(testConfig(stateRoot), newFakePodman(digest), statDevice, newFakeEffectBroker); err == nil {
 			t.Fatal("0700이 아닌 state root를 수용함")
 		}
 	})
@@ -358,7 +475,7 @@ func TestBackendAndPodmanPreconditionsFailClosed(t *testing.T) {
 			}
 			backend := mustBackend(t, stateRoot, runner, statDevice)
 			_, err := backend.Open(context.Background(), testSpec(lower, digest))
-			if err == nil || containsCall(runner.snapshot(), "create") {
+			if err == nil || containsAnyCreate(runner.snapshot()) {
 				t.Fatalf("부적합 preflight가 create까지 도달함: err=%v calls=%v", err, callKeys(runner.snapshot()))
 			}
 		})
@@ -367,16 +484,52 @@ func TestBackendAndPodmanPreconditionsFailClosed(t *testing.T) {
 
 func TestCreateAndStartFailuresCleanResources(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("f", 64)
+	t.Run("proxy start error", func(t *testing.T) {
+		lower, stateRoot := testDirs(t)
+		runner := newFakePodman(digest)
+		runner.failures["proxy start"] = errors.New("proxy start failed")
+		backend := mustBackend(t, stateRoot, runner, statDevice)
+		_, err := backend.Open(context.Background(), testSpec(lower, digest))
+		if err == nil || containsCall(runner.snapshot(), "agent create") ||
+			!ordered(callKeys(runner.snapshot()), "proxy create", "proxy start", "proxy rm", "network rm", "network rm") {
+			t.Fatalf("proxy start 오류 cleanup 누락: err=%v calls=%v", err, callKeys(runner.snapshot()))
+		}
+		assertNoSpawnState(t, stateRoot)
+	})
+
+	t.Run("proxy ready error", func(t *testing.T) {
+		lower, stateRoot := testDirs(t)
+		runner := newFakePodman(digest)
+		readyErr := errors.New("proxy ready failed")
+		factory := func(stateDir, spanID string, capacity int) (effectBroker, error) {
+			value, err := newFakeEffectBroker(stateDir, spanID, capacity)
+			if err == nil {
+				value.(*fakeEffectBroker).readyErr = readyErr
+			}
+			return value, err
+		}
+		backend, err := newBackend(testConfig(stateRoot), runner, statDevice, factory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = backend.Open(context.Background(), testSpec(lower, digest))
+		if !errors.Is(err, readyErr) || containsCall(runner.snapshot(), "agent create") ||
+			!ordered(callKeys(runner.snapshot()), "proxy start", "proxy rm", "network rm", "network rm") {
+			t.Fatalf("proxy ready 오류 cleanup 누락: err=%v calls=%v", err, callKeys(runner.snapshot()))
+		}
+		assertNoSpawnState(t, stateRoot)
+	})
+
 	t.Run("create error with cidfile", func(t *testing.T) {
 		lower, stateRoot := testDirs(t)
 		runner := newFakePodman(digest)
 		runner.hook = func(args []string) ([]byte, error, bool) {
-			if commandKey(args) != "create" {
+			if commandKey(args) != "agent create" {
 				return nil, nil, false
 			}
 			for i := range args {
 				if args[i] == "--cidfile" && i+1 < len(args) {
-					if err := os.WriteFile(args[i+1], []byte(fakeContainerID), 0o600); err != nil {
+					if err := os.WriteFile(args[i+1], []byte(fakeAgentID), 0o600); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -385,7 +538,7 @@ func TestCreateAndStartFailuresCleanResources(t *testing.T) {
 		}
 		backend := mustBackend(t, stateRoot, runner, statDevice)
 		_, err := backend.Open(context.Background(), testSpec(lower, digest))
-		if err == nil || !containsCall(runner.snapshot(), "rm") {
+		if err == nil || !containsCall(runner.snapshot(), "agent rm") {
 			t.Fatalf("create 오류 orphan cleanup 누락: err=%v calls=%v", err, callKeys(runner.snapshot()))
 		}
 		assertNoSpawnState(t, stateRoot)
@@ -394,10 +547,10 @@ func TestCreateAndStartFailuresCleanResources(t *testing.T) {
 	t.Run("start error", func(t *testing.T) {
 		lower, stateRoot := testDirs(t)
 		runner := newFakePodman(digest)
-		runner.failures["start"] = errors.New("start failed")
+		runner.failures["agent start"] = errors.New("start failed")
 		backend := mustBackend(t, stateRoot, runner, statDevice)
 		_, err := backend.Open(context.Background(), testSpec(lower, digest))
-		if err == nil || !ordered(callKeys(runner.snapshot()), "create", "start", "rm") {
+		if err == nil || !ordered(callKeys(runner.snapshot()), "agent create", "agent start", "agent rm", "proxy rm") {
 			t.Fatalf("start 오류 cleanup 누락: err=%v calls=%v", err, callKeys(runner.snapshot()))
 		}
 		assertNoSpawnState(t, stateRoot)
@@ -425,11 +578,55 @@ func mustMkdir(t *testing.T, path string, mode os.FileMode) {
 
 func mustBackend(t *testing.T, stateRoot string, runner commandRunner, device func(string) (uint64, error)) *Backend {
 	t.Helper()
-	backend, err := newBackend(stateRoot, runner, device)
+	backend, err := newBackend(testConfig(stateRoot), runner, device, newFakeEffectBroker)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return backend
+}
+
+func testConfig(stateRoot string) Config {
+	return Config{
+		StateRoot: stateRoot, ProxyImageDigest: testProxyDigest,
+		ProxyIdentity: world.AgentIdentity{UID: 65532, GID: 65532}, AuditQueueCapacity: 2,
+	}
+}
+
+type fakeEffectBroker struct {
+	dir          string
+	effects      chan world.EffectAttempt
+	done         chan struct{}
+	shutdownGate <-chan struct{}
+	readyErr     error
+	closeOnce    sync.Once
+}
+
+func newFakeEffectBroker(stateDir, _ string, _ int) (effectBroker, error) {
+	dir := filepath.Join(stateDir, "audit")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return nil, err
+	}
+	return &fakeEffectBroker{dir: dir, effects: make(chan world.EffectAttempt), done: make(chan struct{})}, nil
+}
+
+func (f *fakeEffectBroker) SocketDir() string                   { return f.dir }
+func (f *fakeEffectBroker) Ready(context.Context) error         { return f.readyErr }
+func (f *fakeEffectBroker) Effects() <-chan world.EffectAttempt { return f.effects }
+func (f *fakeEffectBroker) Done() <-chan struct{}               { return f.done }
+func (f *fakeEffectBroker) Err() error                          { return nil }
+func (f *fakeEffectBroker) Shutdown(ctx context.Context) error {
+	if f.shutdownGate != nil {
+		select {
+		case <-f.shutdownGate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	f.closeOnce.Do(func() {
+		close(f.effects)
+		close(f.done)
+	})
+	return nil
 }
 
 func testSpec(lower, digest string) world.SpawnSpec {
@@ -438,7 +635,7 @@ func testSpec(lower, digest string) world.SpawnSpec {
 
 func specWithScope(workspace string, scope []string, digest string) world.SpawnSpec {
 	effective := world.NewEffectivePolicy(policy.SandboxConfig{
-		ProfileID: "profile", Workspace: workspace, FSScope: scope,
+		ProfileID: "profile", Workspace: workspace, FSScope: scope, Egress: []string{"api.example.com"},
 		Budget:   gen.Budget{Tokens: 10, TimeMs: 1000, MaxDepth: 2},
 		Approval: policy.ApprovalManual,
 	})
@@ -464,6 +661,10 @@ func containsCall(calls [][]string, key string) bool {
 		}
 	}
 	return false
+}
+
+func containsAnyCreate(calls [][]string) bool {
+	return containsCall(calls, "proxy create") || containsCall(calls, "agent create")
 }
 
 func ordered(keys []string, want ...string) bool {

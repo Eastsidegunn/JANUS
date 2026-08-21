@@ -164,9 +164,23 @@ func (m SpawnMetadata) Clone() SpawnMetadata {
 // owns the stream and its drain/ack lifecycle; T11 maps attempts to collector
 // events without taking ownership of the Lease.
 type EffectAttempt struct {
-	ID       string
-	Kind     string
-	Target   string
-	Method   string
-	AtUnixMs int64
+	ID           string
+	SpanID       string
+	Kind         string
+	Target       string
+	Method       string
+	RequestBytes int64
+	AtUnixMs     int64
+	Decision     EffectDecision
+	Reason       string
 }
+
+// EffectDecision records whether the sandbox allowed or denied an observed
+// effect. Both decisions are part of the audit stream; an empty value is only
+// retained for non-egress Fake/test records created before T10-4.
+type EffectDecision string
+
+const (
+	EffectDecisionAllow EffectDecision = "allow"
+	EffectDecisionDeny  EffectDecision = "deny"
+)
