@@ -1,0 +1,65 @@
+name: t10-repository-digest-probe
+
+on:
+  push:
+    branches: [t10/repository-digest-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Probe locally built repository digest reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          probe_dir=$(mktemp -d)
+          container_name=hx-repository-digest-probe
+          repository=localhost/hx-repository-digest-probe
+          tagged_ref="$repository:run-$GITHUB_RUN_ID"
+          trap 'podman rm -f "$container_name" >/dev/null 2>&1 || true; rm -rf "$probe_dir"' EXIT
+
+          cat >"$probe_dir/main.go" <<'EOF'
+          package main
+
+          import "fmt"
+
+          func main() {
+            fmt.Println("repository-digest-start-ok")
+          }
+          EOF
+          cat >"$probe_dir/Containerfile" <<'EOF'
+          FROM scratch
+          COPY probe /probe
+          USER 1000:1000
+          ENTRYPOINT ["/probe"]
+          EOF
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -o "$probe_dir/probe" "$probe_dir/main.go"
+
+          podman build --pull=never -t "$tagged_ref" \
+            -f "$probe_dir/Containerfile" "$probe_dir"
+          digest=$(podman image inspect --format '{{.Digest}}' "$tagged_ref")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+          immutable_ref="$repository@$digest"
+          podman image inspect "$immutable_ref" >/dev/null
+          cid=$(podman create --pull=never --name "$container_name" "$immutable_ref")
+          output=$(timeout 10s podman start --attach --sig-proxy=false "$cid")
+          exit_code=$(timeout 10s podman wait --condition exited "$cid")
+
+          [[ "$output" == repository-digest-start-ok ]]
+          [[ "$exit_code" == 0 ]]
+          printf 'PROBE tagged_ref=%s\n' "$tagged_ref"
+          printf 'PROBE inspect_digest=%s\n' "$digest"
+          printf 'PROBE immutable_ref=%s\n' "$immutable_ref"
+          printf 'PROBE create_cid=%s\n' "$cid"
+          printf 'PROBE start_output=%s exit_code=%s\n' "$output" "$exit_code"
