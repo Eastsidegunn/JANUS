@@ -46,7 +46,9 @@ jobs:
           podman wait "$cid" >/dev/null
           podman rm "$cid" >/dev/null
 
-          find "$root/state/overlay" -maxdepth 4 -printf '%P type=%y uid=%U gid=%G mode=%m\n' | sort
+          for path in "$upper" "$upper/nested" "$upper/nested/delete-me.txt" "$work" "$work/work"; do
+            stat -c '%n type=%F uid=%u gid=%g mode=%a rdev=%t:%T' "$path"
+          done
 
           set +e
           rm -rf -- "$work"
