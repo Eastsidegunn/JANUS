@@ -1,3 +1,5 @@
+// Package worldtest contains test-only fakes. They provide no OCI, overlay, or
+// network isolation and must never be imported by production files.
 package worldtest
 
 import (
@@ -9,31 +11,31 @@ import (
 )
 
 var (
-	_ world.Backend = (*FakeBackend)(nil)
-	_ world.Lease   = (*FakeLease)(nil)
+	_ world.Backend       = (*FakeBackend)(nil)
+	_ world.PreparedLease = (*FakePreparedLease)(nil)
+	_ world.ActiveLease   = (*FakeActiveLease)(nil)
 )
 
-// FakeBackend records Open calls and returns a configured FakeLease. It does
-// not start a process or sandbox.
+// FakeBackend records Prepare calls and returns a configured prepared fake.
 type FakeBackend struct {
-	mu       sync.Mutex
-	lease    *FakeLease
-	openErr  error
-	openGate <-chan struct{}
-	opens    []world.SpawnSpec
+	mu         sync.Mutex
+	prepared   *FakePreparedLease
+	prepareErr error
+	gate       <-chan struct{}
+	prepares   []world.SpawnSpec
 }
 
-func NewFakeBackend(lease *FakeLease) *FakeBackend {
-	if lease == nil {
-		lease = NewFakeLease(world.Endpoint{}, world.SpawnMetadata{}, "", nil)
+func NewFakeBackend(prepared *FakePreparedLease) *FakeBackend {
+	if prepared == nil {
+		prepared = NewFakePreparedLease(world.SpawnMetadata{}, "", nil)
 	}
-	return &FakeBackend{lease: lease}
+	return &FakeBackend{prepared: prepared}
 }
 
-func (f *FakeBackend) Open(ctx context.Context, spec world.SpawnSpec) (world.Lease, error) {
+func (f *FakeBackend) Prepare(ctx context.Context, spec world.SpawnSpec) (world.PreparedLease, error) {
 	f.mu.Lock()
-	f.opens = append(f.opens, spec)
-	gate, openErr, lease := f.openGate, f.openErr, f.lease
+	f.prepares = append(f.prepares, spec)
+	gate, prepareErr, prepared := f.gate, f.prepareErr, f.prepared
 	f.mu.Unlock()
 	if gate != nil {
 		select {
@@ -42,31 +44,104 @@ func (f *FakeBackend) Open(ctx context.Context, spec world.SpawnSpec) (world.Lea
 			return nil, ctx.Err()
 		}
 	}
-	if openErr != nil {
-		return nil, openErr
+	if prepareErr != nil {
+		return nil, prepareErr
 	}
-	return lease, nil
+	return prepared, nil
 }
 
-func (f *FakeBackend) FakeSetOpenError(err error) {
+func (f *FakeBackend) FakeSetPrepareError(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.openErr = err
+	f.prepareErr = err
 }
 
-func (f *FakeBackend) FakeSetOpenGate(gate <-chan struct{}) {
+func (f *FakeBackend) FakeSetPrepareGate(gate <-chan struct{}) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.openGate = gate
+	f.gate = gate
 }
 
-func (f *FakeBackend) FakeOpenedSpecs() []world.SpawnSpec {
+func (f *FakeBackend) FakePreparedSpecs() []world.SpawnSpec {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]world.SpawnSpec(nil), f.opens...)
+	return append([]world.SpawnSpec(nil), f.prepares...)
 }
 
-// FakeCloseStage identifies the four ordered phases of Lease.Close.
+// FakePreparedLease models the receipt gate without starting a process.
+type FakePreparedLease struct {
+	id       world.PreparedID
+	metadata world.SpawnMetadata
+	upperDir string
+	active   *FakeActiveLease
+
+	mu          sync.Mutex
+	activateErr error
+	abortErr    error
+	activated   bool
+	aborted     bool
+	activations int
+}
+
+func NewFakePreparedLease(metadata world.SpawnMetadata, upperDir string, active *FakeActiveLease) *FakePreparedLease {
+	id, err := world.NewPreparedID("2222222222222222")
+	if err != nil {
+		panic(err)
+	}
+	if active == nil {
+		active = NewFakeActiveLease(world.ProcessEndpoint{}, world.ApprovalEndpoint{}, upperDir, nil)
+	}
+	return &FakePreparedLease{id: id, metadata: metadata.Clone(), upperDir: upperDir, active: active}
+}
+
+func (f *FakePreparedLease) ID() world.PreparedID          { return f.id }
+func (f *FakePreparedLease) Metadata() world.SpawnMetadata { return f.metadata.Clone() }
+func (f *FakePreparedLease) UpperDir() string              { return f.upperDir }
+func (f *FakePreparedLease) FakeActivationCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.activations
+}
+func (f *FakePreparedLease) FakeAborted() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.aborted }
+func (f *FakePreparedLease) FakeSetActivateError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.activateErr = err
+}
+func (f *FakePreparedLease) FakeSetAbortError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.abortErr = err
+}
+
+func (f *FakePreparedLease) Activate(_ context.Context, receipt world.SpawnReceipt) (world.ActiveLease, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.aborted || f.activated {
+		return nil, errors.New("worldtest: prepared lease가 이미 소비됨")
+	}
+	if err := world.ValidateSpawnReceipt(receipt, f.id, f.metadata); err != nil {
+		return nil, err
+	}
+	if f.activateErr != nil {
+		return nil, f.activateErr
+	}
+	f.activated = true
+	f.activations++
+	return f.active, nil
+}
+
+func (f *FakePreparedLease) Abort(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.activated {
+		return errors.New("worldtest: active lease는 Abort할 수 없음")
+	}
+	f.aborted = true
+	return f.abortErr
+}
+
+// FakeCloseStage identifies the four ordered phases of ActiveLease.Close.
 type FakeCloseStage string
 
 const (
@@ -77,17 +152,13 @@ const (
 )
 
 var fakeCloseStages = []FakeCloseStage{
-	FakeCloseProcessStop,
-	FakeCloseEffectsDrain,
-	FakeCloseEffectsAck,
-	FakeCloseCleanup,
+	FakeCloseProcessStop, FakeCloseEffectsDrain, FakeCloseEffectsAck, FakeCloseCleanup,
 }
 
-// FakeLease exposes fixed values and models only lifecycle ordering, explicit
-// effects, gates, and injected errors. It provides no isolation.
-type FakeLease struct {
-	endpoint world.Endpoint
-	metadata world.SpawnMetadata
+// FakeActiveLease exposes fixed descriptors and lifecycle controls only.
+type FakeActiveLease struct {
+	process  world.ProcessEndpoint
+	approval world.ApprovalEndpoint
 	upperDir string
 	effects  []world.EffectAttempt
 
@@ -100,30 +171,24 @@ type FakeLease struct {
 	closeErr     error
 }
 
-func NewFakeLease(
-	endpoint world.Endpoint,
-	metadata world.SpawnMetadata,
-	upperDir string,
-	effects []world.EffectAttempt,
-) *FakeLease {
+func NewFakeActiveLease(process world.ProcessEndpoint, approval world.ApprovalEndpoint, upperDir string, effects []world.EffectAttempt) *FakeActiveLease {
 	reached := map[FakeCloseStage]chan struct{}{}
 	for _, stage := range fakeCloseStages {
 		reached[stage] = make(chan struct{})
 	}
-	return &FakeLease{
-		endpoint: endpoint, metadata: metadata.Clone(), upperDir: upperDir,
-		effects:      append([]world.EffectAttempt(nil), effects...),
-		stageErrors:  map[FakeCloseStage]error{},
-		stageGates:   map[FakeCloseStage]<-chan struct{}{},
+	return &FakeActiveLease{
+		process: process, approval: approval, upperDir: upperDir,
+		effects:     append([]world.EffectAttempt(nil), effects...),
+		stageErrors: map[FakeCloseStage]error{}, stageGates: map[FakeCloseStage]<-chan struct{}{},
 		stageReached: reached,
 	}
 }
 
-func (f *FakeLease) AdapterEndpoint() world.Endpoint { return f.endpoint }
-func (f *FakeLease) Metadata() world.SpawnMetadata   { return f.metadata.Clone() }
-func (f *FakeLease) UpperDir() string                { return f.upperDir }
+func (f *FakeActiveLease) ProcessEndpoint() world.ProcessEndpoint   { return f.process }
+func (f *FakeActiveLease) ApprovalEndpoint() world.ApprovalEndpoint { return f.approval }
+func (f *FakeActiveLease) UpperDir() string                         { return f.upperDir }
 
-func (f *FakeLease) Effects() <-chan world.EffectAttempt {
+func (f *FakeActiveLease) Effects() <-chan world.EffectAttempt {
 	out := make(chan world.EffectAttempt, len(f.effects))
 	for _, effect := range f.effects {
 		out <- effect
@@ -132,10 +197,7 @@ func (f *FakeLease) Effects() <-chan world.EffectAttempt {
 	return out
 }
 
-// Close records and executes every lifecycle stage in contract order. Stage
-// errors are joined instead of short-circuiting cleanup. A stage gate can be
-// used to make ordering deterministic without sleeping.
-func (f *FakeLease) Close(ctx context.Context) error {
+func (f *FakeActiveLease) Close(ctx context.Context) error {
 	f.mu.Lock()
 	if f.closeDone != nil {
 		done := f.closeDone
@@ -174,7 +236,6 @@ func (f *FakeLease) Close(ctx context.Context) error {
 		}
 		joined = errors.Join(joined, stageErr)
 	}
-
 	f.mu.Lock()
 	f.closeErr = joined
 	close(done)
@@ -182,25 +243,22 @@ func (f *FakeLease) Close(ctx context.Context) error {
 	return joined
 }
 
-func (f *FakeLease) FakeSetCloseError(stage FakeCloseStage, err error) {
+func (f *FakeActiveLease) FakeSetCloseError(stage FakeCloseStage, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stageErrors[stage] = err
 }
-
-func (f *FakeLease) FakeSetCloseGate(stage FakeCloseStage, gate <-chan struct{}) {
+func (f *FakeActiveLease) FakeSetCloseGate(stage FakeCloseStage, gate <-chan struct{}) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stageGates[stage] = gate
 }
-
-func (f *FakeLease) FakeCloseOrder() []FakeCloseStage {
+func (f *FakeActiveLease) FakeCloseOrder() []FakeCloseStage {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]FakeCloseStage(nil), f.closeOrder...)
 }
-
-func (f *FakeLease) FakeStageReached(stage FakeCloseStage) <-chan struct{} {
+func (f *FakeActiveLease) FakeStageReached(stage FakeCloseStage) <-chan struct{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.stageReached[stage]

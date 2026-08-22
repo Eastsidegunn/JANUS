@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -59,17 +60,19 @@ func (execPodman) Run(ctx context.Context, args ...string) ([]byte, error) {
 // Config fixes the trusted proxy helper image independently of the untrusted
 // agent image. Both must be immutable digests with numeric non-root identities.
 type Config struct {
-	StateRoot          string
-	ProxyImageDigest   string
-	ProxyIdentity      world.AgentIdentity
-	AuditQueueCapacity int
-	ApprovalCapacity   int
+	StateRoot            string
+	ProxyImageRepository string
+	ProxyImageDigest     string
+	ProxyIdentity        world.AgentIdentity
+	AuditQueueCapacity   int
+	ApprovalCapacity     int
 }
 
 // Backend owns the rootless Podman runtime, per-spawn networks, the trusted
 // proxy sidecar, its host-only audit broker, and a host state root.
 type Backend struct {
 	stateRoot        string
+	proxyRepository  string
 	proxyDigest      string
 	proxyIdentity    world.AgentIdentity
 	auditCapacity    int
@@ -98,6 +101,9 @@ func newBackend(config Config, runner commandRunner, deviceID func(string) (uint
 	if !digestPattern.MatchString(config.ProxyImageDigest) {
 		return nil, fmt.Errorf("world/local: proxy image는 sha256 digest여야 함(tag 금지): %q", config.ProxyImageDigest)
 	}
+	if err := validateRepository(config.ProxyImageRepository); err != nil {
+		return nil, fmt.Errorf("world/local: proxy repository: %w", err)
+	}
 	if config.ProxyIdentity.UID == 0 || config.ProxyIdentity.GID == 0 {
 		return nil, fmt.Errorf("world/local: proxy image는 숫자 non-root UID/GID여야 함")
 	}
@@ -125,7 +131,8 @@ func newBackend(config Config, runner commandRunner, deviceID func(string) (uint
 		return nil, fmt.Errorf("world/local: state root mode는 0700이어야 함: %04o", info.Mode().Perm())
 	}
 	return &Backend{
-		stateRoot: resolved, proxyDigest: config.ProxyImageDigest, proxyIdentity: config.ProxyIdentity,
+		stateRoot: resolved, proxyRepository: config.ProxyImageRepository,
+		proxyDigest: config.ProxyImageDigest, proxyIdentity: config.ProxyIdentity,
 		auditCapacity: config.AuditQueueCapacity, approvalCapacity: config.ApprovalCapacity,
 		runner: runner, deviceID: deviceID,
 		newEffectBroker: brokerFactory,
@@ -151,14 +158,34 @@ type imageInspection struct {
 	} `json:"Config"`
 }
 
-// Open resolves and re-authorizes the workspace before creating any Podman
-// object. The image is accepted and executed only by immutable digest.
-func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.Lease, err error) {
+// preparedLease contains only preflight and overlay state. Prepare never
+// creates a Podman network/container or starts a broker.
+type preparedLease struct {
+	backend   *Backend
+	id        world.PreparedID
+	spec      world.SpawnSpec
+	agentRef  world.ImageReference
+	proxyRef  world.ImageReference
+	allowlist []string
+	layout    overlayLayout
+	metadata  world.SpawnMetadata
+
+	mu        sync.Mutex
+	activated bool
+	aborted   bool
+}
+
+var _ world.PreparedLease = (*preparedLease)(nil)
+
+// Prepare resolves and re-authorizes the workspace and images before creating
+// any Podman runtime object. Runtime execution always uses repository@digest;
+// durable metadata retains only the inspected digest.
+func (b *Backend) Prepare(ctx context.Context, spec world.SpawnSpec) (prepared world.PreparedLease, err error) {
 	if err := b.preflight(ctx); err != nil {
 		return nil, err
 	}
-	if !digestPattern.MatchString(spec.ImageDigest()) {
-		return nil, fmt.Errorf("world/local: image는 sha256 digest여야 함(tag 금지): %q", spec.ImageDigest())
+	if err := validateImageReference(spec.Image()); err != nil {
+		return nil, fmt.Errorf("world/local: agent image: %w", err)
 	}
 	if !tracePattern.MatchString(spec.TraceID()) || !spanPattern.MatchString(spec.SpanID()) {
 		return nil, fmt.Errorf("world/local: trace/span ID 형식 오류")
@@ -171,11 +198,11 @@ func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.
 		return nil, fmt.Errorf("world/local: egress policy: %w", err)
 	}
 
-	inspected, err := b.inspectImage(ctx, spec.ImageDigest(), spec.AgentIdentity())
+	agentRef, err := b.inspectImage(ctx, spec.Image(), spec.AgentIdentity())
 	if err != nil {
 		return nil, err
 	}
-	proxyDigest, err := b.inspectImage(ctx, b.proxyDigest, b.proxyIdentity)
+	proxyRef, err := b.inspectImage(ctx, world.NewImageReference(b.proxyRepository, b.proxyDigest), b.proxyIdentity)
 	if err != nil {
 		return nil, fmt.Errorf("world/local: proxy image: %w", err)
 	}
@@ -183,13 +210,63 @@ func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.
 	if err != nil {
 		return nil, err
 	}
-	keepState := false
-	defer func() {
-		if !keepState {
-			err = errors.Join(err, os.RemoveAll(layout.stateDir))
-		}
-	}()
+	id, err := world.NewPreparedID(spec.SpanID())
+	if err != nil {
+		return nil, errors.Join(err, os.RemoveAll(layout.stateDir))
+	}
+	metadata := world.SpawnMetadata{
+		Backend:   gen.SubagentSpawnPayloadWorldBackendLocalPodman,
+		ProfileID: spec.Policy().ProfileID(), ImageDigest: agentRef.Digest(),
+		Mounts: []gen.SubagentSpawnMount{{
+			SourcePath: layout.lower, TargetPath: gen.SubagentSpawnMountTargetPathWorkspace,
+			Mode: gen.SubagentSpawnMountModeOverlay, UpperRef: filepath.ToSlash(layout.upperRef),
+		}},
+	}
+	return &preparedLease{
+		backend: b, id: id, spec: spec, agentRef: agentRef, proxyRef: proxyRef,
+		allowlist: append([]string(nil), allowlist...), layout: layout, metadata: metadata,
+	}, nil
+}
 
+func (p *preparedLease) ID() world.PreparedID          { return p.id }
+func (p *preparedLease) Metadata() world.SpawnMetadata { return p.metadata.Clone() }
+func (p *preparedLease) UpperDir() string              { return p.layout.upper }
+
+func (p *preparedLease) Abort(ctx context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.activated {
+		return fmt.Errorf("world/local: active lease는 Abort할 수 없음")
+	}
+	if p.aborted {
+		return nil
+	}
+	p.aborted = true
+	cleanupCtx, cancel := cleanupContext(ctx)
+	defer cancel()
+	if err := os.RemoveAll(p.layout.stateDir); err != nil {
+		return fmt.Errorf("world/local: prepared state cleanup: %w", err)
+	}
+	return cleanupCtx.Err()
+}
+
+func (p *preparedLease) Activate(ctx context.Context, receipt world.SpawnReceipt) (world.ActiveLease, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.aborted || p.activated {
+		return nil, fmt.Errorf("world/local: prepared lease가 이미 소비됨")
+	}
+	if err := world.ValidateSpawnReceipt(receipt, p.id, p.metadata); err != nil {
+		return nil, err
+	}
+	// Receipt is consumed before the first runtime side effect. A partial
+	// activation cannot be retried against an ambiguous resource set.
+	p.activated = true
+	return p.backend.activate(ctx, p)
+}
+
+func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened world.ActiveLease, err error) {
+	spec, layout := prepared.spec, prepared.layout
 	broker, err := b.newEffectBroker(layout.stateDir, spec.SpanID(), b.auditCapacity)
 	if err != nil {
 		return nil, err
@@ -200,11 +277,13 @@ func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.
 		return nil, err
 	}
 	resources := runtimeResources{runner: b.runner, broker: broker, approval: approval}
+	keepRuntime := false
 	defer func() {
-		if !keepState {
+		if !keepRuntime {
 			cleanupCtx, cancel := cleanupContext(ctx)
 			err = errors.Join(err, resources.cleanupOpen(cleanupCtx))
 			cancel()
+			err = errors.Join(err, os.RemoveAll(layout.stateDir))
 		}
 	}()
 
@@ -221,7 +300,7 @@ func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.
 	resources.networks = append(resources.networks, externalNetwork)
 
 	proxyCIDFile := filepath.Join(layout.stateDir, "proxy.cid")
-	proxyArgs := b.proxyCreateArgs(allowlist, proxyDigest, broker.SocketDir(), proxyCIDFile, proxyName, internalNetwork, externalNetwork)
+	proxyArgs := b.proxyCreateArgs(prepared.allowlist, prepared.proxyRef.String(), broker.SocketDir(), proxyCIDFile, proxyName, internalNetwork, externalNetwork)
 	proxyID, err := b.createContainer(ctx, proxyArgs, proxyCIDFile)
 	if err != nil {
 		return nil, fmt.Errorf("world/local: proxy container create: %w", err)
@@ -257,7 +336,7 @@ func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.
 		"--env", "HX_APPROVAL_SOCKET=" + approvalRelayPath,
 		"--volume", approval.RelayDir() + ":" + approvalRelayMount + ":ro",
 		"--volume", volume,
-		inspected,
+		prepared.agentRef.String(),
 	}
 	args = append(args, spec.AgentArgv()...)
 	containerID, err := b.createContainer(ctx, args, cidFile)
@@ -265,29 +344,22 @@ func (b *Backend) Open(ctx context.Context, spec world.SpawnSpec) (opened world.
 		return nil, fmt.Errorf("world/local: agent container create: %w", err)
 	}
 	resources.agentID = containerID
-	if _, err := b.runner.Run(ctx, "start", containerID); err != nil {
-		return nil, fmt.Errorf("world/local: agent container start: %w", err)
+	process, err := startProcessBroker(ctx, spec.SpanID(), prepared.id.String(), containerID, b.runner)
+	if err != nil {
+		return nil, err
 	}
-
-	keepState = true
+	resources.process = process
+	keepRuntime = true
 	return &lease{
 		runner: b.runner, containerID: containerID, proxyID: proxyID,
 		internalNetwork: internalNetwork, externalNetwork: externalNetwork,
 		stateDir: layout.stateDir, upperDir: layout.upper, workDir: layout.work,
 		cidFile: cidFile, proxyCIDFile: proxyCIDFile,
 		broker: broker, effects: broker.Effects(), effectsDone: broker.Done(),
-		approval: approval, adapterEndpoint: approval.Endpoint(),
+		approval: approval, process: process,
+		processEndpoint: process.Endpoint(), approvalEndpoint: approval.Endpoint(),
 		closeToken: makeCloseToken(),
-		metadata: world.SpawnMetadata{
-			Backend:   gen.SubagentSpawnPayloadWorldBackendLocalPodman,
-			ProfileID: spec.Policy().ProfileID(), ImageDigest: inspected,
-			Mounts: []gen.SubagentSpawnMount{{
-				SourcePath: layout.lower,
-				TargetPath: gen.SubagentSpawnMountTargetPathWorkspace,
-				Mode:       gen.SubagentSpawnMountModeOverlay,
-				UpperRef:   filepath.ToSlash(layout.upperRef),
-			}},
-		},
+		metadata:   prepared.metadata.Clone(),
 	}, nil
 }
 
@@ -341,6 +413,7 @@ type runtimeResources struct {
 	runner   commandRunner
 	broker   effectBroker
 	approval *approvalBroker
+	process  *processBroker
 	agentID  string
 	proxyID  string
 	networks []string
@@ -348,6 +421,9 @@ type runtimeResources struct {
 
 func (r *runtimeResources) cleanupOpen(ctx context.Context) error {
 	var joined error
+	if r.process != nil {
+		joined = errors.Join(joined, r.process.Shutdown(ctx))
+	}
 	if r.approval != nil {
 		joined = errors.Join(joined, r.approval.Cleanup())
 	}
@@ -387,31 +463,55 @@ func (b *Backend) preflight(ctx context.Context) error {
 	return nil
 }
 
-func (b *Backend) inspectImage(ctx context.Context, requested string, identity world.AgentIdentity) (string, error) {
-	out, err := b.runner.Run(ctx, "image", "inspect", requested)
+func (b *Backend) inspectImage(ctx context.Context, requested world.ImageReference, identity world.AgentIdentity) (world.ImageReference, error) {
+	if err := validateImageReference(requested); err != nil {
+		return world.ImageReference{}, err
+	}
+	out, err := b.runner.Run(ctx, "image", "inspect", requested.String())
 	if err != nil {
-		return "", fmt.Errorf("world/local: image inspect: %w", err)
+		return world.ImageReference{}, fmt.Errorf("world/local: image inspect: %w", err)
 	}
 	var images []imageInspection
 	if err := json.Unmarshal(out, &images); err != nil {
-		return "", fmt.Errorf("world/local: image inspect JSON 형식 오류: %w", err)
+		return world.ImageReference{}, fmt.Errorf("world/local: image inspect JSON 형식 오류: %w", err)
 	}
 	if len(images) != 1 {
-		return "", fmt.Errorf("world/local: image inspect 결과가 1개가 아님: %d", len(images))
+		return world.ImageReference{}, fmt.Errorf("world/local: image inspect 결과가 1개가 아님: %d", len(images))
 	}
 	got := images[0].Digest
-	if !digestPattern.MatchString(got) || got != requested {
-		return "", fmt.Errorf("world/local: image digest 불일치 (요청=%q inspect=%q)", requested, got)
+	if !digestPattern.MatchString(got) || got != requested.Digest() {
+		return world.ImageReference{}, fmt.Errorf("world/local: image digest 불일치 (요청=%q inspect=%q)", requested.Digest(), got)
 	}
 	declared, err := parseImageIdentity(images[0].Config.User)
 	if err != nil {
-		return "", err
+		return world.ImageReference{}, err
 	}
 	if declared != identity {
-		return "", fmt.Errorf("world/local: image UID/GID와 SpawnSpec 불일치 (image=%d:%d spec=%d:%d)",
+		return world.ImageReference{}, fmt.Errorf("world/local: image UID/GID와 SpawnSpec 불일치 (image=%d:%d spec=%d:%d)",
 			declared.UID, declared.GID, identity.UID, identity.GID)
 	}
-	return got, nil
+	return world.NewImageReference(requested.Repository(), got), nil
+}
+
+func validateImageReference(ref world.ImageReference) error {
+	if err := validateRepository(ref.Repository()); err != nil {
+		return err
+	}
+	if !digestPattern.MatchString(ref.Digest()) {
+		return fmt.Errorf("digest는 sha256 형식이어야 함(tag 금지): %q", ref.Digest())
+	}
+	return nil
+}
+
+func validateRepository(repository string) error {
+	if repository == "" || strings.ContainsAny(repository, "@ \t\n\r") {
+		return fmt.Errorf("repository 형식 오류: %q", repository)
+	}
+	last := repository[strings.LastIndex(repository, "/")+1:]
+	if last == "" || strings.Contains(last, ":") {
+		return fmt.Errorf("repository에는 tag를 포함할 수 없음: %q", repository)
+	}
+	return nil
 }
 
 func parseImageIdentity(value string) (world.AgentIdentity, error) {
@@ -544,22 +644,24 @@ func firstContainerID(out []byte) string {
 }
 
 type lease struct {
-	runner          commandRunner
-	containerID     string
-	proxyID         string
-	internalNetwork string
-	externalNetwork string
-	stateDir        string
-	upperDir        string
-	workDir         string
-	cidFile         string
-	proxyCIDFile    string
-	metadata        world.SpawnMetadata
-	broker          effectBroker
-	effects         <-chan world.EffectAttempt
-	effectsDone     <-chan struct{}
-	approval        *approvalBroker
-	adapterEndpoint world.Endpoint
+	runner           commandRunner
+	containerID      string
+	proxyID          string
+	internalNetwork  string
+	externalNetwork  string
+	stateDir         string
+	upperDir         string
+	workDir          string
+	cidFile          string
+	proxyCIDFile     string
+	metadata         world.SpawnMetadata
+	broker           effectBroker
+	effects          <-chan world.EffectAttempt
+	effectsDone      <-chan struct{}
+	approval         *approvalBroker
+	process          *processBroker
+	processEndpoint  world.ProcessEndpoint
+	approvalEndpoint world.ApprovalEndpoint
 
 	closeToken       chan struct{}
 	processesStopped bool
@@ -567,10 +669,10 @@ type lease struct {
 	closeErr         error
 }
 
-var _ world.Lease = (*lease)(nil)
+var _ world.ActiveLease = (*lease)(nil)
 
-func (l *lease) AdapterEndpoint() world.Endpoint { return l.adapterEndpoint }
-func (l *lease) Metadata() world.SpawnMetadata   { return l.metadata.Clone() }
+func (l *lease) ProcessEndpoint() world.ProcessEndpoint   { return l.processEndpoint }
+func (l *lease) ApprovalEndpoint() world.ApprovalEndpoint { return l.approvalEndpoint }
 
 // UpperDir may contain subordinate-UID-owned character-device whiteouts.
 // T11 must classify them with lstat(mode+rdev), never with an owner filter.
@@ -592,7 +694,7 @@ func (l *lease) Close(ctx context.Context) error {
 	// Quiesce approval before stopping the agent so every pending hook receives
 	// a durable forced deny through the host adapter. This is control-plane
 	// quiescing, not mount/network cleanup; container stop still precedes effect
-	// drain and resource removal as required by world.Lease.
+	// drain and resource removal as required by world.ActiveLease.
 	if l.approval != nil {
 		if err := l.approval.Shutdown(ctx); err != nil {
 			joined = errors.Join(joined, fmt.Errorf("world/local: approval drain: %w", err))
@@ -602,9 +704,12 @@ func (l *lease) Close(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(joined, err)
 		}
-		for _, process := range []struct {
-			name, id string
-		}{{"agent", l.containerID}, {"proxy", l.proxyID}} {
+		if l.process != nil {
+			if err := l.process.Shutdown(ctx); err != nil {
+				joined = errors.Join(joined, fmt.Errorf("world/local: agent process broker: %w", err))
+			}
+		}
+		for _, process := range []struct{ name, id string }{{"proxy", l.proxyID}} {
 			if _, err := l.runner.Run(ctx, "stop", "--time", "10", process.id); err != nil {
 				joined = errors.Join(joined, fmt.Errorf("world/local: %s container stop: %w", process.name, err))
 			}

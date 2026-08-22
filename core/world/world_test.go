@@ -2,13 +2,16 @@ package world_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
+	"github.com/Eastsidegunn/JANUS/core/logd"
 	"github.com/Eastsidegunn/JANUS/core/policy"
 	"github.com/Eastsidegunn/JANUS/core/world"
 	"github.com/Eastsidegunn/JANUS/core/world/worldtest"
@@ -40,7 +43,8 @@ func TestEffectivePolicyAndSpawnSpecAreSnapshots(t *testing.T) {
 
 	argv := []string{"agent", "--json"}
 	credentials := []world.CredentialHandle{{ID: "cred-1", Scope: "repo:read", ExpiresAtUnixMs: 1000}}
-	spec := world.NewSpawnSpec(effective, "sha256:"+strings.Repeat("a", 64), argv, 0, "trace", "span", world.AgentIdentity{UID: 1000, GID: 1000}, credentials)
+	image := world.NewImageReference("localhost/hx-agent", "sha256:"+strings.Repeat("a", 64))
+	spec := world.NewSpawnSpec(effective, image, argv, 0, "trace", "span", world.AgentIdentity{UID: 1000, GID: 1000}, credentials)
 	argv[0], credentials[0].Scope = "shell", "*"
 	if got := spec.AgentArgv(); got[0] != "agent" {
 		t.Fatalf("agent argv가 caller 변형을 공유함: %v", got)
@@ -59,7 +63,9 @@ func TestUpperDirExistsOnlyOnHostLeaseBoundary(t *testing.T) {
 	for _, typ := range []reflect.Type{
 		reflect.TypeOf(world.SpawnSpec{}),
 		reflect.TypeOf(world.SpawnMetadata{}),
-		reflect.TypeOf(world.Endpoint{}),
+		reflect.TypeOf(world.ProcessEndpoint{}),
+		reflect.TypeOf(world.ApprovalEndpoint{}),
+		reflect.TypeOf(world.AgentDescriptor{}),
 	} {
 		for i := 0; i < typ.NumField(); i++ {
 			if strings.Contains(strings.ToLower(typ.Field(i).Name), "upperdir") {
@@ -67,55 +73,64 @@ func TestUpperDirExistsOnlyOnHostLeaseBoundary(t *testing.T) {
 			}
 		}
 	}
-	leaseType := reflect.TypeOf((*world.Lease)(nil)).Elem()
-	if _, ok := leaseType.MethodByName("UpperDir"); !ok {
-		t.Fatal("Lease에 host-only UpperDir 경계가 없음")
+	for _, leaseType := range []reflect.Type{
+		reflect.TypeOf((*world.PreparedLease)(nil)).Elem(), reflect.TypeOf((*world.ActiveLease)(nil)).Elem(),
+	} {
+		if _, ok := leaseType.MethodByName("UpperDir"); !ok {
+			t.Fatalf("%s에 host-only UpperDir 경계가 없음", leaseType)
+		}
 	}
 }
 
-func TestFakeBackendRecordsOpenAndPropagatesErrors(t *testing.T) {
-	lease := worldtest.NewFakeLease(world.Endpoint{}, world.SpawnMetadata{}, "/host/upper", nil)
-	backend := worldtest.NewFakeBackend(lease)
-	spec := world.NewSpawnSpec(world.EffectivePolicy{}, "digest", []string{"agent"}, 1, "trace", "span", world.AgentIdentity{}, nil)
-	got, err := backend.Open(context.Background(), spec)
-	if err != nil || got != lease {
-		t.Fatalf("Open = (%v, %v), FakeLease 기대", got, err)
+func TestProcessAndApprovalEndpointsAreNominalAndDescriptorIsHostOnly(t *testing.T) {
+	processType := reflect.TypeOf(world.ProcessEndpoint{})
+	approvalType := reflect.TypeOf(world.ApprovalEndpoint{})
+	if processType == approvalType || processType.ConvertibleTo(approvalType) || approvalType.ConvertibleTo(processType) {
+		t.Fatal("process/approval endpoint가 상호 변환 가능한 generic capability임")
 	}
-	if opens := backend.FakeOpenedSpecs(); len(opens) != 1 || opens[0].ImageDigest() != "digest" {
-		t.Fatalf("Open 호출 기록 이상: %+v", opens)
+	descriptorType := reflect.TypeOf(world.AgentDescriptor{})
+	for i := 0; i < descriptorType.NumField(); i++ {
+		if descriptorType.Field(i).IsExported() {
+			t.Fatalf("AgentDescriptor가 raw endpoint field를 노출함: %s", descriptorType.Field(i).Name)
+		}
+	}
+}
+
+func TestFakeBackendRecordsPrepareAndPropagatesErrors(t *testing.T) {
+	prepared := worldtest.NewFakePreparedLease(world.SpawnMetadata{}, "/host/upper", nil)
+	backend := worldtest.NewFakeBackend(prepared)
+	spec := world.NewSpawnSpec(world.EffectivePolicy{}, world.NewImageReference("repo", "digest"), []string{"agent"}, 1, "trace", "span", world.AgentIdentity{}, nil)
+	got, err := backend.Prepare(context.Background(), spec)
+	if err != nil || got != prepared {
+		t.Fatalf("Prepare = (%v, %v), FakePreparedLease 기대", got, err)
+	}
+	if prepares := backend.FakePreparedSpecs(); len(prepares) != 1 || prepares[0].Image().Digest() != "digest" {
+		t.Fatalf("Prepare 호출 기록 이상: %+v", prepares)
 	}
 
-	wantErr := errors.New("fake open")
-	backend.FakeSetOpenError(wantErr)
-	if _, err := backend.Open(context.Background(), spec); !errors.Is(err, wantErr) {
-		t.Fatalf("injected Open 오류 미전파: %v", err)
+	wantErr := errors.New("fake prepare")
+	backend.FakeSetPrepareError(wantErr)
+	if _, err := backend.Prepare(context.Background(), spec); !errors.Is(err, wantErr) {
+		t.Fatalf("injected Prepare 오류 미전파: %v", err)
 	}
 
 	gate := make(chan struct{})
-	backend.FakeSetOpenError(nil)
-	backend.FakeSetOpenGate(gate)
+	backend.FakeSetPrepareError(nil)
+	backend.FakeSetPrepareGate(gate)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := backend.Open(ctx, spec); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Open gate가 context 취소를 전파하지 않음: %v", err)
+	if _, err := backend.Prepare(ctx, spec); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Prepare gate가 context 취소를 전파하지 않음: %v", err)
 	}
 }
 
-func TestFakeLeaseLifecycleOrderEffectsAndErrors(t *testing.T) {
-	endpoint := world.NewEndpoint("unix", "/host/broker.sock", "one-shot")
-	metadata := world.SpawnMetadata{
-		Backend: gen.SubagentSpawnPayloadWorldBackendLocalPodman,
-		Mounts:  []gen.SubagentSpawnMount{{UpperRef: "state/upper"}},
-	}
+func TestFakeActiveLeaseLifecycleOrderEffectsAndErrors(t *testing.T) {
+	process := world.NewProcessEndpoint("unix", "/host/process.sock", "lease", "control-cap", "output-cap")
+	approval := world.NewApprovalEndpoint("unix", "/host/approval.sock", "approval-cap")
 	effects := []world.EffectAttempt{{ID: "e1", Kind: "egress", Target: "denied.example"}}
-	lease := worldtest.NewFakeLease(endpoint, metadata, "/host/state/upper", effects)
+	lease := worldtest.NewFakeActiveLease(process, approval, "/host/state/upper", effects)
 
 	// Returned values and effect streams cannot mutate the fake's configured state.
-	gotMetadata := lease.Metadata()
-	gotMetadata.Mounts[0].UpperRef = "changed"
-	if lease.Metadata().Mounts[0].UpperRef != "state/upper" {
-		t.Fatal("Metadata mount slice가 alias됨")
-	}
 	var gotEffects []world.EffectAttempt
 	for effect := range lease.Effects() {
 		gotEffects = append(gotEffects, effect)
@@ -123,8 +138,9 @@ func TestFakeLeaseLifecycleOrderEffectsAndErrors(t *testing.T) {
 	if !reflect.DeepEqual(gotEffects, effects) {
 		t.Fatalf("effect stream = %+v, want %+v", gotEffects, effects)
 	}
-	if lease.AdapterEndpoint().Capability() != "one-shot" || lease.UpperDir() != "/host/state/upper" {
-		t.Fatal("FakeLease 고정 descriptor 반환 이상")
+	if lease.ProcessEndpoint().ControlCapability() != "control-cap" || lease.ProcessEndpoint().OutputCapability() != "output-cap" ||
+		lease.ApprovalEndpoint().Capability() != "approval-cap" || lease.UpperDir() != "/host/state/upper" {
+		t.Fatal("FakeActiveLease 고정 descriptor 반환 이상")
 	}
 
 	stopErr := errors.New("stop")
@@ -171,6 +187,102 @@ func TestFakeLeaseLifecycleOrderEffectsAndErrors(t *testing.T) {
 	if got := lease.FakeCloseOrder(); !reflect.DeepEqual(got, wantOrder) {
 		t.Fatalf("두 번째 Close가 lifecycle을 반복함: %v", got)
 	}
+}
+
+func TestCommitSpawnMintsLeaseBoundReceiptOnlyAfterDurableAck(t *testing.T) {
+	metadata := world.SpawnMetadata{
+		Backend:   gen.SubagentSpawnPayloadWorldBackendLocalPodman,
+		ProfileID: "profile", ImageDigest: "sha256:" + strings.Repeat("a", 64),
+		Mounts: []gen.SubagentSpawnMount{{SourcePath: "/workspace", TargetPath: gen.SubagentSpawnMountTargetPathWorkspace, Mode: gen.SubagentSpawnMountModeOverlay, UpperRef: "world/t/s/overlay/upper"}},
+	}
+	active := worldtest.NewFakeActiveLease(world.ProcessEndpoint{}, world.ApprovalEndpoint{}, "/upper", nil)
+	prepared := worldtest.NewFakePreparedLease(metadata, "/upper", active)
+	other := worldtest.NewFakePreparedLease(metadata, "/upper2", nil)
+	store := &memoryStore{}
+	writer, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	payload, _ := json.Marshal(gen.SubagentSpawnPayload{
+		Adapter: "world", Instruction: "test", Depth: 0, Budget: gen.SpawnBudget{Tokens: 1, TimeMs: 1, MaxDepth: 1},
+		WorldBackend: metadata.Backend, ProfileID: &metadata.ProfileID, ImageDigest: &metadata.ImageDigest, Mounts: metadata.Mounts,
+	})
+	parent := "1111111111111111"
+	record := world.SpawnRecord(gen.EventRecord{
+		TraceID: strings.Repeat("1", 32), SpanID: strings.Repeat("2", 16), ParentSpanID: &parent,
+		Ts: 1, Kind: gen.KindSubagentSpawn, Actor: "parent", Payload: payload,
+	})
+	receipt, err := world.CommitSpawn(context.Background(), writer, prepared, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.records()) != 1 {
+		t.Fatalf("durable records=%d, want 1", len(store.records()))
+	}
+	if _, err := other.Activate(context.Background(), receipt); err == nil || other.FakeActivationCount() != 0 {
+		t.Fatalf("cross-lease receipt가 부작용 없이 거부되지 않음: err=%v count=%d", err, other.FakeActivationCount())
+	}
+	got, err := prepared.Activate(context.Background(), receipt)
+	if err != nil || got != active {
+		t.Fatalf("Activate=(%v,%v)", got, err)
+	}
+	if _, err := prepared.Activate(context.Background(), receipt); err == nil || prepared.FakeActivationCount() != 1 {
+		t.Fatalf("reused receipt가 거부되지 않음: err=%v count=%d", err, prepared.FakeActivationCount())
+	}
+}
+
+func TestCommitSpawnRejectsMismatchBeforeWriter(t *testing.T) {
+	metadata := world.SpawnMetadata{Backend: gen.SubagentSpawnPayloadWorldBackendLocalPodman, ProfileID: "p", ImageDigest: "sha256:" + strings.Repeat("a", 64)}
+	prepared := worldtest.NewFakePreparedLease(metadata, "/upper", nil)
+	store := &memoryStore{}
+	writer, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	wrong := "sha256:" + strings.Repeat("b", 64)
+	p := "p"
+	payload, _ := json.Marshal(gen.SubagentSpawnPayload{Adapter: "world", Instruction: "x", Budget: gen.SpawnBudget{}, WorldBackend: metadata.Backend, ProfileID: &p, ImageDigest: &wrong})
+	parent := "1111111111111111"
+	_, err = world.CommitSpawn(context.Background(), writer, prepared, world.SpawnRecord(gen.EventRecord{TraceID: strings.Repeat("1", 32), SpanID: strings.Repeat("2", 16), ParentSpanID: &parent, Ts: 1, Kind: gen.KindSubagentSpawn, Actor: "parent", Payload: payload}))
+	if err == nil || len(store.records()) != 0 {
+		t.Fatalf("metadata mismatch가 writer 전 거부되지 않음: err=%v records=%d", err, len(store.records()))
+	}
+}
+
+type memoryStore struct {
+	mu   sync.Mutex
+	recs []gen.EventRecord
+}
+
+func (s *memoryStore) LastSeq(context.Context) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return int64(len(s.recs)), nil
+}
+func (s *memoryStore) ReadFrom(context.Context, int64) ([]gen.EventRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]gen.EventRecord(nil), s.recs...), nil
+}
+func (s *memoryStore) Append(_ context.Context, rec gen.EventRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recs = append(s.recs, rec)
+	return nil
+}
+func (s *memoryStore) AppendBatch(_ context.Context, recs []gen.EventRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recs = append(s.recs, recs...)
+	return nil
+}
+func (s *memoryStore) Close() error { return nil }
+func (s *memoryStore) records() []gen.EventRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]gen.EventRecord(nil), s.recs...)
 }
 
 func waitSignal(t *testing.T, ch <-chan struct{}, what string) {

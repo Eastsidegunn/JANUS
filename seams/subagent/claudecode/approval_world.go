@@ -10,19 +10,19 @@ import (
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/core/world"
-	"github.com/Eastsidegunn/JANUS/core/world/brokerwire"
+	"github.com/Eastsidegunn/JANUS/core/world/approvalwire"
 )
 
 const worldApprovalWorkers = 4
 
-type worldApprovalRequest = brokerwire.Request
-type worldApprovalResponse = brokerwire.Response
-type worldApprovalHook = brokerwire.Hook
-type worldApprovalDecision = brokerwire.Decision
+type worldApprovalRequest = approvalwire.Request
+type worldApprovalResponse = approvalwire.Response
+type worldApprovalHook = approvalwire.Hook
+type worldApprovalDecision = approvalwire.Decision
 
 type worldApprovalClient struct {
 	state    *approvalServer
-	endpoint world.Endpoint
+	endpoint world.ApprovalEndpoint
 	spanID   string
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -34,8 +34,8 @@ type worldApprovalClient struct {
 }
 
 func newApprovalTransport(w *wireWriter, cfg Config) (approvalTransport, error) {
-	endpoint := cfg.WorldEndpoint
-	if endpoint == (world.Endpoint{}) {
+	endpoint := cfg.ApprovalEndpoint
+	if endpoint == (world.ApprovalEndpoint{}) {
 		return newApprovalServer(w)
 	}
 	if endpoint.Network() != "unix" || endpoint.Address() == "" || endpoint.Capability() == "" || cfg.WorldSpanID == "" {
@@ -69,8 +69,8 @@ func (c *worldApprovalClient) markReady() { c.state.markReady() }
 func (c *worldApprovalClient) environment(base []string) []string {
 	out := append([]string(nil), base...)
 	for _, key := range []string{
-		worldBrokerNetworkEnv, worldBrokerAddressEnv, worldBrokerCapabilityEnv,
-		worldBrokerSpanEnv, approvalSocketEnv,
+		worldApprovalNetworkEnv, worldApprovalAddressEnv, worldApprovalCapabilityEnv,
+		worldApprovalSpanEnv, approvalSocketEnv,
 	} {
 		out = removeEnv(out, key)
 	}
@@ -84,7 +84,7 @@ func (c *worldApprovalClient) registerIntent(intent gen.AgentToolCallPayload) er
 	}
 	defer c.closeConn(conn)
 	if err := json.NewEncoder(conn).Encode(worldApprovalRequest{
-		Operation: brokerwire.OperationIntent, Capability: c.endpoint.Capability(), SpanID: c.spanID,
+		Operation: approvalwire.OperationIntent, Capability: c.endpoint.Capability(), SpanID: c.spanID,
 		CallID: intent.CallID, Name: intent.Name, Args: intent.Args,
 	}); err != nil {
 		return err
@@ -143,7 +143,7 @@ func (c *worldApprovalClient) pollOne() error {
 	defer c.closeConn(conn)
 	encoder, decoder := json.NewEncoder(conn), json.NewDecoder(conn)
 	if err := encoder.Encode(worldApprovalRequest{
-		Operation: brokerwire.OperationNext, Capability: c.endpoint.Capability(), SpanID: c.spanID,
+		Operation: approvalwire.OperationNext, Capability: c.endpoint.Capability(), SpanID: c.spanID,
 	}); err != nil {
 		return err
 	}

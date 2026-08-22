@@ -1,9 +1,7 @@
-// Package brokerwire owns the backend-neutral, host-only world broker wire.
-// Both the adapter seam and a world backend depend inward on these exact
-// message types, so no horizontal seam import or duplicated JSON contract is
-// needed. This is not the public §5.2 adapter protocol and is never exposed to
-// an agent container.
-package brokerwire
+// Package approvalwire owns the backend-neutral, host-only approval broker
+// wire. It is separate from processwire and is never exposed directly to an
+// agent container.
+package approvalwire
 
 import "encoding/json"
 

@@ -147,6 +147,19 @@ func TestCheckWorldtestProductionImport(t *testing.T) {
 	})
 }
 
+// Process/approval endpoint implementations remain inside the world seam.
+// Another seam may consume only the core-owned descriptors/wire; the surface
+// is the sole cross-seam assembly point (T10 Q5).
+func TestWorldEndpointImplementationImportDirection(t *testing.T) {
+	pkgs := []Pkg{
+		{ImportPath: mod + "/seams/subagent", Imports: []string{mod + "/seams/world/local"}},
+		{ImportPath: mod + "/surfaces/hx", Imports: []string{mod + "/seams/world/local"}},
+	}
+	assertViolations(t, Check(mod, pkgs), []string{
+		"seams/subagent → seams/world/local",
+	})
+}
+
 func TestCheckClean(t *testing.T) {
 	pkgs := []Pkg{
 		{ImportPath: mod + "/core", Imports: []string{mod + "/contracts", "os"}},
