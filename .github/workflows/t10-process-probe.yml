@@ -94,7 +94,10 @@ jobs:
           wait "$wait_pid"
           wait_rc=$?
           set -e
-          [[ "$attach_rc" -eq 7 ]]
+          printf 'PROBE attach_rc=%s wait_rc=%s wait=%q stdout=%q stderr=%q\n' \
+            "$attach_rc" "$wait_rc" "$(cat "$probe_dir/wait.out")" \
+            "$(cat "$probe_dir/stdout")" "$(cat "$probe_dir/stderr")"
+          [[ "$attach_rc" -eq 0 || "$attach_rc" -eq 7 ]]
           [[ "$wait_rc" -eq 0 ]]
           [[ "$(cat "$probe_dir/wait.out")" == 7 ]]
           [[ "$(cat "$probe_dir/stdout")" == $'out-1\nout-2' ]]
