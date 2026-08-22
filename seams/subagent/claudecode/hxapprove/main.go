@@ -9,25 +9,18 @@ import (
 	"io"
 	"net"
 	"os"
+
+	"github.com/Eastsidegunn/JANUS/core/world/approvalrelaywire"
 )
 
 const (
 	approvalSocketEnv = "HX_APPROVAL_SOCKET"
-	maxHookBytes      = 4 << 20
+	maxHookBytes      = approvalrelaywire.MaxLineBytes
 )
 
-type socketRequest struct {
-	Raw []byte `json:"raw"`
-}
-
-type socketDecision struct {
-	Decision string  `json:"decision"`
-	Reason   *string `json:"reason,omitempty"`
-}
-
-type socketAck struct {
-	Delivered bool `json:"delivered"`
-}
+type socketRequest = approvalrelaywire.Request
+type socketDecision = approvalrelaywire.Decision
+type socketAck = approvalrelaywire.Ack
 
 type hookOutput struct {
 	HookSpecificOutput hookSpecificOutput `json:"hookSpecificOutput"`
