@@ -25,20 +25,24 @@ jobs:
           lower=$root/lower
           upper=$root/state/overlay/upper
           work=$root/state/overlay/work
+          host_upper=$root/state/host-overlay/upper
+          host_work=$root/state/host-overlay/work
           outside=$root/outside
-          mkdir -p "$lower/nested" "$upper" "$work" "$outside"
+          mkdir -p "$lower/nested" "$upper" "$work" "$host_upper" "$host_work" "$outside"
           printf 'keep\n' > "$outside/sentinel"
           printf 'delete\n' > "$lower/nested/delete-me.txt"
           printf 'modify\n' > "$lower/modify.txt"
 
           image=docker.io/library/alpine:3.22
           podman pull "$image"
+          cid2=
           cid=$(podman create --pull=never --userns=keep-id:uid=1000,gid=1000 --user 1000:1000 \
             -v "$lower:/workspace:O,upperdir=$upper,workdir=$work" "$image" \
             sh -c 'rm /workspace/nested/delete-me.txt; printf changed > /workspace/modify.txt; printf created > /workspace/created.txt')
           cleanup() {
             podman rm --force "$cid" >/dev/null 2>&1 || true
-            podman unshare rm -rf -- "$work" "$upper" >/dev/null 2>&1 || true
+            if test -n "$cid2"; then podman rm --force "$cid2" >/dev/null 2>&1 || true; fi
+            podman unshare rm -rf -- "$work" "$upper" "$host_work" "$host_upper" >/dev/null 2>&1 || true
             rm -rf -- "$root" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
@@ -73,12 +77,6 @@ jobs:
           set -e
 
           set +e
-          rm -rf -- "$upper"
-          host_upper_rc=$?
-          set -e
-          test "$host_upper_rc" -ne 0
-          test -e "$upper"
-          set +e
           podman unshare sh -c '
             stat -c "before upper cleanup: %n type=%F uid=%u gid=%g mode=%a rdev=%t:%T" \
               "$1" "$1/nested" "$1/nested/delete-me.txt"
@@ -90,6 +88,26 @@ jobs:
           ' probe "$upper"
           unshare_upper_rc=$?
           set -e
+
+          # A second real overlay keeps the host-delete observation independent
+          # from the user-namespace cleanup assertion above.
+          cid2=$(podman create --pull=never --userns=keep-id:uid=1000,gid=1000 --user 1000:1000 \
+            -v "$lower:/workspace:O,upperdir=$host_upper,workdir=$host_work" "$image" \
+            sh -c 'rm /workspace/nested/delete-me.txt; printf changed > /workspace/modify.txt; printf created > /workspace/created.txt')
+          podman start --attach "$cid2"
+          podman wait "$cid2" >/dev/null
+          podman rm "$cid2" >/dev/null
+          cid2=
+          stat -c 'host-delete whiteout: %n type=%F uid=%u gid=%g mode=%a rdev=%t:%T' \
+            "$host_upper/nested/delete-me.txt"
+          set +e
+          rm -rf -- "$host_upper"
+          host_upper_rc=$?
+          set -e
+          test "$host_upper_rc" -eq 0
+          test ! -e "$host_upper"
+          podman unshare rm -rf -- "$host_work"
+          test ! -e "$host_work"
 
           test "$(cat "$outside/sentinel")" = keep
           printf 'host_work_rc=%s host_upper_rc=%s unshare_work_rc=%s unshare_upper_rc=%s outside=unchanged\n' \
