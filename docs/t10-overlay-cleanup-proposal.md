@@ -6,10 +6,18 @@
 
 ## 1. 관측과 선택
 
-rootless native overlay는 `work/work`와 일부 upper entry를 subordinate UID로
-만든다. host runner는 이들을 `lstat`할 수 있어 수집·whiteout 판별은 가능하지만,
-디렉터리를 재귀 순회하며 삭제할 권한은 없다. 따라서 host `os.RemoveAll`은
-`EPERM`이고, 소유자 필터나 실패 무시는 각각 삭제 유실과 자원 누수를 만든다.
+rootless native overlay는 `work/work`와 whiteout을 subordinate UID로 만든다.
+실물 probe `32590510041`에서 `work/work`는 host runner가 재귀 삭제할 수 없어
+`EPERM`이었지만, `podman unshare` 안에서는 host UID `165536`이 namespace UID 1로
+매핑되고 삭제가 성공했다.
+
+upper에는 중요한 비대칭이 있었다. whiteout은 실제로 subordinate UID의 mode 000
+character device였지만 그 부모 디렉터리는 runner 소유였으므로 host `rm -rf`도
+성공했다. unlink 권한은 entry 소유자가 아니라 부모 디렉터리 권한으로 결정된다.
+따라서 “subuid whiteout이면 upper 삭제에도 반드시 user namespace가 필요하다”는
+가정은 실측으로 반증됐다. 다만 수집은 여전히 owner 필터 없이 `lstat(mode+rdev)`로
+해야 하며, 정리 구현은 future upper 구조에도 동일한 경계를 적용하기 위해 검증된
+user-namespace primitive 하나로 통일한다.
 
 선택지는 다음과 같다.
 
@@ -18,7 +26,7 @@ rootless native overlay는 `work/work`와 일부 upper entry를 subordinate UID�
 | host `os.RemoveAll` 유지 | 탈락 | 실물 run에서 `work/work` EPERM |
 | `chmod`/`chown` 후 host 삭제 | 탈락 | subordinate ownership을 host에서 바꾸지 못하며 `:U`와 같은 lower 변조 위험 |
 | state 전체를 container에 mount해 삭제 | 탈락 | agent 또는 임의 helper에 host state 삭제 capability 노출 |
-| `podman unshare rm -rf -- <검증된 target>` | 추천 | rootless storage와 같은 user namespace에서 subuid를 권위 있게 해석하며 신규 의존성이 없음 |
+| `podman unshare rm -rf -- <검증된 target>` | 추천 | work에서 필요한 권한을 제공하고 upper에서도 실증됐으며 신규 의존성이 없음 |
 
 `podman unshare`는 rootless Podman 자체의 user namespace만 빌려 repo가 선택한
 단일 경로를 삭제한다. shell, glob, 환경변수 치환은 사용하지 않고 argv로만
@@ -61,11 +69,13 @@ process stop/wait
 앞 단계 오류가 있어도 모든 단계를 시도하고 `errors.Join`으로 보존한다. caller
 context가 취소돼도 cleanup은 bounded `context.WithoutCancel`로 계속한다.
 
-`upper`는 다르게 취급한다. whiteout은 `lstat(mode+rdev)`로 읽을 수 있지만 삭제는
-user namespace 권한이 필요하다는 비대칭을 계약으로 남긴다. T10 `Lease.Close`는
-upper를 삭제하지 않는다. T11이 fsdiff를 durable 기록하고 collector ACK를 받은
-뒤에만 lease-bound opaque ACK를 사용해 같은 내부 cleanup primitive의 `upper`
-target을 호출할 수 있다. raw path를 받는 공개 삭제 API는 만들지 않는다.
+`upper`는 lifecycle상 다르게 취급한다. whiteout은 소유자와 무관하게
+`lstat(mode+rdev)`로 판정한다. 이번 probe에서는 runner 소유 부모 덕분에 host
+삭제도 성공했지만, collector는 이 우연한 소유 형태를 계약으로 삼거나 owner로
+entry를 거르면 안 된다. T10 `Lease.Close`는 upper를 삭제하지 않는다. T11이
+fsdiff를 durable 기록하고 collector ACK를 받은 뒤에만 lease-bound opaque ACK를
+사용해 같은 내부 cleanup primitive의 `upper` target을 호출할 수 있다. raw path를
+받는 공개 삭제 API는 만들지 않는다.
 
 따라서 cleanup 권위가 user namespace로 이동해도 “collector ACK 전에 upper 삭제
 금지”는 변하지 않는다. T11 ACK API가 확정되기 전에는 upper cleanup 호출부를
@@ -73,17 +83,27 @@ target을 호출할 수 있다. raw path를 받는 공개 삭제 API는 만들�
 
 ## 4. 검증 계획과 승인 요청
 
-일회성 Ubuntu probe는 다음을 모두 확인해야 한다.
+일회성 Ubuntu probe `32590510041`은 다음을 모두 확인했다.
 
 - rootless + native overlay 전제
 - host `rm -rf`가 실제 `work/work`에서 실패
 - `podman unshare rm -rf -- work` 성공과 사후 `ENOENT`
-- nested delete로 만든 subuid-owned upper/whiteout에서 host 삭제 실패
+- nested delete로 만든 whiteout이 host UID/GID `165536`, character device,
+  `rdev=0:0`임
+- 별도 real overlay에서 host upper 삭제도 성공함: entry 소유권과 unlink 권한의
+  차이를 확인
 - `podman unshare rm -rf -- upper` 성공과 사후 `ENOENT`
 - state root 밖 sentinel 불변
 
-프로브 성공 run ID는 이 절에 기록한다. 그 뒤 구현은 work target만 T10에 넣고,
-기존 7항목 Linux gate를 하나도 줄이지 않고 다시 통과시킨다.
+probe 내부 UID map은 `0→runner(1001)`, `1→subuid(165536)`였고 effective capability가
+유지됐다. 최종 결과는 `host_work_rc=1 host_upper_rc=0 unshare_work_rc=0
+unshare_upper_rc=0 outside=unchanged`였다. 앞선 run `32590299549`는 보호된 work를
+`find`로 순회한 probe 결함, `32590340783`은 실패 지점을 출력하지 못한 probe 결함,
+`32590441010`은 work의 unshare 성공 뒤 “host upper 삭제는 실패해야 한다”는 잘못된
+단정을 드러냈다. 단정을 낮추지 않고 두 overlay를 분리한 최종 probe가 green이다.
+
+승인 뒤 구현은 work target만 T10 `Close`에 넣고, 기존 7항목 Linux gate를 하나도
+줄이지 않고 다시 통과시킨다.
 
 | 승인 항목 | 요청 |
 |---|---|
@@ -91,4 +111,3 @@ target을 호출할 수 있다. raw path를 받는 공개 삭제 API는 만들�
 | 경로 경계 | backend 계산 target enum + canonical containment + ancestor lstat, raw path API 금지 |
 | 오류 의미론 | 모든 단계 시도, errors.Join, 사후 ENOENT 확인, 자원 누수 시 gate 실패 |
 | upper | T10에서는 보존; T11 durable collector ACK 뒤 동일 primitive를 쓰는 별도 API 검토 |
-
