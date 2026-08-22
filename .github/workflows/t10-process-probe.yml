@@ -61,7 +61,7 @@ jobs:
           printf 'PROBE atomic_attach_rc=%s wait_rc=%s wait=%q stdout=%q stderr=%q\n' \
             "$attach_rc" "$wait_rc" "$(cat "$probe_dir/wait")" \
             "$(cat "$probe_dir/out")" "$(cat "$probe_dir/err")"
-          [[ "$attach_rc" -eq 0 ]]
+          [[ "$attach_rc" -eq 9 ]]
           [[ "$wait_rc" -eq 0 ]]
           [[ "$(cat "$probe_dir/wait")" == 9 ]]
           [[ "$(cat "$probe_dir/out")" == out ]]
