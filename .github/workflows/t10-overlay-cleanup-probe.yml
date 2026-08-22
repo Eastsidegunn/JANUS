@@ -1,0 +1,71 @@
+name: t10-overlay-cleanup-probe
+
+on:
+  push:
+    branches: [t10/world-integration]
+    paths: [.github/workflows/t10-overlay-cleanup-probe.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe rootless native-overlay cleanup authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+          test "$(podman info --format '{{.Store.GraphDriverName}}')" = overlay
+          test "$(podman info --format '{{index .Store.GraphStatus "Native Overlay Diff"}}')" = true
+
+          root=$(mktemp -d /tmp/hx-overlay-cleanup.XXXXXX)
+          lower=$root/lower
+          upper=$root/state/overlay/upper
+          work=$root/state/overlay/work
+          outside=$root/outside
+          mkdir -p "$lower/nested" "$upper" "$work" "$outside"
+          printf 'keep\n' > "$outside/sentinel"
+          printf 'delete\n' > "$lower/nested/delete-me.txt"
+          printf 'modify\n' > "$lower/modify.txt"
+
+          image=docker.io/library/alpine:3.22
+          podman pull "$image"
+          cid=$(podman create --pull=never --userns=keep-id:uid=1000,gid=1000 --user 1000:1000 \
+            -v "$lower:/workspace:O,upperdir=$upper,workdir=$work" "$image" \
+            sh -c 'rm /workspace/nested/delete-me.txt; printf changed > /workspace/modify.txt; printf created > /workspace/created.txt')
+          cleanup() {
+            podman rm --force "$cid" >/dev/null 2>&1 || true
+            podman unshare rm -rf -- "$work" "$upper" >/dev/null 2>&1 || true
+            rm -rf -- "$root" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          podman start --attach "$cid"
+          podman wait "$cid" >/dev/null
+          podman rm "$cid" >/dev/null
+
+          find "$root/state/overlay" -maxdepth 4 -printf '%P type=%y uid=%U gid=%G mode=%m\n' | sort
+
+          set +e
+          rm -rf -- "$work"
+          host_work_rc=$?
+          set -e
+          test "$host_work_rc" -ne 0
+          test -e "$work"
+          podman unshare rm -rf -- "$work"
+          test ! -e "$work"
+
+          set +e
+          rm -rf -- "$upper"
+          host_upper_rc=$?
+          set -e
+          test "$host_upper_rc" -ne 0
+          test -e "$upper"
+          podman unshare rm -rf -- "$upper"
+          test ! -e "$upper"
+
+          test "$(cat "$outside/sentinel")" = keep
+          printf 'host_work_rc=%s host_upper_rc=%s unshare_cleanup=ok outside=unchanged\n' \
+            "$host_work_rc" "$host_upper_rc"
