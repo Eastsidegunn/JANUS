@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/core/world"
+	"github.com/Eastsidegunn/JANUS/core/world/approvalrelaywire"
 	"github.com/Eastsidegunn/JANUS/core/world/approvalwire"
 )
 
@@ -26,7 +27,7 @@ const (
 	approvalRelayPath        = approvalRelayMount + "/" + approvalRelaySocketName
 	defaultApprovalCapacity  = 64
 	defaultApprovalRate      = 128
-	maxApprovalLineBytes     = 4 << 20
+	maxApprovalLineBytes     = approvalrelaywire.MaxLineBytes
 	maxApprovalEnvelopeBytes = 8 << 20
 	maxApprovalLifetime      = 600 * time.Second
 )
@@ -39,25 +40,10 @@ type approvalAdapterResponse = approvalwire.Response
 type approvalHookDelivery = approvalwire.Hook
 type approvalAdapterDecision = approvalwire.Decision
 
-type approvalRelayRequest struct {
-	Raw []byte `json:"raw"`
-}
-
-type approvalRelayDecision struct {
-	Decision string  `json:"decision"`
-	Reason   *string `json:"reason,omitempty"`
-}
-
-type approvalRelayAck struct {
-	Delivered bool `json:"delivered"`
-}
-
-type approvalNativeInput struct {
-	HookEventName string          `json:"hook_event_name"`
-	ToolUseID     string          `json:"tool_use_id"`
-	ToolName      string          `json:"tool_name"`
-	ToolInput     json.RawMessage `json:"tool_input"`
-}
+type approvalRelayRequest = approvalrelaywire.Request
+type approvalRelayDecision = approvalrelaywire.Decision
+type approvalRelayAck = approvalrelaywire.Ack
+type approvalNativeInput = approvalrelaywire.NativeInput
 
 type approvalIntent struct {
 	callID    string

@@ -123,11 +123,11 @@ func (f *FakePreparedLease) Activate(_ context.Context, receipt world.SpawnRecei
 	if err := world.ValidateSpawnReceipt(receipt, f.id, f.metadata); err != nil {
 		return nil, err
 	}
+	f.activated = true
+	f.activations++
 	if f.activateErr != nil {
 		return nil, f.activateErr
 	}
-	f.activated = true
-	f.activations++
 	return f.active, nil
 }
 

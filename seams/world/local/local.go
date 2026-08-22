@@ -323,6 +323,7 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 	volume := layout.lower + ":/workspace:O,upperdir=" + layout.upper + ",workdir=" + layout.work
 	args := []string{
 		"create", "--cidfile", cidFile,
+		"--interactive",
 		"--pull=never", "--network", internalNetwork,
 		"--userns=keep-id:uid=" + uid + ",gid=" + gid,
 		"--user", uid + ":" + gid,
@@ -680,59 +681,72 @@ func (l *lease) UpperDir() string                    { return l.upperDir }
 func (l *lease) Effects() <-chan world.EffectAttempt { return l.effects }
 
 func (l *lease) Close(ctx context.Context) error {
+	acquired := false
+	// A context that is already canceled must not win a random select against
+	// an immediately available ownership token: once this caller can own Close,
+	// it must attempt every cleanup phase with a bounded WithoutCancel context.
 	select {
 	case <-l.closeToken:
-		defer func() { l.closeToken <- struct{}{} }()
-	case <-ctx.Done():
-		return ctx.Err()
+		acquired = true
+	default:
 	}
+	if !acquired {
+		select {
+		case <-l.closeToken:
+			acquired = true
+		case <-ctx.Done():
+			// Another Close owns cleanup. Returning this caller's deadline cannot
+			// strand resources because the owner continues independently.
+			return ctx.Err()
+		}
+	}
+	defer func() { l.closeToken <- struct{}{} }()
 	if l.closed {
 		return l.closeErr
 	}
 
 	joined := l.closeErr
+	if err := ctx.Err(); err != nil {
+		joined = errors.Join(joined, err)
+	}
+	phaseCtx, cancelPhase := cleanupContext(ctx)
 	// Quiesce approval before stopping the agent so every pending hook receives
 	// a durable forced deny through the host adapter. This is control-plane
 	// quiescing, not mount/network cleanup; container stop still precedes effect
 	// drain and resource removal as required by world.ActiveLease.
 	if l.approval != nil {
-		if err := l.approval.Shutdown(ctx); err != nil {
+		if err := l.approval.Shutdown(phaseCtx); err != nil {
 			joined = errors.Join(joined, fmt.Errorf("world/local: approval drain: %w", err))
 		}
 	}
 	if !l.processesStopped {
-		if err := ctx.Err(); err != nil {
-			return errors.Join(joined, err)
-		}
 		if l.process != nil {
-			if err := l.process.Shutdown(ctx); err != nil {
+			if err := l.process.Shutdown(phaseCtx); err != nil {
 				joined = errors.Join(joined, fmt.Errorf("world/local: agent process broker: %w", err))
 			}
 		}
 		for _, process := range []struct{ name, id string }{{"proxy", l.proxyID}} {
-			if _, err := l.runner.Run(ctx, "stop", "--time", "10", process.id); err != nil {
+			if _, err := l.runner.Run(phaseCtx, "stop", "--time", "10", process.id); err != nil {
 				joined = errors.Join(joined, fmt.Errorf("world/local: %s container stop: %w", process.name, err))
 			}
-			if _, err := l.runner.Run(ctx, "wait", process.id); err != nil {
+			if _, err := l.runner.Run(phaseCtx, "wait", process.id); err != nil {
 				joined = errors.Join(joined, fmt.Errorf("world/local: %s container wait: %w", process.name, err))
 			}
 		}
-		if err := ctx.Err(); err != nil {
-			return errors.Join(joined, err)
-		}
 		l.processesStopped, l.closeErr = true, joined
 	}
-	if err := l.broker.Shutdown(ctx); err != nil {
-		return errors.Join(joined, fmt.Errorf("world/local: audit drain/ACK: %w", err))
+	if err := l.broker.Shutdown(phaseCtx); err != nil {
+		joined = errors.Join(joined, fmt.Errorf("world/local: audit drain/ACK: %w", err))
 	}
 	// The broker closes effectsDone only after its listener and handlers have
 	// stopped and every accepted attempt has left the bounded stream.
 	select {
 	case <-l.effectsDone:
 		joined = errors.Join(joined, l.broker.Err())
-	case <-ctx.Done():
-		return errors.Join(joined, ctx.Err())
+	case <-phaseCtx.Done():
+		joined = errors.Join(joined, phaseCtx.Err())
 	}
+	cancelPhase()
 
 	cleanupCtx, cancel := cleanupContext(ctx)
 	for _, container := range []struct {

@@ -277,6 +277,48 @@ func TestProcessBrokerStopIsIdempotentAndLateStopDoesNotSignalCompletedCID(t *te
 	shutdownBroker(t, b)
 }
 
+func TestProcessBrokerExitObservationCannotOvertakeWaitAck(t *testing.T) {
+	waiter := newFakeStartedCommand(t)
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	b := &processBroker{
+		controlEncoder: processwire.NewEncoder(server),
+		waitRequested:  true,
+		containerDone:  make(chan struct{}),
+	}
+	waiter.completeWait("0")
+	b.wg.Add(1)
+	go b.observeWait(waiter)
+	select {
+	case <-b.containerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("exit observation timeout")
+	}
+
+	decoder := processwire.NewDecoder(client)
+	_ = client.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	if _, err := decoder.Read(); err == nil {
+		t.Fatal("wait ACK 전 exit frame이 노출됨")
+	} else if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("wait ACK 전 read err=%v", err)
+	}
+	_ = client.SetReadDeadline(time.Time{})
+
+	b.mu.Lock()
+	b.waitAcked = true
+	b.mu.Unlock()
+	sent := make(chan error, 1)
+	go func() { sent <- b.sendExit() }()
+	if frame := readFrame(t, client, decoder, "acked exit"); frame.Kind != processwire.KindExitObserved {
+		t.Fatalf("acked exit kind=%d payload=%s", frame.Kind, frame.Payload)
+	}
+	if err := <-sent; err != nil {
+		t.Fatal(err)
+	}
+	b.wg.Wait()
+}
+
 func TestProcessBrokerOutputBackpressureReachesContainerPipeWithoutLoss(t *testing.T) {
 	waiter, attach := newFakeStartedCommand(t), newFakeStartedCommand(t)
 	runtime := &fakeProcessRuntime{waiter: waiter, attach: attach}

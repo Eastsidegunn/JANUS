@@ -27,7 +27,9 @@ type Backend interface {
 
 // PreparedLease owns preflight and filesystem state only. Activate requires a
 // SpawnReceipt minted after the exact spawn metadata was durably committed.
-// Abort is idempotent and cleans a prepared-but-not-activated lease.
+// Once Activate accepts that receipt, it consumes the prepared lease even if
+// runtime activation fails; the backend then owns partial-runtime cleanup.
+// Abort is idempotent and cleans only a lease that has not entered Activate.
 type PreparedLease interface {
 	ID() PreparedID
 	Metadata() SpawnMetadata

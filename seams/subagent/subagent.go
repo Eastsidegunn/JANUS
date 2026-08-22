@@ -14,19 +14,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/contracts/validate"
 	"github.com/Eastsidegunn/JANUS/core/logd"
 	"github.com/Eastsidegunn/JANUS/core/policy"
+	"github.com/Eastsidegunn/JANUS/core/world"
 	"github.com/Eastsidegunn/JANUS/seams/subagent/internal/procgroup"
 )
 
 // Spec은 spawn 명세다.
 type Spec struct {
-	Adapter     string   // 어댑터 이름 — actor "subagent:{adapter}:{n}" 구성
-	Command     []string // 어댑터 실행 파일과 인자 (호스트 측 실행)
+	Adapter     string    // 어댑터 이름 — actor "subagent:{adapter}:{n}" 구성
+	Command     []string  // 어댑터 실행 파일과 인자 (호스트 측 실행)
+	Env         []string  // nil이면 host 환경 상속; world adapter에는 descriptor 환경만 전달
+	Stderr      io.Writer // 선택적 host-side 진단 sink; adapter stdout 계약과 분리
 	Instruction string
 	Workspace   string
 	Budget      gen.Budget // 정책 병합이 끝난 실효 예산 (§5.2)
@@ -34,6 +38,7 @@ type Spec struct {
 	ProfileID   string
 	Approval    policy.ApprovalMode
 	Decider     policy.ApprovalDecider
+	Descriptor  world.AgentDescriptor // world path only; agent container에는 직렬화하지 않음
 }
 
 // Subagent는 실행 중인 어댑터 프로세스 핸들이다.
@@ -63,12 +68,7 @@ type wireEvent struct {
 // n은 세션 내 서브에이전트 순번이다. 모든 이벤트는 새 child span으로
 // (parent_span_id = parentSpan) writer를 경유해 기록된다.
 func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n int, spec Spec) (*Subagent, error) {
-	vals, err := validate.New()
-	if err != nil {
-		return nil, err
-	}
 	childSpan := logd.NewSpanID()
-	actor := fmt.Sprintf("subagent:%s:%d", spec.Adapter, n)
 
 	// T10 이전 경로는 명시적인 none backend다. schema가 none을 허용하는 것은
 	// production 권한이 아니며 production surface는 T10 world 배선에서 거부한다.
@@ -91,6 +91,28 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 	}); err != nil {
 		return nil, fmt.Errorf("subagent: spawn 기록: %w", err)
 	}
+	return spawnPrepared(ctx, w, traceID, parentSpan, childSpan, n, spec)
+}
+
+// SpawnPrepared starts a host adapter for a world whose exact spawn metadata
+// has already received a durable CommitSpawn ACK. It deliberately cannot emit
+// a second world_backend:none record; the surface supplies the child span that
+// was bound into PreparedID, SpawnReceipt, and AgentDescriptor.
+func SpawnPrepared(ctx context.Context, w *logd.Writer, traceID, parentSpan, childSpan string, n int, spec Spec) (*Subagent, error) {
+	if spec.Descriptor.SpanID() == "" || spec.Descriptor.SpanID() != childSpan ||
+		spec.Descriptor.ProcessEndpoint() == (world.ProcessEndpoint{}) ||
+		spec.Descriptor.ApprovalEndpoint() == (world.ApprovalEndpoint{}) {
+		return nil, fmt.Errorf("subagent: world descriptor와 child span 불일치")
+	}
+	return spawnPrepared(ctx, w, traceID, parentSpan, childSpan, n, spec)
+}
+
+func spawnPrepared(ctx context.Context, w *logd.Writer, traceID, parentSpan, childSpan string, n int, spec Spec) (*Subagent, error) {
+	actor := fmt.Sprintf("subagent:%s:%d", spec.Adapter, n)
+	vals, err := validate.New()
+	if err != nil {
+		return nil, err
+	}
 
 	if len(spec.Command) == 0 {
 		return nil, fmt.Errorf("subagent: 어댑터 명령이 비어 있음")
@@ -98,7 +120,7 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 	// 프로세스·파이프·단일 reap·그룹 kill·EOF drain은 같은 seam의
 	// procgroup이 소유한다. exec.CommandContext를 쓰지 않아 watchCtx
 	// goroutine이 누적되지 않으며 취소는 항상 프로세스 그룹 전체에 간다.
-	proc, err := procgroup.Start(ctx, procgroup.Options{Command: spec.Command})
+	proc, err := procgroup.Start(ctx, procgroup.Options{Command: spec.Command, Env: spec.Env, Stderr: spec.Stderr})
 	if err != nil {
 		return nil, fmt.Errorf("subagent: 어댑터 실행: %w", err)
 	}
