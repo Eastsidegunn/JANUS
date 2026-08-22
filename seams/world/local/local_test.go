@@ -170,7 +170,7 @@ func TestOpenBuildsRootlessOverlayAndMetadata(t *testing.T) {
 	}
 	create := strings.Join(calls[7], " ")
 	for _, required := range []string{
-		"--pull=never", "--network hx-2222222222222222-internal",
+		"--interactive", "--pull=never", "--network hx-2222222222222222-internal",
 		"--userns=keep-id:uid=1000,gid=1001", "--user 1000:1001",
 		"--workdir /workspace", ":/workspace:O,upperdir=", ",workdir=", testAgentRepository + "@" + digest,
 		"HTTP_PROXY=http://hx-2222222222222222-proxy:3128",

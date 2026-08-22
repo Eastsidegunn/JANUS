@@ -323,6 +323,7 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 	volume := layout.lower + ":/workspace:O,upperdir=" + layout.upper + ",workdir=" + layout.work
 	args := []string{
 		"create", "--cidfile", cidFile,
+		"--interactive",
 		"--pull=never", "--network", internalNetwork,
 		"--userns=keep-id:uid=" + uid + ",gid=" + gid,
 		"--user", uid + ":" + gid,
