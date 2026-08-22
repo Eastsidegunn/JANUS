@@ -3,53 +3,6 @@
 구현을 우회하지 않고 멈춘 지점의 기록 (CLAUDE.md 작업 방식).
 해소되면 해당 항목을 지우고 태스크를 재개한다.
 
----
-
-## T10-6 — surface 조립 차단 (2026-08-22)
-
-**현재 차단**: 승인된 Q4의 backend-neutral process broker와 준비/시작 lifecycle이
-구현되어 있지 않아, `surfaces/hx`가 FR-SBX-01·FR-ADP-10 및 spawn 선기록 순서를
-동시에 만족하도록 조립할 수 없다.
-
-확인된 코드 경로:
-
-- `core/world.Lease.AdapterEndpoint()`는 agent의 start/stdin/stdout/stop/wait를
-  제공하는 process broker로 문서화돼 있지만, `seams/world/local.Open()`은 여기에
-  approval broker의 `intent`/`next` endpoint를 반환한다.
-- `core/world/brokerwire`와 T9 `claudecode` world client가 지원하는 operation도
-  approval `intent`/`next`뿐이다. container agent의 stdin/stdout/lifecycle을 host
-  adapter에 연결하는 operation이나 transport가 없다.
-- 따라서 `claudecode`는 world endpoint가 있어도 `procgroup.Start()`로 Claude를
-  host에서 직접 실행한다. 동시에 `local.Open()`은 별도의 agent container를
-  시작하므로, surface에서 둘을 조립하면 로그를 만드는 실행은 sandbox 밖 host
-  process가 된다.
-- `local.Open()`은 lease를 반환하기 전에 proxy·agent container를 create/start한다.
-  그러므로 surface가 metadata를 받은 뒤 spawn durable ACK를 기록하고 그 뒤에만
-  agent를 시작하라는 T10-6 순서도 현재 `Backend`/`Lease` 계약으로 표현할 수 없다.
-
-이 상태에서 endpoint를 approval 용도로만 넘기거나 host Claude 실행을 유지하는 것은
-FR-SBX-01을 형식적으로만 만족시키는 우회다. adapter를 container 안에 넣는 방식도
-FR-ADP-10과 승인된 Q4를 위반하므로 사용하지 않는다.
-
-**범위 확정 (2026-08-22, [H])**: `docs/t10-scope-determination.md`. FR-SBX-01은
-재해석하지 않는다. T10은 world 기판을 **실제 컨테이너 서브에이전트**로 검증하는
-것까지이며, Claude Code의 sandbox 실행은 T15로 분리하고 자격증명 [H] 실측을 착수
-조건으로 둔다. 따라서 아래 두 조건이 T10 재개의 전제다.
-
-해소 조건:
-
-1. host adapter가 container agent의 start/stdin/stdout/stop/wait를 사용하는
-   backend-neutral process broker 계약과 local 구현을 별도 설계·승인한다.
-2. `Backend.Open`을 resource preparation과 process start로 분리해, metadata 획득 →
-   `subagent/spawn` durable ACK → agent start 순서를 타입/API와 회귀 테스트로
-   강제한다.
-3. approval relay는 process broker와 별도 request-only endpoint로 유지하고,
-   agent에는 host adapter/process broker/Podman socket을 노출하지 않는다.
-
-해소 전에는 T10-6 surface wiring이나 T10-7 통합 workflow를 진행하지 않는다.
-
----
-
 ## T10 — 차단 해소 (2026-08-20)
 
 **해소**: C안 승인 — 통합 테스트는 Linux CI에서 실행하고 로컬은 Fake 백엔드

@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/core/world"
-	"github.com/Eastsidegunn/JANUS/core/world/brokerwire"
+	"github.com/Eastsidegunn/JANUS/core/world/approvalwire"
 )
 
 const (
@@ -34,10 +34,10 @@ const (
 // The adapter endpoint and the container relay deliberately use different
 // protocols and sockets. Only the request-only relay is mounted into the
 // agent; capability-bearing adapter operations never cross the sandbox.
-type approvalAdapterRequest = brokerwire.Request
-type approvalAdapterResponse = brokerwire.Response
-type approvalHookDelivery = brokerwire.Hook
-type approvalAdapterDecision = brokerwire.Decision
+type approvalAdapterRequest = approvalwire.Request
+type approvalAdapterResponse = approvalwire.Response
+type approvalHookDelivery = approvalwire.Hook
+type approvalAdapterDecision = approvalwire.Decision
 
 type approvalRelayRequest struct {
 	Raw []byte `json:"raw"`
@@ -193,8 +193,8 @@ func startApprovalBroker(parent context.Context, _ string, spanID string, budget
 	return b, nil
 }
 
-func (b *approvalBroker) Endpoint() world.Endpoint {
-	return world.NewEndpoint("unix", b.hostPath, b.capability)
+func (b *approvalBroker) Endpoint() world.ApprovalEndpoint {
+	return world.NewApprovalEndpoint("unix", b.hostPath, b.capability)
 }
 
 func (b *approvalBroker) RelayDir() string { return b.relayDir }
@@ -235,14 +235,14 @@ func (b *approvalBroker) handleHost(conn net.Conn) {
 		return
 	}
 	switch request.Operation {
-	case brokerwire.OperationIntent:
+	case approvalwire.OperationIntent:
 		if err := b.registerIntent(request); err != nil {
 			b.writeHostError(encoder, err.Error())
 			b.fail(err)
 			return
 		}
 		_ = encoder.Encode(approvalAdapterResponse{OK: true})
-	case brokerwire.OperationNext:
+	case approvalwire.OperationNext:
 		b.deliverNext(conn, decoder, encoder)
 	default:
 		b.writeHostError(encoder, "허용되지 않은 adapter operation")

@@ -6,18 +6,37 @@ package world
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
+	"github.com/Eastsidegunn/JANUS/core/logd"
 	"github.com/Eastsidegunn/JANUS/core/policy"
 )
 
-// Backend opens one isolated execution world. A future remote-microVM backend
-// implements the same contract; callers do not branch on the implementation.
+// Backend prepares one isolated execution world without creating or starting
+// its agent process. A future remote-microVM backend implements the same
+// contract; callers do not branch on the implementation.
 type Backend interface {
-	Open(context.Context, SpawnSpec) (Lease, error)
+	Prepare(context.Context, SpawnSpec) (PreparedLease, error)
 }
 
-// Lease owns the complete lifecycle of one execution world.
+// PreparedLease owns preflight and filesystem state only. Activate requires a
+// SpawnReceipt minted after the exact spawn metadata was durably committed.
+// Abort is idempotent and cleans a prepared-but-not-activated lease.
+type PreparedLease interface {
+	ID() PreparedID
+	Metadata() SpawnMetadata
+	UpperDir() string
+	Activate(context.Context, SpawnReceipt) (ActiveLease, error)
+	Abort(context.Context) error
+}
+
+// ActiveLease owns the complete lifecycle of one execution world.
 //
 // Close must preserve this order even on errors:
 //
@@ -25,16 +44,126 @@ type Backend interface {
 //  2. drain and acknowledge the effect stream;
 //  3. clean up the mount and network.
 //
-// AdapterEndpoint is a host-side process-broker capability. It is for the host
-// adapter only and must never be exposed inside the agent container
-// (FR-ADP-10). UpperDir is also host-only: it must not be copied into an agent
-// command, adapter command, endpoint, or event payload.
-type Lease interface {
-	AdapterEndpoint() Endpoint
-	Metadata() SpawnMetadata
+// ProcessEndpoint and ApprovalEndpoint are host-only, nominally distinct
+// capabilities. Neither may be exposed inside the agent container
+// (FR-ADP-10). UpperDir is also host-only.
+type ActiveLease interface {
+	ProcessEndpoint() ProcessEndpoint
+	ApprovalEndpoint() ApprovalEndpoint
 	UpperDir() string
 	Effects() <-chan EffectAttempt
 	Close(context.Context) error
+}
+
+// PreparedID is an opaque, per-prepare identity. Only NewPreparedID can mint a
+// non-zero value; callers can compare IDs but cannot inspect their token.
+type PreparedID struct {
+	token  [32]byte
+	spanID string
+}
+
+func NewPreparedID(spanID string) (PreparedID, error) {
+	if spanID == "" {
+		return PreparedID{}, fmt.Errorf("world: prepared span ID가 비어 있음")
+	}
+	id := PreparedID{spanID: spanID}
+	if _, err := rand.Read(id.token[:]); err != nil {
+		return PreparedID{}, fmt.Errorf("world: prepared ID 발급: %w", err)
+	}
+	return id, nil
+}
+
+func (id PreparedID) IsZero() bool { return id == PreparedID{} }
+
+// SpawnReceipt is proof that CommitSpawn received a durable writer ACK for
+// this exact prepared lease and metadata. Its fields and constructor are not
+// exported, so a caller cannot manufacture an Activate permission.
+type SpawnReceipt struct {
+	preparedID PreparedID
+	metadata   [32]byte
+	seq        int64
+}
+
+// SpawnRecord is the strongly named input to CommitSpawn. It remains a full
+// EventRecord because the writer, not world, owns envelope sequencing.
+type SpawnRecord gen.EventRecord
+
+// CommitSpawn validates and durably records an exact local-podman spawn before
+// minting its one-use activation receipt.
+func CommitSpawn(ctx context.Context, writer *logd.Writer, prepared PreparedLease, record SpawnRecord) (SpawnReceipt, error) {
+	if writer == nil || prepared == nil || prepared.ID().IsZero() {
+		return SpawnReceipt{}, fmt.Errorf("world: spawn commit 입력이 비어 있음")
+	}
+	rec := gen.EventRecord(record)
+	if rec.Kind != gen.KindSubagentSpawn || rec.SpanID != prepared.ID().spanID || rec.ParentSpanID == nil ||
+		*rec.ParentSpanID == "" || *rec.ParentSpanID == rec.SpanID {
+		return SpawnReceipt{}, fmt.Errorf("world: spawn record는 parent가 있는 subagent/spawn이어야 함")
+	}
+	metadata := prepared.Metadata()
+	if metadata.Backend != gen.SubagentSpawnPayloadWorldBackendLocalPodman {
+		return SpawnReceipt{}, fmt.Errorf("world: production spawn은 local-podman metadata여야 함")
+	}
+	var payload gen.SubagentSpawnPayload
+	if err := json.Unmarshal(rec.Payload, &payload); err != nil {
+		return SpawnReceipt{}, fmt.Errorf("world: spawn payload decode: %w", err)
+	}
+	if err := metadataMatchesPayload(metadata, payload); err != nil {
+		return SpawnReceipt{}, err
+	}
+	seq, err := writer.Submit(ctx, rec)
+	if err != nil {
+		return SpawnReceipt{}, fmt.Errorf("world: spawn durable commit: %w", err)
+	}
+	hash, err := hashMetadata(metadata)
+	if err != nil {
+		return SpawnReceipt{}, err
+	}
+	return SpawnReceipt{preparedID: prepared.ID(), metadata: hash, seq: seq}, nil
+}
+
+// ValidateSpawnReceipt is for backend implementations. It validates the
+// opaque receipt against their prepared identity and immutable metadata; it
+// does not consume it. PreparedLease.Activate owns one-shot consumption.
+func ValidateSpawnReceipt(receipt SpawnReceipt, id PreparedID, metadata SpawnMetadata) error {
+	if receipt.seq < 1 || id.IsZero() || receipt.preparedID != id {
+		return fmt.Errorf("world: spawn receipt가 prepared lease와 일치하지 않음")
+	}
+	hash, err := hashMetadata(metadata)
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare(receipt.metadata[:], hash[:]) != 1 {
+		return fmt.Errorf("world: spawn receipt metadata 불일치")
+	}
+	return nil
+}
+
+func hashMetadata(metadata SpawnMetadata) ([32]byte, error) {
+	encoded, err := json.Marshal(metadata.Clone())
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("world: spawn metadata canonical encode: %w", err)
+	}
+	return sha256.Sum256(encoded), nil
+}
+
+func metadataMatchesPayload(metadata SpawnMetadata, payload gen.SubagentSpawnPayload) error {
+	if payload.WorldBackend != metadata.Backend || payload.ProfileID == nil ||
+		payload.ImageDigest == nil || *payload.ProfileID != metadata.ProfileID ||
+		*payload.ImageDigest != metadata.ImageDigest {
+		return fmt.Errorf("world: spawn payload와 prepared metadata 불일치")
+	}
+	left, err := json.Marshal(payload.Mounts)
+	if err != nil {
+		return err
+	}
+	right, err := json.Marshal(metadata.Mounts)
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare(left, right) != 1 {
+		return fmt.Errorf("world: spawn mount metadata 불일치")
+	}
+	return nil
 }
 
 // EffectivePolicy is the immutable result of policy evaluation. It deliberately
@@ -89,7 +218,7 @@ type CredentialHandle struct {
 // API. AgentArgv and Credentials are defensively copied.
 type SpawnSpec struct {
 	policy      EffectivePolicy
-	imageDigest string
+	image       ImageReference
 	agentArgv   []string
 	depth       int64
 	traceID     string
@@ -100,7 +229,7 @@ type SpawnSpec struct {
 
 func NewSpawnSpec(
 	policy EffectivePolicy,
-	imageDigest string,
+	image ImageReference,
 	agentArgv []string,
 	depth int64,
 	traceID, spanID string,
@@ -108,7 +237,7 @@ func NewSpawnSpec(
 	credentials []CredentialHandle,
 ) SpawnSpec {
 	return SpawnSpec{
-		policy: policy, imageDigest: imageDigest,
+		policy: policy, image: image,
 		agentArgv: append([]string(nil), agentArgv...), depth: depth,
 		traceID: traceID, spanID: spanID,
 		identity:    identity,
@@ -117,7 +246,7 @@ func NewSpawnSpec(
 }
 
 func (s SpawnSpec) Policy() EffectivePolicy      { return s.policy }
-func (s SpawnSpec) ImageDigest() string          { return s.imageDigest }
+func (s SpawnSpec) Image() ImageReference        { return s.image }
 func (s SpawnSpec) AgentArgv() []string          { return append([]string(nil), s.agentArgv...) }
 func (s SpawnSpec) Depth() int64                 { return s.depth }
 func (s SpawnSpec) TraceID() string              { return s.traceID }
@@ -127,22 +256,76 @@ func (s SpawnSpec) Credentials() []CredentialHandle {
 	return append([]CredentialHandle(nil), s.credentials...)
 }
 
-// Endpoint is an opaque host-side broker capability descriptor. It contains no
-// workspace upper path. Network and Address locate the broker; Capability is a
-// per-lease secret and must not be logged or passed to the agent.
-type Endpoint struct {
+// ImageReference separates the trusted repository lookup name from the
+// immutable digest. Runtime backends execute Repository@Digest; only Digest is
+// copied to SpawnMetadata and the durable log.
+type ImageReference struct {
+	repository string
+	digest     string
+}
+
+func NewImageReference(repository, digest string) ImageReference {
+	return ImageReference{repository: repository, digest: digest}
+}
+
+func (r ImageReference) Repository() string { return r.repository }
+func (r ImageReference) Digest() string     { return r.digest }
+func (r ImageReference) String() string     { return r.repository + "@" + r.digest }
+
+// ProcessEndpoint is the host-only process broker capability. It cannot be
+// assigned to ApprovalEndpoint and contains no workspace upper path.
+type ProcessEndpoint struct {
+	network           string
+	address           string
+	leaseID           string
+	controlCapability string
+	outputCapability  string
+}
+
+func NewProcessEndpoint(network, address, leaseID, controlCapability, outputCapability string) ProcessEndpoint {
+	return ProcessEndpoint{network: network, address: address, leaseID: leaseID, controlCapability: controlCapability, outputCapability: outputCapability}
+}
+
+func (e ProcessEndpoint) Network() string           { return e.network }
+func (e ProcessEndpoint) Address() string           { return e.address }
+func (e ProcessEndpoint) LeaseID() string           { return e.leaseID }
+func (e ProcessEndpoint) ControlCapability() string { return e.controlCapability }
+func (e ProcessEndpoint) OutputCapability() string  { return e.outputCapability }
+
+// String returns a non-secret correlation identifier. It must not be used as
+// an activation capability; SpawnReceipt remains the only activation proof.
+func (id PreparedID) String() string { return hex.EncodeToString(id.token[:]) }
+
+// ApprovalEndpoint is the separate host-only approval capability.
+type ApprovalEndpoint struct {
 	network    string
 	address    string
 	capability string
 }
 
-func NewEndpoint(network, address, capability string) Endpoint {
-	return Endpoint{network: network, address: address, capability: capability}
+func NewApprovalEndpoint(network, address, capability string) ApprovalEndpoint {
+	return ApprovalEndpoint{network: network, address: address, capability: capability}
 }
 
-func (e Endpoint) Network() string    { return e.network }
-func (e Endpoint) Address() string    { return e.address }
-func (e Endpoint) Capability() string { return e.capability }
+func (e ApprovalEndpoint) Network() string    { return e.network }
+func (e ApprovalEndpoint) Address() string    { return e.address }
+func (e ApprovalEndpoint) Capability() string { return e.capability }
+
+// AgentDescriptor is the only endpoint bundle a host adapter receives. It has
+// no UpperDir and no serialization tags or exported fields.
+type AgentDescriptor struct {
+	process  ProcessEndpoint
+	approval ApprovalEndpoint
+	spanID   string
+}
+
+func NewAgentDescriptor(process ProcessEndpoint, approval ApprovalEndpoint, spanID string) AgentDescriptor {
+	return AgentDescriptor{process: process, approval: approval, spanID: spanID}
+}
+
+func (d AgentDescriptor) ProcessEndpoint() ProcessEndpoint   { return d.process }
+func (d AgentDescriptor) ApprovalEndpoint() ApprovalEndpoint { return d.approval }
+func (d AgentDescriptor) SpanID() string                     { return d.spanID }
 
 // SpawnMetadata is the durable, non-secret environment description used by the
 // subagent/spawn event (FR-SBX-06). UpperDir is intentionally absent; UpperRef

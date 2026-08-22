@@ -19,13 +19,13 @@ import (
 )
 
 const (
-	defaultClaudeExecutable  = "claude"
-	claudeSettingSources     = "project,local"
-	maxCommandBytes          = 4 << 20
-	worldBrokerNetworkEnv    = "HX_WORLD_BROKER_NETWORK"
-	worldBrokerAddressEnv    = "HX_WORLD_BROKER_ADDRESS"
-	worldBrokerCapabilityEnv = "HX_WORLD_BROKER_CAPABILITY"
-	worldBrokerSpanEnv       = "HX_WORLD_BROKER_SPAN_ID"
+	defaultClaudeExecutable    = "claude"
+	claudeSettingSources       = "project,local"
+	maxCommandBytes            = 4 << 20
+	worldApprovalNetworkEnv    = "HX_WORLD_APPROVAL_NETWORK"
+	worldApprovalAddressEnv    = "HX_WORLD_APPROVAL_ADDRESS"
+	worldApprovalCapabilityEnv = "HX_WORLD_APPROVAL_CAPABILITY"
+	worldApprovalSpanEnv       = "HX_WORLD_APPROVAL_SPAN_ID"
 
 	// C안(제안서 §7.2): user settings를 제외하고, 이 인라인 PreToolUse
 	// hook만 명시적으로 주입한다. --bare는 OAuth/keychain을 읽지 않으므로
@@ -50,10 +50,10 @@ var (
 // Config contains host-controlled process settings. ClaudeBin is a single
 // executable path, never a shell command.
 type Config struct {
-	ClaudeBin     string
-	Env           []string
-	WorldEndpoint world.Endpoint
-	WorldSpanID   string
+	ClaudeBin        string
+	Env              []string
+	ApprovalEndpoint world.ApprovalEndpoint
+	WorldSpanID      string
 }
 
 type approvalTransport interface {
@@ -75,18 +75,18 @@ func ConfigFromEnv() Config {
 		bin = defaultClaudeExecutable
 	}
 	env := os.Environ()
-	endpoint := world.NewEndpoint(
-		os.Getenv(worldBrokerNetworkEnv),
-		os.Getenv(worldBrokerAddressEnv),
-		os.Getenv(worldBrokerCapabilityEnv),
+	endpoint := world.NewApprovalEndpoint(
+		os.Getenv(worldApprovalNetworkEnv),
+		os.Getenv(worldApprovalAddressEnv),
+		os.Getenv(worldApprovalCapabilityEnv),
 	)
-	spanID := os.Getenv(worldBrokerSpanEnv)
+	spanID := os.Getenv(worldApprovalSpanEnv)
 	// Broker capability and the host's real approval socket are host-adapter
 	// inputs, never native-agent environment. Direct mode adds its fresh local
 	// approval socket back below; world mode relies on the container's relay.
 	for _, key := range []string{
-		worldBrokerNetworkEnv, worldBrokerAddressEnv, worldBrokerCapabilityEnv,
-		worldBrokerSpanEnv, approvalSocketEnv,
+		worldApprovalNetworkEnv, worldApprovalAddressEnv, worldApprovalCapabilityEnv,
+		worldApprovalSpanEnv, approvalSocketEnv,
 	} {
 		env = removeEnv(env, key)
 	}
@@ -96,7 +96,7 @@ func ConfigFromEnv() Config {
 		dir := filepath.Dir(executable)
 		env = replaceEnv(env, "PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
-	return Config{ClaudeBin: bin, Env: env, WorldEndpoint: endpoint, WorldSpanID: spanID}
+	return Config{ClaudeBin: bin, Env: env, ApprovalEndpoint: endpoint, WorldSpanID: spanID}
 }
 
 func replaceEnv(env []string, key, value string) []string {

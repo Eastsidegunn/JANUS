@@ -47,14 +47,14 @@ type fakeWorldNext struct {
 
 func TestWorldApprovalClientRegistersIntentAndPreservesForcedHook(t *testing.T) {
 	broker := newFakeWorldApprovalBroker(t)
-	endpoint := world.NewEndpoint("unix", broker.listener.Addr().String(), "capability")
+	endpoint := world.NewApprovalEndpoint("unix", broker.listener.Addr().String(), "capability")
 	vals, err := validate.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := make(chan []byte, 1)
 	w := &wireWriter{out: capturedLines{lines: lines}, vals: vals}
-	transport, err := newApprovalTransport(w, Config{WorldEndpoint: endpoint, WorldSpanID: "2222222222222222"})
+	transport, err := newApprovalTransport(w, Config{ApprovalEndpoint: endpoint, WorldSpanID: "2222222222222222"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestWorldApprovalClientRegistersIntentAndPreservesForcedHook(t *testing.T) 
 
 func TestWorldApprovalClientCloseUnblocksPendingDecision(t *testing.T) {
 	broker := newFakeWorldApprovalBroker(t)
-	endpoint := world.NewEndpoint("unix", broker.listener.Addr().String(), "capability")
+	endpoint := world.NewApprovalEndpoint("unix", broker.listener.Addr().String(), "capability")
 	vals, err := validate.New()
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +145,7 @@ func TestWorldApprovalClientCloseUnblocksPendingDecision(t *testing.T) {
 	lines := make(chan []byte, 1)
 	transport, err := newApprovalTransport(
 		&wireWriter{out: capturedLines{lines: lines}, vals: vals},
-		Config{WorldEndpoint: endpoint, WorldSpanID: "2222222222222222"},
+		Config{ApprovalEndpoint: endpoint, WorldSpanID: "2222222222222222"},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -177,20 +177,20 @@ func TestWorldApprovalClientCloseUnblocksPendingDecision(t *testing.T) {
 }
 
 func TestConfigFromEnvConsumesWorldCapabilityWithoutPassingItToAgent(t *testing.T) {
-	t.Setenv(worldBrokerNetworkEnv, "unix")
-	t.Setenv(worldBrokerAddressEnv, "/host/adapter.sock")
-	t.Setenv(worldBrokerCapabilityEnv, "top-secret-capability")
-	t.Setenv(worldBrokerSpanEnv, "2222222222222222")
+	t.Setenv(worldApprovalNetworkEnv, "unix")
+	t.Setenv(worldApprovalAddressEnv, "/host/adapter.sock")
+	t.Setenv(worldApprovalCapabilityEnv, "top-secret-capability")
+	t.Setenv(worldApprovalSpanEnv, "2222222222222222")
 	t.Setenv(approvalSocketEnv, "/host/real-approval.sock")
 	cfg := ConfigFromEnv()
-	if cfg.WorldEndpoint.Network() != "unix" || cfg.WorldEndpoint.Address() != "/host/adapter.sock" ||
-		cfg.WorldEndpoint.Capability() != "top-secret-capability" || cfg.WorldSpanID != "2222222222222222" {
+	if cfg.ApprovalEndpoint.Network() != "unix" || cfg.ApprovalEndpoint.Address() != "/host/adapter.sock" ||
+		cfg.ApprovalEndpoint.Capability() != "top-secret-capability" || cfg.WorldSpanID != "2222222222222222" {
 		t.Fatalf("world endpoint env 조립 실패: endpoint=%q/%q cap=%t span=%q",
-			cfg.WorldEndpoint.Network(), cfg.WorldEndpoint.Address(), cfg.WorldEndpoint.Capability() != "", cfg.WorldSpanID)
+			cfg.ApprovalEndpoint.Network(), cfg.ApprovalEndpoint.Address(), cfg.ApprovalEndpoint.Capability() != "", cfg.WorldSpanID)
 	}
 	for _, item := range cfg.Env {
 		if strings.Contains(item, "top-secret-capability") || strings.Contains(item, "/host/real-approval.sock") ||
-			strings.HasPrefix(item, worldBrokerNetworkEnv+"=") || strings.HasPrefix(item, worldBrokerSpanEnv+"=") {
+			strings.HasPrefix(item, worldApprovalNetworkEnv+"=") || strings.HasPrefix(item, worldApprovalSpanEnv+"=") {
 			t.Fatalf("host broker/approval capability가 native env에 남음: %q", item)
 		}
 	}
@@ -202,10 +202,10 @@ func TestAdapterExecutableRegistersRealFixtureToolIntentWithWorldBroker(t *testi
 	bins := buildAdapterBinaries(t)
 	fixture := filepath.Join(fixtureDir, "02-single-tool.ndjson")
 	run := runFixtureProcess(t, bins, fixture, []string{
-		worldBrokerNetworkEnv + "=unix",
-		worldBrokerAddressEnv + "=" + broker.listener.Addr().String(),
-		worldBrokerCapabilityEnv + "=capability",
-		worldBrokerSpanEnv + "=2222222222222222",
+		worldApprovalNetworkEnv + "=unix",
+		worldApprovalAddressEnv + "=" + broker.listener.Addr().String(),
+		worldApprovalCapabilityEnv + "=capability",
+		worldApprovalSpanEnv + "=2222222222222222",
 	}, nil)
 	if run.err != nil {
 		t.Fatalf("fixture adapter world client 실패: %v\n%s", run.err, run.stderr)
