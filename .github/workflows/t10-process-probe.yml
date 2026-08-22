@@ -75,8 +75,10 @@ jobs:
           digest=$(podman image inspect --format '{{.Digest}}' localhost/hx-process-probe:run)
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           printf 'PROBE image_digest=%s\n' "$digest"
+          image_ref="localhost/hx-process-probe@$digest"
+          podman image inspect "$image_ref" >/dev/null
 
-          cid=$(podman create --interactive --name hx-probe-stdio "$digest" stdio)
+          cid=$(podman create --interactive --name hx-probe-stdio "$image_ref" stdio)
           podman start "$cid"
           mkfifo "$probe_dir/in"
           set +e
@@ -99,7 +101,7 @@ jobs:
           [[ "$(cat "$probe_dir/stderr")" == err-1 ]]
           printf 'PROBE attach_after_start=ok stdout_stderr_split=ok wait_exit=7\n'
 
-          cid=$(podman create --name hx-probe-orphan "$digest" orphan)
+          cid=$(podman create --name hx-probe-orphan "$image_ref" orphan)
           timeout 10s podman wait --condition exited "$cid" >"$probe_dir/orphan.wait" &
           wait_pid=$!
           timeout 10s podman start --attach --sig-proxy=false "$cid" >"$probe_dir/orphan.out" 2>"$probe_dir/orphan.err" &
@@ -110,7 +112,7 @@ jobs:
           [[ "$(podman inspect --format '{{.State.Status}}/{{.State.Pid}}' "$cid")" == exited/0 ]]
           printf 'PROBE leader_exit_done_independent=ok descendant_stdio_closed=ok\n'
 
-          cid=$(podman create --name hx-probe-stop "$digest" block)
+          cid=$(podman create --name hx-probe-stop "$image_ref" block)
           podman start "$cid"
           timeout 10s podman wait --condition exited "$cid" >"$probe_dir/stop.wait" &
           wait_pid=$!
