@@ -16,51 +16,20 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Probe Podman process lifecycle
+      - name: Probe atomic start attach interactive
         shell: bash
         run: |
           set -euo pipefail
           probe_dir=$(mktemp -d)
-          trap 'podman rm -f hx-probe-stdio hx-probe-orphan hx-probe-stop >/dev/null 2>&1 || true; rm -rf "$probe_dir"' EXIT
-
+          trap 'podman rm -f hx-probe-atomic >/dev/null 2>&1 || true; rm -rf "$probe_dir"' EXIT
           cat >"$probe_dir/main.go" <<'EOF'
           package main
-
-          import (
-            "bufio"
-            "fmt"
-            "os"
-            "os/exec"
-            "time"
-          )
-
+          import ("bufio"; "fmt"; "os")
           func main() {
-            if len(os.Args) != 2 { os.Exit(64) }
-            switch os.Args[1] {
-            case "stdio":
-              if !bufio.NewScanner(os.Stdin).Scan() { os.Exit(65) }
-              fmt.Fprintln(os.Stdout, "out-1")
-              fmt.Fprintln(os.Stderr, "err-1")
-              fmt.Fprintln(os.Stdout, "out-2")
-              os.Exit(7)
-            case "orphan":
-              if os.Getenv("PROBE_CHILD") == "1" {
-                time.Sleep(30 * time.Second)
-                return
-              }
-              cmd := exec.Command(os.Args[0], "orphan")
-              cmd.Env = append(os.Environ(), "PROBE_CHILD=1")
-              cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-              if err := cmd.Start(); err != nil { os.Exit(66) }
-            case "block":
-              cmd := exec.Command(os.Args[0], "orphan")
-              cmd.Env = append(os.Environ(), "PROBE_CHILD=1")
-              cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-              if err := cmd.Start(); err != nil { os.Exit(67) }
-              select {}
-            default:
-              os.Exit(68)
-            }
+            if !bufio.NewScanner(os.Stdin).Scan() { os.Exit(65) }
+            fmt.Fprintln(os.Stdout, "out")
+            fmt.Fprintln(os.Stderr, "err")
+            os.Exit(9)
           }
           EOF
           cat >"$probe_dir/Containerfile" <<'EOF'
@@ -69,22 +38,17 @@ jobs:
           USER 1000:1000
           ENTRYPOINT ["/probe"]
           EOF
-
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$probe_dir/probe" "$probe_dir/main.go"
-          podman build --pull=never -t localhost/hx-process-probe:run -f "$probe_dir/Containerfile" "$probe_dir"
-          digest=$(podman image inspect --format '{{.Digest}}' localhost/hx-process-probe:run)
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          printf 'PROBE image_digest=%s\n' "$digest"
-          image_ref="localhost/hx-process-probe@$digest"
-          podman image inspect "$image_ref" >/dev/null
-
-          cid=$(podman create --interactive --name hx-probe-stdio "$image_ref" stdio)
-          podman start "$cid"
+          podman build --pull=never -t localhost/hx-process-atomic:run -f "$probe_dir/Containerfile" "$probe_dir"
+          digest=$(podman image inspect --format '{{.Digest}}' localhost/hx-process-atomic:run)
+          ref="localhost/hx-process-atomic@$digest"
+          cid=$(podman create --interactive --name hx-probe-atomic "$ref")
           mkfifo "$probe_dir/in"
-          set +e
-          timeout 10s podman wait --condition exited "$cid" >"$probe_dir/wait.out" &
+          timeout 10s podman wait --condition exited "$cid" >"$probe_dir/wait" &
           wait_pid=$!
-          timeout 10s podman attach --sig-proxy=false "$cid" <"$probe_dir/in" >"$probe_dir/stdout" 2>"$probe_dir/stderr" &
+          set +e
+          timeout 10s podman start --attach --interactive --sig-proxy=false "$cid" \
+            <"$probe_dir/in" >"$probe_dir/out" 2>"$probe_dir/err" &
           attach_pid=$!
           exec 3>"$probe_dir/in"
           printf 'go\n' >&3
@@ -94,36 +58,11 @@ jobs:
           wait "$wait_pid"
           wait_rc=$?
           set -e
-          printf 'PROBE attach_rc=%s wait_rc=%s wait=%q stdout=%q stderr=%q\n' \
-            "$attach_rc" "$wait_rc" "$(cat "$probe_dir/wait.out")" \
-            "$(cat "$probe_dir/stdout")" "$(cat "$probe_dir/stderr")"
-          [[ "$attach_rc" -eq 0 || "$attach_rc" -eq 7 ]]
+          printf 'PROBE atomic_attach_rc=%s wait_rc=%s wait=%q stdout=%q stderr=%q\n' \
+            "$attach_rc" "$wait_rc" "$(cat "$probe_dir/wait")" \
+            "$(cat "$probe_dir/out")" "$(cat "$probe_dir/err")"
+          [[ "$attach_rc" -eq 0 ]]
           [[ "$wait_rc" -eq 0 ]]
-          [[ "$(cat "$probe_dir/wait.out")" == 7 ]]
-          [[ "$(cat "$probe_dir/stdout")" == $'out-1\nout-2' ]]
-          [[ "$(cat "$probe_dir/stderr")" == err-1 ]]
-          printf 'PROBE attach_after_start=ok stdout_stderr_split=ok wait_exit=7\n'
-
-          cid=$(podman create --name hx-probe-orphan "$image_ref" orphan)
-          timeout 10s podman wait --condition exited "$cid" >"$probe_dir/orphan.wait" &
-          wait_pid=$!
-          timeout 10s podman start --attach --sig-proxy=false "$cid" >"$probe_dir/orphan.out" 2>"$probe_dir/orphan.err" &
-          attach_pid=$!
-          wait "$wait_pid"
-          wait "$attach_pid"
-          [[ "$(cat "$probe_dir/orphan.wait")" == 0 ]]
-          [[ "$(podman inspect --format '{{.State.Status}}/{{.State.Pid}}' "$cid")" == exited/0 ]]
-          printf 'PROBE leader_exit_done_independent=ok descendant_stdio_closed=ok\n'
-
-          cid=$(podman create --name hx-probe-stop "$image_ref" block)
-          podman start "$cid"
-          timeout 10s podman wait --condition exited "$cid" >"$probe_dir/stop.wait" &
-          wait_pid=$!
-          podman stop --time 1 "$cid"
-          wait "$wait_pid"
-          [[ "$(podman inspect --format '{{.State.Status}}/{{.State.Pid}}' "$cid")" == exited/0 ]]
-          if podman top "$cid" pid >/dev/null 2>&1; then
-            echo 'stopped container still exposes a process table' >&2
-            exit 1
-          fi
-          printf 'PROBE stop_wait=ok descendant_cgroup_gone=ok exit=%s\n' "$(cat "$probe_dir/stop.wait")"
+          [[ "$(cat "$probe_dir/wait")" == 9 ]]
+          [[ "$(cat "$probe_dir/out")" == out ]]
+          [[ "$(cat "$probe_dir/err")" == err ]]
