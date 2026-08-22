@@ -358,12 +358,13 @@ func runNormalIntegration(t *testing.T, parent context.Context, artifacts integr
 		t.Fatalf("normal subagent: done=%+v err=%v", done, err)
 	}
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if err := active.Lease.Close(closeCtx); err != nil {
-		closeCancel()
-		t.Fatal(err)
-	}
+	closeErr := active.Lease.Close(closeCtx)
 	closeCancel()
 	waitSignal(t, effectsDone, 2*time.Second, "effect drain")
+	assertNoRuntimeArtifacts(t, ctx, artifacts.agentRepository+"@"+artifacts.agentDigest, childSpan)
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
 	if got := fileSHA256(t, artifacts.adapter); got != adapterHashBefore {
 		t.Fatalf("host adapter binary가 변조됨: before=%s after=%s", adapterHashBefore, got)
 	}
@@ -375,7 +376,6 @@ func runNormalIntegration(t *testing.T, parent context.Context, artifacts integr
 	gotEffects := append([]world.EffectAttempt(nil), effects...)
 	effectsMu.Unlock()
 	assertEgressEffects(t, gotEffects)
-	assertNoContainers(t, ctx, artifacts.agentRepository+"@"+artifacts.agentDigest)
 }
 
 func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts integrationArtifacts, mode string) {
@@ -420,6 +420,15 @@ func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts int
 	waitCtx, waitCancel := context.WithTimeout(ctx, 30*time.Second)
 	done, waitErr := active.Subagent.Wait(waitCtx)
 	waitCancel()
+	started := time.Now()
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	closeErr := active.Lease.Close(closeCtx)
+	closeCancel()
+	waitSignal(t, effectsDone, 2*time.Second, mode+" effect drain")
+	assertNoRuntimeArtifacts(t, ctx, artifacts.agentRepository+"@"+artifacts.agentDigest, childSpan)
+	if closeErr != nil || time.Since(started) > 20*time.Second {
+		t.Fatalf("%s bounded cleanup: elapsed=%v err=%v", mode, time.Since(started), closeErr)
+	}
 	if mode == "stop" {
 		if waitErr != nil || done.Status != gen.DonePayloadStatusStopped {
 			t.Fatalf("stop result=%+v err=%v", done, waitErr)
@@ -427,15 +436,6 @@ func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts int
 	} else if waitErr != nil || done.Status != gen.DonePayloadStatusError {
 		t.Fatalf("%s result=%+v err=%v", mode, done, waitErr)
 	}
-	started := time.Now()
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), 20*time.Second)
-	err = active.Lease.Close(closeCtx)
-	closeCancel()
-	if err != nil || time.Since(started) > 20*time.Second {
-		t.Fatalf("%s bounded cleanup: elapsed=%v err=%v", mode, time.Since(started), err)
-	}
-	waitSignal(t, effectsDone, 2*time.Second, mode+" effect drain")
-	assertNoContainers(t, ctx, artifacts.agentRepository+"@"+artifacts.agentDigest)
 }
 
 func newIntegrationBackend(t *testing.T, stateRoot string, artifacts integrationArtifacts) world.Backend {
@@ -628,11 +628,19 @@ func findAgentContainer(t *testing.T, ctx context.Context, image string) string 
 	return out[0]
 }
 
-func assertNoContainers(t *testing.T, ctx context.Context, image string) {
+func assertNoRuntimeArtifacts(t *testing.T, ctx context.Context, image, spanID string) {
 	t.Helper()
 	out := strings.TrimSpace(string(runOutput(t, ctx, "podman", "ps", "-a", "--filter", "ancestor="+image, "--format", "{{.ID}}")))
 	if out != "" {
 		t.Fatalf("cleanup 뒤 container 잔존: %s", out)
+	}
+	for _, network := range []string{"hx-" + spanID + "-internal", "hx-" + spanID + "-egress"} {
+		cmd := exec.CommandContext(ctx, "podman", "network", "exists", network)
+		if err := cmd.Run(); err == nil {
+			t.Fatalf("cleanup 뒤 network 잔존: %s", network)
+		} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+			t.Fatalf("network cleanup 확인 실패 %s: %v", network, err)
+		}
 	}
 }
 

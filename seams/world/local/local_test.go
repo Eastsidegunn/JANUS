@@ -447,6 +447,80 @@ func TestCloseContinuesAfterStopError(t *testing.T) {
 	}
 }
 
+func TestCloseAttemptsRuntimeCleanupAfterEveryStageError(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("c", 64)
+	tests := []struct {
+		name   string
+		inject func(*lease, *fakePodman) error
+		ctx    func() context.Context
+	}{
+		{"approval drain", func(got *lease, _ *fakePodman) error {
+			err := errors.New("approval drain failed")
+			got.approval.mu.Lock()
+			got.approval.firstErr = err
+			got.approval.mu.Unlock()
+			return err
+		}, nil},
+		{"process shutdown", func(got *lease, _ *fakePodman) error {
+			err := errors.New("process shutdown failed")
+			got.process.mu.Lock()
+			got.process.firstErr = err
+			got.process.mu.Unlock()
+			return err
+		}, nil},
+		{"proxy stop", func(_ *lease, runner *fakePodman) error {
+			err := errors.New("proxy stop failed")
+			runner.failures["proxy stop"] = err
+			return err
+		}, nil},
+		{"proxy wait", func(_ *lease, runner *fakePodman) error {
+			err := errors.New("proxy wait failed")
+			runner.failures["proxy wait"] = err
+			return err
+		}, nil},
+		{"audit drain", func(got *lease, _ *fakePodman) error {
+			err := errors.New("audit drain failed")
+			got.broker.(*fakeEffectBroker).shutdownErr = err
+			return err
+		}, nil},
+		{"caller canceled", func(_ *lease, _ *fakePodman) error { return context.Canceled }, func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lower, stateRoot := testDirs(t)
+			runner := newFakePodman(digest)
+			backend := mustBackend(t, stateRoot, runner, statDevice)
+			leaseValue, err := openTestLease(t, backend, context.Background(), testSpec(lower, digest))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := leaseValue.(*lease)
+			wantErr := test.inject(got, runner)
+			closeCtx := context.Background()
+			if test.ctx != nil {
+				closeCtx = test.ctx()
+			}
+			err = got.Close(closeCtx)
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("오류 체인 소실: got=%v want=%v", err, wantErr)
+			}
+			keys := callKeys(runner.snapshot())
+			for _, required := range []string{"agent rm", "proxy rm"} {
+				if !containsCall(runner.snapshot(), required) {
+					t.Fatalf("%s 뒤 cleanup 누락 %s: %v", test.name, required, keys)
+				}
+			}
+			if countCall(keys, "network rm") != 2 {
+				t.Fatalf("%s 뒤 network cleanup 누락: %v", test.name, keys)
+			}
+		})
+	}
+}
+
 func TestConcurrentCloseHonorsContextWhileLifecycleIsGated(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("8", 64)
 	lower, stateRoot := testDirs(t)
@@ -474,7 +548,7 @@ func TestConcurrentCloseHonorsContextWhileLifecycleIsGated(t *testing.T) {
 	}
 }
 
-func TestCanceledCloseCanBeRetriedWithoutSkippingProcessStop(t *testing.T) {
+func TestCanceledCloseStillAttemptsEveryCleanupPhase(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("6", 64)
 	lower, stateRoot := testDirs(t)
 	runner := newFakePodman(digest)
@@ -488,14 +562,8 @@ func TestCanceledCloseCanBeRetriedWithoutSkippingProcessStop(t *testing.T) {
 	if err := leaseValue.Close(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("취소 Close = %v", err)
 	}
-	if containsCall(runner.snapshot(), "proxy stop") {
-		t.Fatal("취소된 Close가 process stop을 실행함")
-	}
-	if err := leaseValue.Close(context.Background()); err != nil {
-		t.Fatalf("재시도 Close 실패: %v", err)
-	}
 	if !ordered(callKeys(runner.snapshot()), "proxy stop", "proxy wait", "agent rm", "proxy rm") {
-		t.Fatalf("재시도 lifecycle 누락: %v", callKeys(runner.snapshot()))
+		t.Fatalf("취소 lifecycle cleanup 누락: %v", callKeys(runner.snapshot()))
 	}
 }
 
@@ -795,6 +863,7 @@ type fakeEffectBroker struct {
 	done         chan struct{}
 	shutdownGate <-chan struct{}
 	readyErr     error
+	shutdownErr  error
 	closeOnce    sync.Once
 }
 
@@ -823,7 +892,7 @@ func (f *fakeEffectBroker) Shutdown(ctx context.Context) error {
 		close(f.effects)
 		close(f.done)
 	})
-	return nil
+	return f.shutdownErr
 }
 
 func testSpec(lower, digest string) world.SpawnSpec {
@@ -950,6 +1019,16 @@ func containsCall(calls [][]string, key string) bool {
 
 func containsAnyCreate(calls [][]string) bool {
 	return containsCall(calls, "proxy create") || containsCall(calls, "agent create")
+}
+
+func countCall(keys []string, want string) int {
+	count := 0
+	for _, key := range keys {
+		if key == want {
+			count++
+		}
+	}
+	return count
 }
 
 func ordered(keys []string, want ...string) bool {

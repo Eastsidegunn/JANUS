@@ -75,7 +75,11 @@ func run() error {
 	case "abnormal":
 		os.Exit(7)
 	case "stop":
-		select {}
+		// Keep a real scheduler wait alive until Podman delivers SIGTERM. A bare
+		// select{} is diagnosed by the Go runtime as a deadlock and exits before
+		// the host can exercise the stop path.
+		time.Sleep(24 * time.Hour)
+		return nil
 	case "orphan":
 		cmd := exec.Command(os.Args[0], "--descendant")
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
