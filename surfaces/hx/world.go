@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -23,6 +24,7 @@ type worldLaunch struct {
 	ParentSpan     string
 	AdapterCommand []string
 	AdapterBaseEnv []string
+	AdapterStderr  io.Writer
 	AdapterName    string
 	Instruction    string
 	Workspace      string
@@ -99,6 +101,7 @@ func startProductionWorld(ctx context.Context, launch worldLaunch) (_ *activeWor
 		baseEnv = os.Environ()
 	}
 	spec.Env = worldadapter.Environment(baseEnv, descriptor)
+	spec.Stderr = launch.AdapterStderr
 	spec.Instruction, spec.Workspace = launch.Instruction, launch.Workspace
 	spec.Budget, spec.Depth, spec.ProfileID = launch.Budget, launch.Depth, launch.ProfileID
 	spec.Descriptor = descriptor

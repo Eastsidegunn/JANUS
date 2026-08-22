@@ -321,7 +321,8 @@ func runNormalIntegration(t *testing.T, parent context.Context, artifacts integr
 	active, err := startProductionWorld(ctx, worldLaunch{
 		Backend: backend, SpawnSpec: spawnSpec, Writer: writer, TraceID: traceID, ParentSpan: parentSpan,
 		AdapterCommand: []string{artifacts.adapter}, AdapterName: "world-testagent",
-		Instruction: string(scenarioBytes), Workspace: "/workspace", Budget: budget, Depth: 0,
+		AdapterStderr: os.Stderr,
+		Instruction:   string(scenarioBytes), Workspace: "/workspace", Budget: budget, Depth: 0,
 		ProfileID: "world-integration", Approval: subagent.Spec{Approval: policy.ApprovalManual, Decider: decider},
 	})
 	if err != nil {
@@ -397,7 +398,8 @@ func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts int
 		Backend:   newIntegrationBackend(t, stateRoot, artifacts),
 		SpawnSpec: world.NewSpawnSpec(effective, world.NewImageReference(artifacts.agentRepository, artifacts.agentDigest), []string{"integration"}, 0, traceID, childSpan, world.AgentIdentity{UID: 1000, GID: 1000}, nil),
 		Writer:    writer, TraceID: traceID, ParentSpan: parentSpan, AdapterCommand: []string{artifacts.adapter},
-		AdapterName: "world-testagent", Instruction: string(instruction), Workspace: "/workspace",
+		AdapterStderr: os.Stderr,
+		AdapterName:   "world-testagent", Instruction: string(instruction), Workspace: "/workspace",
 		Budget: budget, ProfileID: "lifecycle-" + mode, Approval: subagent.Spec{Approval: policy.ApprovalManual, Decider: policy.DenyAll{}},
 	})
 	if err != nil {

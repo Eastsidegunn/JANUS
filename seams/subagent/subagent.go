@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
@@ -26,9 +27,10 @@ import (
 
 // Spec은 spawn 명세다.
 type Spec struct {
-	Adapter     string   // 어댑터 이름 — actor "subagent:{adapter}:{n}" 구성
-	Command     []string // 어댑터 실행 파일과 인자 (호스트 측 실행)
-	Env         []string // nil이면 host 환경 상속; world adapter에는 descriptor 환경만 전달
+	Adapter     string    // 어댑터 이름 — actor "subagent:{adapter}:{n}" 구성
+	Command     []string  // 어댑터 실행 파일과 인자 (호스트 측 실행)
+	Env         []string  // nil이면 host 환경 상속; world adapter에는 descriptor 환경만 전달
+	Stderr      io.Writer // 선택적 host-side 진단 sink; adapter stdout 계약과 분리
 	Instruction string
 	Workspace   string
 	Budget      gen.Budget // 정책 병합이 끝난 실효 예산 (§5.2)
@@ -118,7 +120,7 @@ func spawnPrepared(ctx context.Context, w *logd.Writer, traceID, parentSpan, chi
 	// 프로세스·파이프·단일 reap·그룹 kill·EOF drain은 같은 seam의
 	// procgroup이 소유한다. exec.CommandContext를 쓰지 않아 watchCtx
 	// goroutine이 누적되지 않으며 취소는 항상 프로세스 그룹 전체에 간다.
-	proc, err := procgroup.Start(ctx, procgroup.Options{Command: spec.Command, Env: spec.Env})
+	proc, err := procgroup.Start(ctx, procgroup.Options{Command: spec.Command, Env: spec.Env, Stderr: spec.Stderr})
 	if err != nil {
 		return nil, fmt.Errorf("subagent: 어댑터 실행: %w", err)
 	}
