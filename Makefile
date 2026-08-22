@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: lint test smoke fixtures codegen codegen-drift ci
+.PHONY: lint test smoke fixtures codegen codegen-drift world-integration ci ci-linux
 
 codegen:
 	$(GO) run ./tools/schemagen -out contracts/gen contracts/events.schema.json:EventRecord contracts/wire.schema.json
@@ -53,4 +53,17 @@ fixtures:
 	tools/check-fixture-manifest.sh contracts/fixtures 15
 	$(GO) run ./tools/fixtureprint
 
+# T10의 실제 배포 경계 관통 게이트. macOS/Podman 부재를 테스트 없음으로
+# 처리하지 않는다: Linux rootless/native-overlay 조건은 테스트 안에서도 다시
+# 검사하며 하나라도 없으면 명시적으로 실패한다.
+world-integration:
+	@if [ "$$($(GO) env GOOS)" != "linux" ]; then \
+		echo "world-integration은 Linux 실물 게이트다 — 현재 $$($(GO) env GOOS), skip 금지"; exit 1; \
+	fi
+	@command -v podman >/dev/null || { echo "world-integration: podman 없음, skip 금지"; exit 1; }
+	$(GO) test -tags worldintegration -count=1 -timeout=9m ./surfaces/hx -run '^TestWorldIntegration$$'
+
 ci: lint test smoke fixtures codegen-drift
+
+# GitHub ubuntu runner는 일반 CI와 T10 실물 게이트를 모두 통과해야 한다.
+ci-linux: ci world-integration
