@@ -81,6 +81,12 @@
 
 ---
 
-## 이후 (T15+, 착수 전 사람 판단 필요)
+## T15. Claude Code 에이전트의 sandbox 실행
+- 내용: 어댑터와 에이전트 본체를 분리해 `claude`를 컨테이너 안에서 실행. 호스트 어댑터는 world process broker로 stdio를 중계한다.
+- 대상: FR-ADP-10, FR-SBX-01(Claude Code 경로), FR-SBX-04
+- **착수 조건([H])**: 컨테이너 안에서 단기·스코프 한정 자격증명으로 `claude`가 동작하는지 실측. 근거는 docs/t10-scope-determination.md §6.
+- 완료 기준: Claude Code spawn에서 에이전트 프로세스가 컨테이너 내부에 존재하고, 워크스페이스 변경이 overlay upper에 잡히며, egress가 프록시를 경유함을 통합 테스트로 확인.
+
+## 이후 (T16+, 착수 전 사람 판단 필요)
 - pi / OpenClaw / 사내 에이전트 어댑터 (contracts 안정성의 성적표)
 - exec 감사(eBPF), Postgres store, 규칙 엔진 — 전부 명세 부록 A의 미결 확정 후.
