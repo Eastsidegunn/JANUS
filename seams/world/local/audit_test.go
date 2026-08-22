@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,6 +120,31 @@ func TestAuditBrokerRejectsMalformedAttemptWithoutEnqueue(t *testing.T) {
 	}
 	if err := broker.Shutdown(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAuditBrokerUsesShortHostOnlySocketRoot(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), strings.Repeat("long-state-component-", 8))
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	value, err := startAuditBroker(stateDir, "2222222222222222", 1)
+	if err != nil {
+		t.Fatalf("긴 state root가 Unix socket 상한으로 새면 안 됨: %v", err)
+	}
+	broker := value.(*unixAuditBroker)
+	if strings.HasPrefix(broker.SocketDir(), stateDir+string(os.PathSeparator)) {
+		t.Fatalf("audit capability가 긴 application state 아래에 생성됨: %q", broker.SocketDir())
+	}
+	info, err := os.Stat(broker.SocketDir())
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("audit socket root mode: info=%v err=%v", info, err)
+	}
+	if err := broker.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(broker.SocketDir()); !os.IsNotExist(err) {
+		t.Fatalf("Shutdown 뒤 audit socket root 잔존: %v", err)
 	}
 }
 

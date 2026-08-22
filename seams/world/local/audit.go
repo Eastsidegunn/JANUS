@@ -58,21 +58,32 @@ type unixAuditBroker struct {
 	handlers     sync.WaitGroup
 }
 
-func startAuditBroker(stateDir, spanID string, capacity int) (effectBroker, error) {
+func startAuditBroker(_ string, spanID string, capacity int) (effectBroker, error) {
 	if capacity <= 0 {
 		return nil, fmt.Errorf("world/local: audit queue capacity는 양수여야 함")
 	}
-	dir := filepath.Join(stateDir, "audit")
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("world/local: audit dir 생성: %w", err)
+	// Unix domain socket paths are much shorter than normal filesystem paths
+	// (108 bytes on Linux). Keep this host-only capability in a short 0700
+	// root, as the approval and process brokers already do; stateDir can be a
+	// long application path and is not itself a security boundary for the
+	// sidecar socket.
+	dir, err := os.MkdirTemp("/tmp", "hxe-")
+	if err != nil {
+		return nil, fmt.Errorf("world/local: audit socket root: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("world/local: audit socket root mode: %w", err)
 	}
 	path := filepath.Join(dir, auditSocketName)
 	listener, err := net.Listen("unix", path)
 	if err != nil {
+		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("world/local: audit socket listen: %w", err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		listener.Close()
+		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("world/local: audit socket mode: %w", err)
 	}
 	broker := &unixAuditBroker{
@@ -265,6 +276,9 @@ func (b *unixAuditBroker) Shutdown(ctx context.Context) error {
 	})
 	select {
 	case <-b.done:
+		if err := os.RemoveAll(b.dir); err != nil {
+			return fmt.Errorf("world/local: audit socket cleanup: %w", err)
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

@@ -82,11 +82,14 @@ func startProductionWorld(ctx context.Context, launch worldLaunch) (_ *activeWor
 	if err != nil {
 		return nil, err
 	}
+	// Activate consumes the receipt before its first runtime side effect. From
+	// this point the backend owns cleanup even when activation fails; calling
+	// Abort would be both invalid and a misleading secondary error.
+	abort = false
 	lease, err := prepared.Activate(ctx, receipt)
 	if err != nil {
 		return nil, err
 	}
-	abort = false
 	descriptor := world.NewAgentDescriptor(lease.ProcessEndpoint(), lease.ApprovalEndpoint(), childSpan)
 	spec := launch.Approval
 	spec.Adapter = launch.AdapterName
