@@ -1,8 +1,8 @@
 # T10 rootless overlay cleanup 개정 제안
 
-상태: 승인 대기. 이 문서는 PR #29 Linux 실물 run `32590121367`에서 남은
-`overlay/work/work: permission denied`를 다룬다. cleanup 구현은 이 제안 승인
-전에는 변경하지 않는다.
+상태: 승인·구현 완료. 이 문서는 PR #29 Linux 실물 run `32590121367`에서 남은
+`overlay/work/work: permission denied`와 승인된 cleanup 경계를 기록한다. 구현 뒤
+Linux 관통 gate run `32640081056`이 green이다.
 
 ## 1. 관측과 선택
 
@@ -105,9 +105,13 @@ unshare_upper_rc=0 outside=unchanged`였다. 앞선 run `32590299549`는 보호�
 승인 뒤 구현은 work target만 T10 `Close`에 넣고, 기존 7항목 Linux gate를 하나도
 줄이지 않고 다시 통과시킨다.
 
-| 승인 항목 | 요청 |
+| 승인 항목 | 확정 |
 |---|---|
 | cleanup 권위 | work 삭제에 `podman unshare rm -rf -- <검증된 exact path>` 사용 |
 | 경로 경계 | backend 계산 target enum + canonical containment + ancestor lstat, raw path API 금지 |
 | 오류 의미론 | 모든 단계 시도, errors.Join, 사후 ENOENT 확인, 자원 누수 시 gate 실패 |
 | upper | T10에서는 보존; T11 durable collector ACK 뒤 동일 primitive를 쓰는 별도 API 검토 |
+
+구현은 package-private work-only enum으로 한정됐고 upper target/call site는 만들지
+않았다. 경로 검증·Podman 실패·사후 잔존은 서로 다른 오류 범주로 고정했으며,
+symlink ancestor 회귀는 Podman 호출 0과 state root 밖 sentinel 불변을 단정한다.
