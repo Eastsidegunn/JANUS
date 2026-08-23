@@ -359,8 +359,9 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 		broker: broker, effects: broker.Effects(), effectsDone: broker.Done(),
 		approval: approval, process: process,
 		processEndpoint: process.Endpoint(), approvalEndpoint: approval.Endpoint(),
-		closeToken: makeCloseToken(),
-		metadata:   prepared.metadata.Clone(),
+		closeToken:     makeCloseToken(),
+		metadata:       prepared.metadata.Clone(),
+		overlayCleanup: newOverlayCleanupCapability(b.stateRoot, layout, b.runner),
 	}, nil
 }
 
@@ -533,6 +534,7 @@ func parseImageIdentity(value string) (world.AgentIdentity, error) {
 
 type overlayLayout struct {
 	lower, stateDir, upper, work, upperRef string
+	traceID, spanID                        string
 }
 
 func (b *Backend) prepareOverlay(spec world.SpawnSpec) (layout overlayLayout, err error) {
@@ -596,7 +598,10 @@ func (b *Backend) prepareOverlay(spec world.SpawnSpec) (layout overlayLayout, er
 		return layout, fmt.Errorf("world/local: upper/work가 서로 다른 filesystem (%d != %d)", upperDevice, workDevice)
 	}
 	cleanup = false
-	return overlayLayout{lower: lower, stateDir: stateDir, upper: upper, work: work, upperRef: upperRef}, nil
+	return overlayLayout{
+		lower: lower, stateDir: stateDir, upper: upper, work: work, upperRef: upperRef,
+		traceID: spec.TraceID(), spanID: spec.SpanID(),
+	}, nil
 }
 
 func allowsResolvedWorkspace(effective world.EffectivePolicy, workspace string) bool {
@@ -663,6 +668,7 @@ type lease struct {
 	process          *processBroker
 	processEndpoint  world.ProcessEndpoint
 	approvalEndpoint world.ApprovalEndpoint
+	overlayCleanup   overlayCleanupCapability
 
 	closeToken       chan struct{}
 	processesStopped bool
@@ -761,7 +767,6 @@ func (l *lease) Close(ctx context.Context) error {
 			joined = errors.Join(joined, fmt.Errorf("world/local: network cleanup %s: %w", network, err))
 		}
 	}
-	cancel()
 	if err := os.RemoveAll(l.broker.SocketDir()); err != nil {
 		joined = errors.Join(joined, fmt.Errorf("world/local: audit socket cleanup: %w", err))
 	}
@@ -772,9 +777,10 @@ func (l *lease) Close(ctx context.Context) error {
 	}
 	// upper is intentionally preserved for T11. Agent termination is not a
 	// collector ACK and therefore must not erase filesystem evidence.
-	if err := os.RemoveAll(l.workDir); err != nil {
+	if err := l.overlayCleanup.remove(cleanupCtx, overlayCleanupWork); err != nil {
 		joined = errors.Join(joined, fmt.Errorf("world/local: workdir cleanup: %w", err))
 	}
+	cancel()
 	if err := os.Remove(l.cidFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 		joined = errors.Join(joined, fmt.Errorf("world/local: cidfile cleanup: %w", err))
 	}

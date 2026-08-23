@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -80,6 +81,11 @@ func (f *fakePodman) Run(ctx context.Context, args ...string) ([]byte, error) {
 		return []byte(fakeProxyID + "\n"), nil
 	case "agent create":
 		return []byte(fakeAgentID + "\n"), nil
+	case "unshare":
+		if len(args) != 5 || args[1] != "rm" || args[2] != "-rf" || args[3] != "--" {
+			return nil, fmt.Errorf("unexpected unshare argv: %v", args)
+		}
+		return nil, os.RemoveAll(args[4])
 	default:
 		return nil, nil
 	}
@@ -409,6 +415,17 @@ func TestLeaseCloseWaitsForEffectsThenCleansContainerAndPreservesUpper(t *testin
 	if !ordered(keys, "proxy stop", "proxy wait", "agent rm", "proxy rm", "network rm", "network rm") {
 		t.Fatalf("Close Podman 순서 이상: %v", keys)
 	}
+	wantCleanup := []string{"unshare", "rm", "-rf", "--", got.workDir}
+	foundCleanup := false
+	for _, call := range runner.snapshot() {
+		if reflect.DeepEqual(call, wantCleanup) {
+			foundCleanup = true
+			break
+		}
+	}
+	if !foundCleanup {
+		t.Fatalf("Close가 exact work capability로 cleanup하지 않음: calls=%v", runner.snapshot())
+	}
 	if _, err := os.Stat(got.upperDir); err != nil {
 		t.Fatalf("collector ACK 전 upper가 삭제됨: %v", err)
 	}
@@ -481,6 +498,11 @@ func TestCloseAttemptsRuntimeCleanupAfterEveryStageError(t *testing.T) {
 		{"audit drain", func(got *lease, _ *fakePodman) error {
 			err := errors.New("audit drain failed")
 			got.broker.(*fakeEffectBroker).shutdownErr = err
+			return err
+		}, nil},
+		{"work cleanup", func(_ *lease, runner *fakePodman) error {
+			err := errors.New("unshare failed")
+			runner.failures["unshare"] = err
 			return err
 		}, nil},
 		{"caller canceled", func(_ *lease, _ *fakePodman) error { return context.Canceled }, func() context.Context {
