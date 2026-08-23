@@ -249,8 +249,15 @@ func TestProcessBrokerExitObservationIsIndependentOfOutputEOF(t *testing.T) {
 func TestProcessBrokerStopIsIdempotentAndLateStopDoesNotSignalCompletedCID(t *testing.T) {
 	waiter, attach := newFakeStartedCommand(t), newFakeStartedCommand(t)
 	runtime := &fakeProcessRuntime{waiter: waiter, attach: attach}
-	runtime.onStop = func() { waiter.completeWait("143"); attach.closeWriters(); attach.finish(errors.New("attach stopped")) }
 	b := mustProcessBroker(t, context.Background(), runtime)
+	// Force exit observation to finish while the stop handler still owns the
+	// request. ExitObserved must not overtake the stop ACK.
+	runtime.onStop = func() {
+		waiter.completeWait("143")
+		<-b.containerDone
+		attach.closeWriters()
+		attach.finish(errors.New("attach stopped"))
+	}
 	client := connectProcessClient(t, b)
 	defer client.close()
 	client.send(t, processwire.KindStart, nil)
