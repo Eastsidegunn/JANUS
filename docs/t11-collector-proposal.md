@@ -202,6 +202,16 @@ Linux 관통 테스트로 필요한 단정만 영구화한다.
 진단한다. hash 결과와 `changes` 순서는 실행 순서와 map iteration에 무관하게
 결정적이어야 한다.
 
+### 2.5 upper가 보존하지 않는 일시 효과
+
+upper 기반 fsdiff는 spawn 기준선과 종료 시점의 **순변화**를 관측한다. lower에
+없던 파일을 run 중에 생성했다가 삭제하면 최종 upper에도 whiteout에도 흔적이
+남지 않으므로 T11은 그 일시적인 생성·쓰기·삭제를 검출할 수 없다. 따라서
+`collector/fs_changed`의 `changes:[]`는 “최종 순변화 없음”이지 “run 중 파일시스템
+행위 없음”을 뜻하지 않으며, T12 감사도 이를 행위 부재의 증거로 사용하면 안 된다.
+이 공백은 upper scanner를 추측으로 확장해 메우지 않는다. 파일 관련 syscall/exec
+시계열을 관측하는 FR-COL-04(eBPF 기반 exec 감사, v2)가 보완 대상이다.
+
 ---
 
 ## 3. Q3 — agent 협조 없이, 비정상 종료에도 수집 (FR-COL-01/05)
