@@ -46,6 +46,8 @@ type processBroker struct {
 	outputEncoder                       *processwire.Encoder
 	controlUsed, outputUsed             bool
 	started, stdinClosed, waitRequested bool
+	waitAcked                           bool
+	controlAckPending                   bool
 	stopReason                          string
 	waitResult                          *processwire.ExitObserved
 	exitSent, streamEnded               bool
@@ -272,6 +274,9 @@ func (b *processBroker) handleControl(conn net.Conn, decoder *processwire.Decode
 			b.protocolError(encoder, frame.Seq, "control stream 불일치")
 			return
 		}
+		b.mu.Lock()
+		b.controlAckPending = true
+		b.mu.Unlock()
 		if err := b.handleControlFrame(frame, encoder); err != nil {
 			b.protocolError(encoder, frame.Seq, err.Error())
 			return
@@ -324,11 +329,16 @@ func (b *processBroker) handleControlFrame(frame processwire.Frame, encoder *pro
 			return fmt.Errorf("wait 상태 위반")
 		}
 		b.waitRequested = true
-		result := b.waitResult
 		b.mu.Unlock()
 		if err := b.sendAck(encoder, frame.Seq); err != nil {
 			return err
 		}
+		// Exit observation may race with this request. It is not visible to the
+		// peer until the wait ACK is durable on the control stream.
+		b.mu.Lock()
+		b.waitAcked = true
+		result := b.waitResult
+		b.mu.Unlock()
 		if result != nil {
 			return b.sendExit()
 		}
@@ -340,8 +350,19 @@ func (b *processBroker) handleControlFrame(frame processwire.Frame, encoder *pro
 
 func (b *processBroker) sendAck(encoder *processwire.Encoder, requestSeq uint64) error {
 	payload, _ := processwire.Marshal(processwire.Ack{RequestSeq: requestSeq})
-	_, err := encoder.Write(processwire.KindAck, processwire.StreamControl, 0, payload)
-	return err
+	if _, err := encoder.Write(processwire.KindAck, processwire.StreamControl, 0, payload); err != nil {
+		return err
+	}
+	// Any control operation may coincide with container exit after wait has
+	// been armed. The request ACK is ordered before the asynchronous exit frame.
+	b.mu.Lock()
+	b.controlAckPending = false
+	shouldSendExit := b.waitAcked && b.waitResult != nil && !b.exitSent
+	b.mu.Unlock()
+	if shouldSendExit {
+		return b.sendExit()
+	}
+	return nil
 }
 
 func (b *processBroker) protocolError(encoder *processwire.Encoder, seq uint64, reason string) {
@@ -457,7 +478,7 @@ func (b *processBroker) observeWait(waiter startedCommand) {
 	}
 	b.mu.Lock()
 	b.waitResult = &result
-	requested := b.waitRequested
+	requested := b.waitAcked && !b.controlAckPending
 	attach := b.attach
 	b.mu.Unlock()
 	if attach != nil {
