@@ -566,6 +566,14 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 			return
 		case <-b.containerDone:
 		}
+		b.mu.Lock()
+		stopped := b.stopReason != ""
+		b.mu.Unlock()
+		if !stopped {
+			// Natural, abnormal, and orphan exits must retain the original
+			// full-drain behavior; there may still be valid output to forward.
+			return
+		}
 		// A stopped container has no future output. Give the attach readers a
 		// short grace to drain kernel buffers; if the podman attach client still
 		// holds a pipe, kill that client so stream teardown cannot consume the
