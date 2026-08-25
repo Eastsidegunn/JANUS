@@ -585,6 +585,11 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 		case <-readersDone:
 		case <-timer.C:
 			attach.Kill()
+			// Podman/conmon may retain the pipe writer after the client leader is
+			// killed. This path is only for an explicitly stopped container; close
+			// the parent read ends as the final bounded-release operation so the
+			// drain readers cannot hold the lease indefinitely.
+			attach.ClosePipes()
 		}
 	}()
 	b.mu.Lock()
