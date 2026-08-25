@@ -666,13 +666,28 @@ func (b *processBroker) stopContainer(ctx context.Context, reason string) error 
 		done := b.waitResult != nil
 		b.mu.Unlock()
 		if done {
+			b.closeStoppedAttachPipes()
 			return nil
 		}
 		if _, killErr := b.runner.Run(ctx, "kill", b.containerID); killErr != nil {
 			return errors.Join(err, killErr)
 		}
 	}
+	b.closeStoppedAttachPipes()
 	return nil
+}
+
+func (b *processBroker) closeStoppedAttachPipes() {
+	b.mu.Lock()
+	attach := b.attach
+	b.mu.Unlock()
+	if attach != nil {
+		// Explicit stop has completed at the container boundary. The attach
+		// client must not keep its parent pipes open while the broker drains the
+		// terminal stream; ClosePipes is idempotent and the process reaper still
+		// owns command exit observation.
+		attach.ClosePipes()
+	}
 }
 
 func (b *processBroker) fail(err error) {
