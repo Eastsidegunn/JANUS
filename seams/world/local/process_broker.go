@@ -684,8 +684,10 @@ func (b *processBroker) closeStoppedAttachPipes() {
 	if attach != nil {
 		// Explicit stop has completed at the container boundary. The attach
 		// client must not keep its parent pipes open while the broker drains the
-		// terminal stream; ClosePipes is idempotent and the process reaper still
-		// owns command exit observation.
+		// terminal stream. Kill the client as well as closing its parent ends;
+		// ClosePipes is idempotent and the process reaper still owns command exit
+		// observation.
+		attach.Kill()
 		attach.ClosePipes()
 	}
 }
