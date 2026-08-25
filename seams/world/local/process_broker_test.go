@@ -472,6 +472,19 @@ func TestProcessBrokerShutdownLabelsLifecycleWaitStages(t *testing.T) {
 	client.close()
 }
 
+func TestWaitStartedCommandExitKillsStalledAttachAfterOutputDrain(t *testing.T) {
+	attach := newFakeStartedCommand(t)
+	attach.closeWriters()
+	if err := waitStartedCommandExit(attach, 20*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-attach.Done():
+	default:
+		t.Fatal("stalled attach was not killed")
+	}
+}
+
 func TestProcessBrokerRejectsRoleReconnectBeforeContainerStart(t *testing.T) {
 	runtime := &fakeProcessRuntime{waiter: newFakeStartedCommand(t), attach: newFakeStartedCommand(t)}
 	b := mustProcessBroker(t, context.Background(), runtime)

@@ -23,6 +23,7 @@ const (
 	processSocketName       = "process.sock"
 	processHandshakeTimeout = 2 * time.Second
 	processStopSeconds      = "10"
+	processAttachExitGrace  = 2 * time.Second
 	maxWaitOutput           = 4096
 )
 
@@ -563,7 +564,15 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 			return
 		}
 	}
-	<-attach.Done()
+	// Both attach pipes have reached EOF, so all container bytes have already
+	// been forwarded. A podman start --attach client can nevertheless remain
+	// alive after a forced container SIGKILL; do not spend the whole lease
+	// cleanup budget waiting for that client. Killing only the attach process
+	// after the readers finish preserves output while bounding stream teardown.
+	if err := waitStartedCommandExit(attach, processAttachExitGrace); err != nil {
+		b.fail(fmt.Errorf("attach process exit: %w", err))
+		return
+	}
 	attachErr := attach.ExitErr()
 	end := processwire.StreamEnd{}
 	if attachErr != nil {
@@ -578,6 +587,21 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 	b.streamEnded = true
 	b.mu.Unlock()
 	b.finishIfComplete()
+}
+
+func waitStartedCommandExit(process startedCommand, grace time.Duration) error {
+	select {
+	case <-process.Done():
+		return nil
+	case <-time.After(grace):
+		process.Kill()
+	}
+	select {
+	case <-process.Done():
+		return nil
+	case <-time.After(grace):
+		return fmt.Errorf("attach process did not exit after kill")
+	}
 }
 
 func (b *processBroker) stopContainer(ctx context.Context, reason string) error {
