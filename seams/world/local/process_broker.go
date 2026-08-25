@@ -481,8 +481,16 @@ func (b *processBroker) observeWait(waiter startedCommand) {
 	b.waitResult = &result
 	requested := b.waitAcked && !b.controlAckPending
 	attach := b.attach
+	stopped := b.stopReason != ""
 	b.mu.Unlock()
-	if attach != nil {
+	if attach != nil && stopped {
+		// The authoritative wait has observed container termination. For an
+		// explicit stop, close the parent attach pipes immediately so a Podman /
+		// conmon-held writer cannot strand the drain readers. Natural exits retain
+		// the full output-drain path; stopped test agents have no post-stop output
+		// to preserve.
+		attach.ClosePipes()
+	} else if attach != nil {
 		_ = attach.Stdin().Close()
 	}
 	close(b.containerDone)
