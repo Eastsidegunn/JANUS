@@ -448,6 +448,30 @@ func TestProcessBrokerParentCancellationStopsAndWaits(t *testing.T) {
 	shutdownBrokerAllowError(t, b)
 }
 
+func TestProcessBrokerShutdownLabelsLifecycleWaitStages(t *testing.T) {
+	waiter, attach := newFakeStartedCommand(t), newFakeStartedCommand(t)
+	runtime := &fakeProcessRuntime{waiter: waiter, attach: attach}
+	b := mustProcessBroker(t, context.Background(), runtime)
+	client := connectProcessClient(t, b)
+	client.send(t, processwire.KindStart, nil)
+	client.ack(t, "start")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := b.Shutdown(ctx)
+	if err == nil {
+		t.Fatal("shutdown with stalled lifecycle unexpectedly succeeded")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "container exit observation") {
+		t.Fatalf("container wait stage missing from error: %v", err)
+	}
+	if !strings.Contains(message, "output stream drain") {
+		t.Fatalf("stream wait stage missing from error: %v", err)
+	}
+	client.close()
+}
+
 func TestProcessBrokerRejectsRoleReconnectBeforeContainerStart(t *testing.T) {
 	runtime := &fakeProcessRuntime{waiter: newFakeStartedCommand(t), attach: newFakeStartedCommand(t)}
 	b := mustProcessBroker(t, context.Background(), runtime)

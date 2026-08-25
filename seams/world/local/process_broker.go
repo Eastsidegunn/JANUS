@@ -665,12 +665,12 @@ func (b *processBroker) Shutdown(ctx context.Context) error {
 		select {
 		case <-b.containerDone:
 		case <-ctx.Done():
-			joined = errors.Join(joined, ctx.Err())
+			joined = errors.Join(joined, fmt.Errorf("world/local: process broker container exit observation: %w", ctx.Err()))
 		}
 		select {
 		case <-b.streamDone:
 		case <-ctx.Done():
-			joined = errors.Join(joined, ctx.Err())
+			joined = errors.Join(joined, fmt.Errorf("world/local: process broker output stream drain: %w", ctx.Err()))
 		}
 	}
 	b.cancel()

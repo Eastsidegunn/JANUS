@@ -13,9 +13,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
@@ -75,9 +77,15 @@ func run() error {
 	case "abnormal":
 		os.Exit(7)
 	case "stop":
-		// Keep a real scheduler wait alive until Podman delivers SIGTERM. A bare
-		// select{} is diagnosed by the Go runtime as a deadlock and exits before
-		// the host can exercise the stop path.
+		// PID 1 does not get the ordinary process-default signal semantics. Install
+		// an explicit handler so this mode exercises graceful Podman stop rather
+		// than accidentally waiting for the SIGKILL escalation.
+		return waitForStopSignal()
+	case "stop-ignore":
+		// The real agent may ignore SIGTERM. Keep this mode as a separate gate so
+		// the broker's SIGKILL escalation and bounded cleanup remain covered.
+		signal.Ignore(syscall.SIGTERM, syscall.SIGINT)
+		defer signal.Reset(syscall.SIGTERM, syscall.SIGINT)
 		time.Sleep(24 * time.Hour)
 		return nil
 	case "orphan":
@@ -90,6 +98,14 @@ func run() error {
 	default:
 		return fmt.Errorf("미지 mode %q", cfg.Mode)
 	}
+	return nil
+}
+
+func waitForStopSignal() error {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(signals)
+	<-signals
 	return nil
 }
 
