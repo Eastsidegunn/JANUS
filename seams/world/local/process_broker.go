@@ -554,7 +554,31 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 	readers.Add(2)
 	go readOne(attach.Stdout(), processwire.KindStdoutData, processwire.StreamStdout)
 	go readOne(attach.Stderr(), processwire.KindStderrData, processwire.StreamStderr)
-	go func() { readers.Wait(); close(chunks) }()
+	readersDone := make(chan struct{})
+	go func() {
+		readers.Wait()
+		close(chunks)
+		close(readersDone)
+	}()
+	go func() {
+		select {
+		case <-readersDone:
+			return
+		case <-b.containerDone:
+		}
+		// A stopped container has no future output. Give the attach readers a
+		// short grace to drain kernel buffers; if the podman attach client still
+		// holds a pipe, kill that client so stream teardown cannot consume the
+		// lease cleanup budget. Normal output remains untouched when readers
+		// reach EOF first.
+		timer := time.NewTimer(processAttachExitGrace)
+		defer timer.Stop()
+		select {
+		case <-readersDone:
+		case <-timer.C:
+			attach.Kill()
+		}
+	}()
 	b.mu.Lock()
 	encoder := b.outputEncoder
 	b.mu.Unlock()
