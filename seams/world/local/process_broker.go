@@ -45,6 +45,7 @@ type processBroker struct {
 	controlEncoder                      *processwire.Encoder
 	output                              net.Conn
 	outputEncoder                       *processwire.Encoder
+	outputMu                            sync.Mutex
 	controlUsed, outputUsed             bool
 	started, stdinClosed, waitRequested bool
 	waitAcked                           bool
@@ -415,6 +416,7 @@ func (b *processBroker) start(_ uint64) error {
 	b.wg.Add(2)
 	go b.observeWait(waiter)
 	go b.drainAttach(attach)
+	go b.forceStoppedStreamEnd()
 	return nil
 }
 
@@ -604,7 +606,7 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 	encoder := b.outputEncoder
 	b.mu.Unlock()
 	for chunk := range chunks {
-		if _, err := encoder.Write(chunk.kind, chunk.stream, 0, chunk.data); err != nil {
+		if err := b.writeOutput(encoder, chunk.kind, chunk.stream, chunk.data); err != nil {
 			b.fail(fmt.Errorf("output write: %w", err))
 			return
 		}
@@ -623,14 +625,73 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 	if attachErr != nil {
 		end.AttachError = attachErr.Error()
 	}
-	payload, _ := processwire.Marshal(end)
-	if _, err := encoder.Write(processwire.KindStreamEnd, processwire.StreamControl, 0, payload); err != nil {
+	if err := b.sendStreamEnd(encoder, end); err != nil {
 		b.fail(fmt.Errorf("stream_end: %w", err))
 		return
+	}
+	b.finishIfComplete()
+}
+
+func (b *processBroker) writeOutput(encoder *processwire.Encoder, kind processwire.Kind, stream processwire.Stream, payload []byte) error {
+	b.outputMu.Lock()
+	defer b.outputMu.Unlock()
+	b.mu.Lock()
+	ended := b.streamEnded
+	b.mu.Unlock()
+	if ended {
+		return nil
+	}
+	_, err := encoder.Write(kind, stream, 0, payload)
+	return err
+}
+
+func (b *processBroker) sendStreamEnd(encoder *processwire.Encoder, end processwire.StreamEnd) error {
+	b.outputMu.Lock()
+	defer b.outputMu.Unlock()
+	b.mu.Lock()
+	if b.streamEnded {
+		b.mu.Unlock()
+		return nil
+	}
+	b.mu.Unlock()
+	payload, _ := processwire.Marshal(end)
+	if _, err := encoder.Write(processwire.KindStreamEnd, processwire.StreamControl, 0, payload); err != nil {
+		return err
 	}
 	b.mu.Lock()
 	b.streamEnded = true
 	b.mu.Unlock()
+	return nil
+}
+
+func (b *processBroker) forceStoppedStreamEnd() {
+	select {
+	case <-b.containerDone:
+	case <-b.ctx.Done():
+		return
+	}
+	b.mu.Lock()
+	stopped := b.stopReason != ""
+	encoder := b.outputEncoder
+	b.mu.Unlock()
+	if !stopped || encoder == nil {
+		return
+	}
+	timer := time.NewTimer(processAttachExitGrace)
+	defer timer.Stop()
+	select {
+	case <-b.streamDone:
+		return
+	case <-timer.C:
+	}
+	// Explicit stop has no post-stop agent output. If Podman attach/conmon has
+	// not delivered EOF by now, close the client and publish the terminal frame
+	// from the broker so the adapter cannot remain circularly blocked on EOF.
+	b.closeStoppedAttachPipes()
+	if err := b.sendStreamEnd(encoder, processwire.StreamEnd{AttachError: "stopped attach stream forced closed"}); err != nil {
+		b.fail(fmt.Errorf("stream_end: %w", err))
+		return
+	}
 	b.finishIfComplete()
 }
 
