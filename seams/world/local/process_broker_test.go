@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -448,7 +449,7 @@ func TestProcessBrokerParentCancellationStopsAndWaits(t *testing.T) {
 	shutdownBrokerAllowError(t, b)
 }
 
-func TestProcessBrokerShutdownLabelsLifecycleWaitStages(t *testing.T) {
+func TestProcessBrokerShutdownLabelsContainerWaitStage(t *testing.T) {
 	waiter, attach := newFakeStartedCommand(t), newFakeStartedCommand(t)
 	runtime := &fakeProcessRuntime{waiter: waiter, attach: attach}
 	b := mustProcessBroker(t, context.Background(), runtime)
@@ -466,10 +467,34 @@ func TestProcessBrokerShutdownLabelsLifecycleWaitStages(t *testing.T) {
 	if !strings.Contains(message, "container exit observation") {
 		t.Fatalf("container wait stage missing from error: %v", err)
 	}
-	if !strings.Contains(message, "output stream drain") {
-		t.Fatalf("stream wait stage missing from error: %v", err)
+	if strings.Contains(message, "output stream drain") {
+		t.Fatalf("unexpected stream wait stage for completed stream: %v", err)
 	}
 	client.close()
+}
+
+func TestProcessBrokerShutdownLabelsStreamWaitStage(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "hxt-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	listener, err := net.Listen("unix", filepath.Join(root, "process.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &processBroker{
+		ctx: context.Background(), cancel: func() {}, listener: listener, rootDir: root,
+		started: true, containerDone: make(chan struct{}), streamDone: make(chan struct{}),
+		done: make(chan struct{}), runner: &fakeProcessRuntime{},
+	}
+	close(b.containerDone)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err = b.Shutdown(ctx)
+	if err == nil || !strings.Contains(err.Error(), "output stream drain") {
+		t.Fatalf("stream wait stage missing from error: %v", err)
+	}
 }
 
 func TestWaitStartedCommandExitKillsStalledAttachAfterOutputDrain(t *testing.T) {
