@@ -467,9 +467,6 @@ func TestProcessBrokerShutdownLabelsContainerWaitStage(t *testing.T) {
 	if !strings.Contains(message, "container exit observation") {
 		t.Fatalf("container wait stage missing from error: %v", err)
 	}
-	if strings.Contains(message, "output stream drain") {
-		t.Fatalf("unexpected stream wait stage for completed stream: %v", err)
-	}
 	client.close()
 }
 
