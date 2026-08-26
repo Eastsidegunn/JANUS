@@ -1,10 +1,11 @@
 # T10 process broker amendment — bounded shutdown and stream-consumer ownership
 
-상태: **구현 전 제안**. 대상: FR-LOG-09, FR-SBX-05, FR-ADP-10.
+상태: **승인된 개정안·구현 진행 중**. 대상: FR-LOG-09, FR-SBX-05, FR-ADP-10.
 
 이 문서는 T10 lifecycle-stop 회귀에서 관측된 30초 정지를 타임아웃 숫자로
 덮지 않고, 어디에서 대기가 생겼는지 식별하고 출력 스트림의 소유권을
-명시하기 위한 개정안이다. 이번 문서에는 코드나 게이트 완화가 없다. 현재
+명시하기 위한 개정안이다. 구현은 이 문서의 순서·분류를 따라야 하며 게이트
+완화는 없다. 현재
 Linux 관통 게이트의 실패는 다음과 같다.
 
 | run | 관측 | 현재 결론 |
@@ -75,16 +76,36 @@ PR에 첨부하고, 두 모드 모두 5회 연속 green이 될 때만 이 amendm
 ### 2.2 독자가 없는 경우
 
 output peer의 EOF, `net.ErrClosed`, `EPIPE`, 또는 최종 frame write의 확정된
-connection error는 `ErrStreamConsumerGone`으로 분류한다. 이는 다음과 같은
-별도 fatal 사유다.
+connection error는 우선 `consumer-gone` 상태로 분류한다. 다만 graceful stop의
+정상 종말에서는 이 상태가 fatal인지 아닌지를 **이미 전달된 출력의 존재와
+종료 순서로 결정**한다.
 
-- 정상 `stream_end`나 정상 EOF로 위장하지 않는다.
+다음 규칙을 채택한다(선택지 (a)).
+
+- adapter가 native `done`을 durable하게 방출했고, 그 뒤 parent가 정상적인
+  `Stop → Wait → Lease.Close`를 수행하는 중 output peer가 닫힌 경우: 더 전달할
+  agent 출력이 없고 container exit가 이미 관측됐으면 `stream_end` 미전달은
+  예상된 종말 상태다. 이를 `consumer-gone-after-done`으로 진단하지만
+  `Close`의 성공을 실패로 바꾸지 않는다.
+- adapter가 done을 방출하기 전, 아직 attach reader에 전달되지 않은 bytes가
+  있거나 output write가 진행 중인 상태에서 peer가 닫힌 경우: `ErrStreamConsumerGone`
+  fatal이다. 이 경우 실제 유실 가능성이 있으므로 lease는 실패한다.
+- broker가 `stream_end`를 성공적으로 쓴 뒤의 EOF는 정상적인 peer close로
+  간주한다. 이미 terminal frame이 소비자에게 도달했으므로 별도 오류가 아니다.
+
+즉, "독자 없음"이라는 transport 사실만으로 graceful close를 실패시키지 않는다.
+`doneSeen`, `containerDone`, `streamEnded`, `bytesPending`를 함께 기록해
+두 상태를 재구성할 수 있어야 한다. 일반적인 adapter abort·protocol 오류·
+consumer 이탈은 여전히 다음과 같은 별도 fatal 사유다.
+
+- done 이전 유실 가능성을 정상 `stream_end`나 정상 EOF로 위장하지 않는다.
 - 독자가 없어진 뒤 timeout을 기다리지 않고 broker가 즉시 stream/control
   정리와 container stop/kill을 시작한다.
 - `first_blocked_stage=output-write` 또는 `stream-end-write`와
   `consumer=gone`을 진단에 보존한다.
 - consumer-gone으로 인해 끝까지 전달할 수 없었던 출력이 있다는 사실은
-  오류로 남긴다. 조용한 성공·평범한 종료가 아니다.
+  오류로 남긴다. 조용한 성공·평범한 종료가 아니다. 단, 위의
+  `consumer-gone-after-done` 조건은 이 규칙의 예외인 비오류 종말이다.
 
 반대로 container가 먼저 종료했고 output peer가 살아 있으면, 이미 버퍼된
 유한한 바이트를 drain한 뒤 `stream_end`를 보내고 정상 종료할 수 있다. 이때도
@@ -175,7 +196,7 @@ state에서 닫는다. broker는 output EOF를 정상 종료로 승격하지 않
 | 항목 | 결정 | 구현/검증 조건 |
 |---|---|---|
 | 30초 원인 식별 | 단계 enum과 first-blocked-stage를 추가 | Linux 실물 run에 `chunk-forward`, `output-write`, `reader-drain`, `attach-exit`, `stream-end-write` 결과와 run ID 포함 |
-| FR-LOG-09 독자 경계 | 독자 있음은 lossless backpressure, 독자 없음은 `ErrStreamConsumerGone` | output EOF/write error 즉시 fatal; 정상 EOF 위장·무한 대기 금지 |
+| FR-LOG-09 독자 경계 | 독자 있음은 lossless backpressure; done 이후 정상 close는 `consumer-gone-after-done`, done 이전 이탈은 `ErrStreamConsumerGone` | doneSeen/containerDone/streamEnded/bytesPending를 기록하고, 정상 EOF 위장·무한 대기는 금지 |
 | Shutdown 순서 | containerDone 관측 후 drain context 취소, 유한 buffer drain 또는 consumer-gone | graceful/stop-ignore 모두 container·stream·cleanup bounded |
 | socket 규약 | adapter terminal state에서 output/control 명시적 close | adapter의 `outputDone` 선행 대기 순환 제거; 재연결 금지 |
 | 회귀 보존 | stop-ignore 관통 모드 유지 | graceful와 stop-ignore 각각 5회 연속 Linux green |
@@ -192,4 +213,3 @@ consumer 상태, cleanup 결과가 있어야 한다. 현재 baseline run은 단�
 - contracts/ JSON schema와 fixtures는 수정하지 않는다.
 - 타임아웃을 늘려 실패를 green으로 만드는 변경, 게이트 삭제·skip, 출력
   truncation/drop, 재연결을 통한 exactly-once 가장은 금지한다.
-

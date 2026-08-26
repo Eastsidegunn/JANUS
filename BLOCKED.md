@@ -35,3 +35,12 @@ stream 종료 순서를 추가로 계측·재설계해야 하며, 원인이 확�
 검증 run: 32826754125, 32832407162, 32832960325, 32833303870,
 32833741349, 32834630518, 32835050107, 32835632685, 32836344535,
 32837057504 (모두 lifecycle stop 계열 실패).
+
+개정안 `docs/t10-process-broker-amendment.md`의 선택지 (a)를 반영한 구현을
+추가했다. stop ACK 뒤 adapter가 output socket을 명시적으로 닫고, broker는
+`consumer-gone-after-done`을 정상 종말로, done 이전 이탈을 fatal로 구분한다.
+`chunk-forward`·`output-write`·`reader-drain`·`attach-exit`·
+`stream-end-write` 단계 표식과 회귀를 로컬에서 검증했으며 `make ci`는 권한 있는
+환경에서 exit 0이다. 다만 Linux rootless Podman에서 graceful/stop-ignore 각각
+5회 연속 green과 단계별 run ID는 아직 없다. 이 증거가 첨부되기 전까지 T10
+lifecycle 차단은 유지한다.

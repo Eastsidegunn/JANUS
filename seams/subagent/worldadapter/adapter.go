@@ -35,6 +35,8 @@ const (
 	maxCommandBytes       = 4 << 20
 )
 
+var errAdapterStopped = errors.New("worldadapter: stopped")
+
 type Config struct {
 	Process  world.ProcessEndpoint
 	Approval world.ApprovalEndpoint
@@ -184,6 +186,18 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 
 	commandErr := make(chan error, 1)
 	stopped := make(chan struct{})
+	stopScanDone := make(chan struct{})
+	defer close(stopScanDone)
+	go func() {
+		select {
+		case <-stopped:
+			// Unblock the native scanner without closing the broker output socket.
+			// This lets the adapter emit its synthetic stopped/done event before
+			// it explicitly closes the process output endpoint.
+			_ = stdoutR.CloseWithError(errAdapterStopped)
+		case <-stopScanDone:
+		}
+	}()
 	go monitorCommands(ctx, scanner, vals, process, approvals, stopped, commandErr)
 
 	native := bufio.NewScanner(stdoutR)
@@ -236,8 +250,36 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 			return err
 		}
 	}
-	if err := native.Err(); err != nil {
+	wasStopped := process.OutputClosed()
+	if !wasStopped {
+		select {
+		case <-stopped:
+			wasStopped = true
+		default:
+		}
+	}
+	if err := native.Err(); err != nil && !wasStopped {
 		return fmt.Errorf("worldadapter: container stdout scan: %w", err)
+	}
+	doneEmitted := false
+	if wasStopped && !doneEmitted {
+		if done == nil {
+			done = &gen.DonePayload{Status: gen.DonePayloadStatusStopped, Result: "(중단됨: world process stop)"}
+		} else {
+			done.Status = gen.DonePayloadStatusStopped
+		}
+		payload, err := json.Marshal(done)
+		if err != nil {
+			return err
+		}
+		if err := w.emit(gen.EventKindSubagentDone, payload, nil); err != nil {
+			return err
+		}
+		doneEmitted = true
+		// The terminal event is now durable on the adapter stdout contract. The
+		// output peer may close; the broker classifies this post-done close as
+		// expected rather than as an ordinary stream failure.
+		process.CloseOutput()
 	}
 	output := <-outputDone
 	exit, exitErr := process.Wait(ctx)
@@ -251,13 +293,7 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 		}
 	default:
 	}
-	wasStopped := false
-	select {
-	case <-stopped:
-		wasStopped = true
-	default:
-	}
-	if output.err != nil && !errors.Is(output.err, io.EOF) {
+	if output.err != nil && !errors.Is(output.err, io.EOF) && !(wasStopped && process.OutputClosed()) {
 		return output.err
 	}
 	if !ready {
@@ -279,8 +315,10 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 	if err != nil {
 		return err
 	}
-	if err := w.emit(gen.EventKindSubagentDone, payload, nil); err != nil {
-		return err
+	if !doneEmitted {
+		if err := w.emit(gen.EventKindSubagentDone, payload, nil); err != nil {
+			return err
+		}
 	}
 	_ = in.Close()
 	return exitErr

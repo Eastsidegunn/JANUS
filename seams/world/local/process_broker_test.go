@@ -548,6 +548,38 @@ func TestProcessBrokerOutputDisconnectIsFatalBeforeContainerStart(t *testing.T) 
 	shutdownBrokerAllowError(t, b)
 }
 
+func TestProcessBrokerStopConsumerCloseIsExpectedTerminal(t *testing.T) {
+	waiter, attach := newFakeStartedCommand(t), newFakeStartedCommand(t)
+	runtime := &fakeProcessRuntime{waiter: waiter, attach: attach}
+	runtime.onStop = func() {
+		waiter.completeWait("143")
+		attach.closeWriters()
+		attach.finish(errors.New("stopped"))
+	}
+	b := mustProcessBroker(t, context.Background(), runtime)
+	client := connectProcessClient(t, b)
+	client.send(t, processwire.KindStart, nil)
+	client.ack(t, "start ack")
+	stopPayload, err := processwire.Marshal(processwire.Stop{Reason: "user stop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.send(t, processwire.KindStop, stopPayload)
+	client.ack(t, "stop ack")
+	// This is the adapter's explicit terminal close after it has consumed the
+	// native stop result. It must not become a fatal broker error.
+	_ = client.output.Close()
+	select {
+	case <-b.streamDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected stop stream termination")
+	}
+	if err := b.Err(); err != nil {
+		t.Fatalf("expected non-fatal stop consumer close, got %v", err)
+	}
+	shutdownBroker(t, b)
+}
+
 func TestProcessBrokerRepeatedUnusedLeaseDoesNotAccumulateGoroutines(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 	for range 5 {

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/core/world"
@@ -28,6 +29,17 @@ const (
 )
 
 var ErrProcessBrokerFatal = errors.New("world/local: process broker fatal")
+var ErrStreamConsumerGone = errors.New("world/local: process broker stream consumer gone")
+
+type streamStage string
+
+const (
+	streamStageChunkForward   streamStage = "chunk-forward"
+	streamStageOutputWrite    streamStage = "output-write"
+	streamStageReaderDrain    streamStage = "reader-drain"
+	streamStageAttachExit     streamStage = "attach-exit"
+	streamStageStreamEndWrite streamStage = "stream-end-write"
+)
 
 type processBroker struct {
 	ctx                          context.Context
@@ -57,6 +69,10 @@ type processBroker struct {
 	waiter                              startedCommand
 	firstErr                            error
 	closing                             bool
+	outputPeerGone                      bool
+	stageMu                             sync.Mutex
+	activeStages                        map[streamStage]time.Time
+	firstBlockedStage                   streamStage
 
 	outputReady   chan struct{}
 	bothReady     chan struct{}
@@ -106,7 +122,7 @@ func startProcessBroker(parent context.Context, spanID, leaseID, containerID str
 		ctx: ctx, cancel: cancel, spanID: spanID, leaseID: leaseID, containerID: containerID,
 		runner: runner, starter: starter, rootDir: root, socketPath: path, listener: listener,
 		endpoint:    world.NewProcessEndpoint("unix", path, leaseID, controlCap, outputCap),
-		outputReady: make(chan struct{}), bothReady: make(chan struct{}), containerDone: make(chan struct{}), streamDone: make(chan struct{}), done: make(chan struct{}),
+		outputReady: make(chan struct{}), bothReady: make(chan struct{}), containerDone: make(chan struct{}), streamDone: make(chan struct{}), done: make(chan struct{}), activeStages: make(map[streamStage]time.Time),
 	}
 	b.wg.Add(2)
 	go b.accept()
@@ -125,6 +141,57 @@ func randomCapability() (string, error) {
 func (b *processBroker) Endpoint() world.ProcessEndpoint { return b.endpoint }
 func (b *processBroker) Done() <-chan struct{}           { return b.done }
 func (b *processBroker) Err() error                      { b.mu.Lock(); defer b.mu.Unlock(); return b.firstErr }
+
+func (b *processBroker) enterStreamStage(stage streamStage) func() {
+	b.stageMu.Lock()
+	if b.activeStages == nil {
+		b.activeStages = make(map[streamStage]time.Time)
+	}
+	b.activeStages[stage] = time.Now()
+	b.stageMu.Unlock()
+	return func() {
+		b.stageMu.Lock()
+		delete(b.activeStages, stage)
+		b.stageMu.Unlock()
+	}
+}
+
+func (b *processBroker) streamStageDiagnostic(markBlocked bool) string {
+	b.stageMu.Lock()
+	defer b.stageMu.Unlock()
+	stage := streamStage("")
+	started := time.Time{}
+	for candidate, at := range b.activeStages {
+		if stage == "" || at.Before(started) {
+			stage, started = candidate, at
+		}
+	}
+	if markBlocked && b.firstBlockedStage == "" && stage != "" {
+		b.firstBlockedStage = stage
+	}
+	if stage == "" {
+		stage = b.firstBlockedStage
+	}
+	if stage == "" {
+		return "stage=none"
+	}
+	if started.IsZero() {
+		return fmt.Sprintf("stage=%s", stage)
+	}
+	return fmt.Sprintf("stage=%s elapsed=%s", stage, time.Since(started).Round(time.Millisecond))
+}
+
+func (b *processBroker) markOutputPeerGone() {
+	b.mu.Lock()
+	b.outputPeerGone = true
+	b.mu.Unlock()
+}
+
+func (b *processBroker) expectedConsumerGone() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.outputPeerGone && b.stopReason != ""
+}
 
 func (b *processBroker) watchParent(parent context.Context) {
 	defer b.wg.Done()
@@ -234,7 +301,23 @@ func (b *processBroker) watchOutputPeer(conn net.Conn) {
 		b.fail(fmt.Errorf("output peer가 금지된 역방향 byte를 전송함"))
 		return
 	}
+	if b.expectedStopConsumerGone(err) {
+		b.markOutputPeerGone()
+		return
+	}
 	b.fail(fmt.Errorf("output peer disconnect: %w", err))
+}
+
+func (b *processBroker) expectedStopConsumerGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopReason == "" {
+		return false
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EPIPE)
 }
 
 func (b *processBroker) armPeerDeadline() {
@@ -539,6 +622,8 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 	defer close(b.streamDone)
 	defer attach.ClosePipes()
 	chunks := make(chan outputChunk)
+	forwardDone := make(chan struct{})
+	defer close(forwardDone)
 	var readers sync.WaitGroup
 	readOne := func(reader io.Reader, kind processwire.Kind, stream processwire.Stream) {
 		defer readers.Done()
@@ -547,11 +632,17 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 			n, err := reader.Read(buf)
 			if n > 0 {
 				chunk := outputChunk{kind: kind, stream: stream, data: append([]byte(nil), buf[:n]...)}
+				leave := b.enterStreamStage(streamStageChunkForward)
 				select {
 				case chunks <- chunk:
+				case <-forwardDone:
+					leave()
+					return
 				case <-b.ctx.Done():
+					leave()
 					return
 				}
+				leave()
 			}
 			if err != nil {
 				if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) {
@@ -566,7 +657,9 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 	go readOne(attach.Stderr(), processwire.KindStderrData, processwire.StreamStderr)
 	readersDone := make(chan struct{})
 	go func() {
+		leave := b.enterStreamStage(streamStageReaderDrain)
 		readers.Wait()
+		leave()
 		close(chunks)
 		close(readersDone)
 	}()
@@ -607,6 +700,11 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 	b.mu.Unlock()
 	for chunk := range chunks {
 		if err := b.writeOutput(encoder, chunk.kind, chunk.stream, chunk.data); err != nil {
+			if b.expectedConsumerGone() || b.expectedStopConsumerGone(err) {
+				b.markOutputPeerGone()
+				b.markStreamEnded()
+				return
+			}
 			b.fail(fmt.Errorf("output write: %w", err))
 			return
 		}
@@ -616,7 +714,10 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 	// alive after a forced container SIGKILL; do not spend the whole lease
 	// cleanup budget waiting for that client. Killing only the attach process
 	// after the readers finish preserves output while bounding stream teardown.
-	if err := waitStartedCommandExit(attach, processAttachExitGrace); err != nil {
+	leaveAttach := b.enterStreamStage(streamStageAttachExit)
+	err := waitStartedCommandExit(attach, processAttachExitGrace)
+	leaveAttach()
+	if err != nil {
 		b.fail(fmt.Errorf("attach process exit: %w", err))
 		return
 	}
@@ -626,6 +727,11 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 		end.AttachError = attachErr.Error()
 	}
 	if err := b.sendStreamEnd(encoder, end); err != nil {
+		if b.expectedConsumerGone() || b.expectedStopConsumerGone(err) {
+			b.markOutputPeerGone()
+			b.markStreamEnded()
+			return
+		}
 		b.fail(fmt.Errorf("stream_end: %w", err))
 		return
 	}
@@ -641,7 +747,9 @@ func (b *processBroker) writeOutput(encoder *processwire.Encoder, kind processwi
 	if ended {
 		return nil
 	}
+	leave := b.enterStreamStage(streamStageOutputWrite)
 	_, err := encoder.Write(kind, stream, 0, payload)
+	leave()
 	return err
 }
 
@@ -655,13 +763,23 @@ func (b *processBroker) sendStreamEnd(encoder *processwire.Encoder, end processw
 	}
 	b.mu.Unlock()
 	payload, _ := processwire.Marshal(end)
-	if _, err := encoder.Write(processwire.KindStreamEnd, processwire.StreamControl, 0, payload); err != nil {
+	leave := b.enterStreamStage(streamStageStreamEndWrite)
+	_, err := encoder.Write(processwire.KindStreamEnd, processwire.StreamControl, 0, payload)
+	leave()
+	if err != nil {
 		return err
 	}
 	b.mu.Lock()
 	b.streamEnded = true
 	b.mu.Unlock()
 	return nil
+}
+
+func (b *processBroker) markStreamEnded() {
+	b.mu.Lock()
+	b.streamEnded = true
+	b.mu.Unlock()
+	b.finishIfComplete()
 }
 
 func (b *processBroker) forceStoppedStreamEnd() {
@@ -809,19 +927,46 @@ func (b *processBroker) Shutdown(ctx context.Context) error {
 	_ = b.listener.Close()
 	joined := b.stopContainer(ctx, "lease shutdown")
 	if started {
+		containerObserved := false
 		select {
 		case <-b.containerDone:
+			containerObserved = true
 		case <-ctx.Done():
-			joined = errors.Join(joined, fmt.Errorf("world/local: process broker container exit observation: %w", ctx.Err()))
+			joined = errors.Join(joined, fmt.Errorf("world/local: process broker container exit observation: %w (%s)", ctx.Err(), b.streamStageDiagnostic(true)))
+		}
+		if !containerObserved {
+			// No container boundary was observed. Cancel and close the transport now;
+			// otherwise reader goroutines can remain blocked on a dead attach.
+			b.cancel()
+			b.closeConnections()
+			b.closeStartedCommands()
 		}
 		select {
 		case <-b.streamDone:
-		case <-ctx.Done():
-			joined = errors.Join(joined, fmt.Errorf("world/local: process broker output stream drain: %w", ctx.Err()))
+		case <-time.After(2 * time.Second):
+			joined = errors.Join(joined, fmt.Errorf("world/local: process broker output stream drain: timeout (%s)", b.streamStageDiagnostic(true)))
+			b.cancel()
+			b.closeConnections()
+			b.closeStartedCommands()
+			select {
+			case <-b.streamDone:
+			case <-time.After(2 * time.Second):
+				joined = errors.Join(joined, fmt.Errorf("world/local: process broker output stream drain: forced cleanup timeout (%s)", b.streamStageDiagnostic(true)))
+			}
 		}
 	}
 	b.cancel()
 	b.closeConnections()
+	b.closeStartedCommands()
+	b.wg.Wait()
+	if err := os.RemoveAll(b.rootDir); err != nil {
+		joined = errors.Join(joined, err)
+	}
+	b.doneOnce.Do(func() { close(b.done) })
+	return errors.Join(joined, b.Err())
+}
+
+func (b *processBroker) closeStartedCommands() {
 	b.mu.Lock()
 	attach, waiter := b.attach, b.waiter
 	b.mu.Unlock()
@@ -833,10 +978,4 @@ func (b *processBroker) Shutdown(ctx context.Context) error {
 		waiter.Kill()
 		waiter.ClosePipes()
 	}
-	b.wg.Wait()
-	if err := os.RemoveAll(b.rootDir); err != nil {
-		joined = errors.Join(joined, err)
-	}
-	b.doneOnce.Do(func() { close(b.done) })
-	return errors.Join(joined, b.Err())
 }
