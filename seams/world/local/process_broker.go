@@ -317,7 +317,7 @@ func (b *processBroker) expectedStopConsumerGone(err error) bool {
 	if b.stopReason == "" {
 		return false
 	}
-	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EPIPE)
+	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
 }
 
 func (b *processBroker) armPeerDeadline() {
