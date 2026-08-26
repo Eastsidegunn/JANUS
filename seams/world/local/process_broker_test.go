@@ -8,9 +8,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -448,6 +450,64 @@ func TestProcessBrokerParentCancellationStopsAndWaits(t *testing.T) {
 	shutdownBrokerAllowError(t, b)
 }
 
+func TestProcessBrokerShutdownLabelsContainerWaitStage(t *testing.T) {
+	waiter, attach := newFakeStartedCommand(t), newFakeStartedCommand(t)
+	runtime := &fakeProcessRuntime{waiter: waiter, attach: attach}
+	b := mustProcessBroker(t, context.Background(), runtime)
+	client := connectProcessClient(t, b)
+	client.send(t, processwire.KindStart, nil)
+	client.ack(t, "start")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := b.Shutdown(ctx)
+	if err == nil {
+		t.Fatal("shutdown with stalled lifecycle unexpectedly succeeded")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "container exit observation") {
+		t.Fatalf("container wait stage missing from error: %v", err)
+	}
+	client.close()
+}
+
+func TestProcessBrokerShutdownLabelsStreamWaitStage(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "hxt-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	listener, err := net.Listen("unix", filepath.Join(root, "process.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &processBroker{
+		ctx: context.Background(), cancel: func() {}, listener: listener, rootDir: root,
+		started: true, containerDone: make(chan struct{}), streamDone: make(chan struct{}),
+		done: make(chan struct{}), runner: &fakeProcessRuntime{},
+	}
+	close(b.containerDone)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err = b.Shutdown(ctx)
+	if err == nil || !strings.Contains(err.Error(), "output stream drain") {
+		t.Fatalf("stream wait stage missing from error: %v", err)
+	}
+}
+
+func TestWaitStartedCommandExitKillsStalledAttachAfterOutputDrain(t *testing.T) {
+	attach := newFakeStartedCommand(t)
+	attach.closeWriters()
+	if err := waitStartedCommandExit(attach, 20*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-attach.Done():
+	default:
+		t.Fatal("stalled attach was not killed")
+	}
+}
+
 func TestProcessBrokerRejectsRoleReconnectBeforeContainerStart(t *testing.T) {
 	runtime := &fakeProcessRuntime{waiter: newFakeStartedCommand(t), attach: newFakeStartedCommand(t)}
 	b := mustProcessBroker(t, context.Background(), runtime)
@@ -487,6 +547,74 @@ func TestProcessBrokerOutputDisconnectIsFatalBeforeContainerStart(t *testing.T) 
 	}
 	_ = client.control.Close()
 	shutdownBrokerAllowError(t, b)
+}
+
+func TestStopControlCloseIsExpectedOnlyAfterFinalExitAttempt(t *testing.T) {
+	b := &processBroker{stopReason: "user stop"}
+	if b.expectedStopControlGone(syscall.EPIPE) {
+		t.Fatal("exit_observed 전 control close가 정상 종말로 분류됨")
+	}
+	b.exitSent = true
+	if !b.expectedStopControlGone(syscall.EPIPE) {
+		t.Fatal("최종 exit_observed 쓰기의 peer close가 정상 종말로 분류되지 않음")
+	}
+}
+
+func TestConsumerGoneRequiresExplicitStop(t *testing.T) {
+	b := &processBroker{outputPeerGone: true}
+	if b.expectedConsumerGone() {
+		t.Fatal("output peer 이탈만으로 정상 consumer-gone 종말을 허용함")
+	}
+	b.stopReason = "user stop"
+	if !b.expectedConsumerGone() {
+		t.Fatal("명시 stop 뒤 consumer-gone을 정상 종말로 분류하지 않음")
+	}
+}
+
+func TestStopConsumerGoneRejectsTimeout(t *testing.T) {
+	b := &processBroker{stopReason: "user stop"}
+	timeout := &net.DNSError{Err: "synthetic timeout", IsTimeout: true}
+	if b.expectedStopConsumerGone(timeout) {
+		t.Fatal("timeout을 consumer-gone 정상 종말로 분류함")
+	}
+}
+
+func TestProcessBrokerStopConsumerCloseIsExpectedTerminal(t *testing.T) {
+	waiter, attach := newFakeStartedCommand(t), newFakeStartedCommand(t)
+	runtime := &fakeProcessRuntime{waiter: waiter, attach: attach}
+	runtime.onStop = func() {
+		waiter.completeWait("143")
+		attach.closeWriters()
+	}
+	b := mustProcessBroker(t, context.Background(), runtime)
+	client := connectProcessClient(t, b)
+	client.send(t, processwire.KindStart, nil)
+	client.ack(t, "start ack")
+	client.send(t, processwire.KindWait, nil)
+	client.ack(t, "wait ack")
+	stopPayload, err := processwire.Marshal(processwire.Stop{Reason: "user stop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.send(t, processwire.KindStop, stopPayload)
+	client.ack(t, "stop ack")
+	if f := readFrame(t, client.control, client.controlDec, "exit observed"); f.Kind != processwire.KindExitObserved {
+		t.Fatalf("exit kind=%d", f.Kind)
+	}
+	// This is the adapter's explicit terminal close after it has consumed the
+	// native stop result. Neither output nor the now-complete control plane may
+	// become a fatal broker error.
+	_ = client.output.Close()
+	_ = client.control.Close()
+	select {
+	case <-b.streamDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected stop stream termination")
+	}
+	if err := b.Err(); err != nil {
+		t.Fatalf("expected non-fatal stop consumer close, got %v", err)
+	}
+	shutdownBroker(t, b)
 }
 
 func TestProcessBrokerRepeatedUnusedLeaseDoesNotAccumulateGoroutines(t *testing.T) {

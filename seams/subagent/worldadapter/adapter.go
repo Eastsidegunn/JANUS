@@ -35,6 +35,8 @@ const (
 	maxCommandBytes       = 4 << 20
 )
 
+var errAdapterStopped = errors.New("worldadapter: stopped")
+
 type Config struct {
 	Process  world.ProcessEndpoint
 	Approval world.ApprovalEndpoint
@@ -183,8 +185,21 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 	}
 
 	commandErr := make(chan error, 1)
+	stopRequested := make(chan struct{})
 	stopped := make(chan struct{})
-	go monitorCommands(ctx, scanner, vals, process, approvals, stopped, commandErr)
+	stopScanDone := make(chan struct{})
+	defer close(stopScanDone)
+	go func() {
+		select {
+		case <-stopRequested:
+			// Unblock the native scanner without closing the broker output socket.
+			// The main goroutine still waits for the stop ACK before emitting its
+			// synthetic stopped/done event and closing the process endpoint.
+			_ = stdoutR.CloseWithError(errAdapterStopped)
+		case <-stopScanDone:
+		}
+	}()
+	go monitorCommands(ctx, scanner, vals, process, approvals, stopRequested, stopped, commandErr)
 
 	native := bufio.NewScanner(stdoutR)
 	native.Buffer(make([]byte, 0, 64*1024), maxCommandBytes)
@@ -236,8 +251,48 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 			return err
 		}
 	}
-	if err := native.Err(); err != nil {
+	stopWasRequested := false
+	select {
+	case <-stopRequested:
+		stopWasRequested = true
+	default:
+	}
+	if err := native.Err(); err != nil && !stopWasRequested {
 		return fmt.Errorf("worldadapter: container stdout scan: %w", err)
+	}
+	wasStopped := false
+	if stopWasRequested {
+		select {
+		case <-stopped:
+			wasStopped = true
+		case err := <-commandErr:
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("worldadapter: stop ACK 없이 command 종료")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	doneEmitted := false
+	if wasStopped && !doneEmitted {
+		if done == nil {
+			done = &gen.DonePayload{Status: gen.DonePayloadStatusStopped, Result: "(중단됨: world process stop)"}
+		} else {
+			done.Status = gen.DonePayloadStatusStopped
+		}
+		payload, err := json.Marshal(done)
+		if err != nil {
+			return err
+		}
+		if err := w.emit(gen.EventKindSubagentDone, payload, nil); err != nil {
+			return err
+		}
+		doneEmitted = true
+		// The terminal event is now durable on the adapter stdout contract. The
+		// output peer may close; the broker classifies this post-done close as
+		// expected rather than as an ordinary stream failure.
+		process.CloseOutput()
 	}
 	output := <-outputDone
 	exit, exitErr := process.Wait(ctx)
@@ -251,13 +306,7 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 		}
 	default:
 	}
-	wasStopped := false
-	select {
-	case <-stopped:
-		wasStopped = true
-	default:
-	}
-	if output.err != nil && !errors.Is(output.err, io.EOF) {
+	if output.err != nil && !errors.Is(output.err, io.EOF) && !(wasStopped && process.OutputClosed()) {
 		return output.err
 	}
 	if !ready {
@@ -279,14 +328,16 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 	if err != nil {
 		return err
 	}
-	if err := w.emit(gen.EventKindSubagentDone, payload, nil); err != nil {
-		return err
+	if !doneEmitted {
+		if err := w.emit(gen.EventKindSubagentDone, payload, nil); err != nil {
+			return err
+		}
 	}
 	_ = in.Close()
 	return exitErr
 }
 
-func monitorCommands(ctx context.Context, scanner *bufio.Scanner, vals *validate.Validators, process *processClient, approvals *approvalClient, stopped chan<- struct{}, result chan<- error) {
+func monitorCommands(ctx context.Context, scanner *bufio.Scanner, vals *validate.Validators, process *processClient, approvals *approvalClient, stopRequested, stopped chan<- struct{}, result chan<- error) {
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
 		if err := vals.ValidateCommand(line); err != nil {
@@ -316,6 +367,7 @@ func monitorCommands(ctx context.Context, scanner *bufio.Scanner, vals *validate
 				result <- err
 				return
 			}
+			close(stopRequested)
 			if err := process.Stop(ctx, string(stop.Reason)); err != nil {
 				result <- err
 				return

@@ -23,10 +23,23 @@ const (
 	processSocketName       = "process.sock"
 	processHandshakeTimeout = 2 * time.Second
 	processStopSeconds      = "10"
+	processAttachExitGrace  = 2 * time.Second
+	processReadPollInterval = 100 * time.Millisecond
 	maxWaitOutput           = 4096
 )
 
 var ErrProcessBrokerFatal = errors.New("world/local: process broker fatal")
+var ErrStreamConsumerGone = errors.New("world/local: process broker stream consumer gone")
+
+type streamStage string
+
+const (
+	streamStageChunkForward   streamStage = "chunk-forward"
+	streamStageOutputWrite    streamStage = "output-write"
+	streamStageReaderDrain    streamStage = "reader-drain"
+	streamStageAttachExit     streamStage = "attach-exit"
+	streamStageStreamEndWrite streamStage = "stream-end-write"
+)
 
 type processBroker struct {
 	ctx                          context.Context
@@ -44,6 +57,7 @@ type processBroker struct {
 	controlEncoder                      *processwire.Encoder
 	output                              net.Conn
 	outputEncoder                       *processwire.Encoder
+	outputMu                            sync.Mutex
 	controlUsed, outputUsed             bool
 	started, stdinClosed, waitRequested bool
 	waitAcked                           bool
@@ -55,6 +69,10 @@ type processBroker struct {
 	waiter                              startedCommand
 	firstErr                            error
 	closing                             bool
+	outputPeerGone                      bool
+	stageMu                             sync.Mutex
+	activeStages                        map[streamStage]time.Time
+	firstBlockedStage                   streamStage
 
 	outputReady   chan struct{}
 	bothReady     chan struct{}
@@ -104,7 +122,7 @@ func startProcessBroker(parent context.Context, spanID, leaseID, containerID str
 		ctx: ctx, cancel: cancel, spanID: spanID, leaseID: leaseID, containerID: containerID,
 		runner: runner, starter: starter, rootDir: root, socketPath: path, listener: listener,
 		endpoint:    world.NewProcessEndpoint("unix", path, leaseID, controlCap, outputCap),
-		outputReady: make(chan struct{}), bothReady: make(chan struct{}), containerDone: make(chan struct{}), streamDone: make(chan struct{}), done: make(chan struct{}),
+		outputReady: make(chan struct{}), bothReady: make(chan struct{}), containerDone: make(chan struct{}), streamDone: make(chan struct{}), done: make(chan struct{}), activeStages: make(map[streamStage]time.Time),
 	}
 	b.wg.Add(2)
 	go b.accept()
@@ -123,6 +141,96 @@ func randomCapability() (string, error) {
 func (b *processBroker) Endpoint() world.ProcessEndpoint { return b.endpoint }
 func (b *processBroker) Done() <-chan struct{}           { return b.done }
 func (b *processBroker) Err() error                      { b.mu.Lock(); defer b.mu.Unlock(); return b.firstErr }
+
+func (b *processBroker) enterStreamStage(stage streamStage) func() {
+	b.stageMu.Lock()
+	if b.activeStages == nil {
+		b.activeStages = make(map[streamStage]time.Time)
+	}
+	b.activeStages[stage] = time.Now()
+	b.stageMu.Unlock()
+	return func() {
+		b.stageMu.Lock()
+		delete(b.activeStages, stage)
+		b.stageMu.Unlock()
+	}
+}
+
+func (b *processBroker) streamStageDiagnostic(markBlocked bool) string {
+	b.stageMu.Lock()
+	defer b.stageMu.Unlock()
+	stage := streamStage("")
+	started := time.Time{}
+	// A reader-drain watcher exists for most of the session. Prefer the narrow
+	// operation that can actually block progress when stages overlap.
+	for _, candidate := range []streamStage{
+		streamStageOutputWrite,
+		streamStageChunkForward,
+		streamStageStreamEndWrite,
+		streamStageAttachExit,
+		streamStageReaderDrain,
+	} {
+		if at, ok := b.activeStages[candidate]; ok {
+			stage, started = candidate, at
+			break
+		}
+	}
+	if markBlocked && b.firstBlockedStage == "" && stage != "" {
+		b.firstBlockedStage = stage
+	}
+	if stage == "" {
+		stage = b.firstBlockedStage
+	}
+	if stage == "" {
+		return "stage=none"
+	}
+	if started.IsZero() {
+		return fmt.Sprintf("stage=%s", stage)
+	}
+	return fmt.Sprintf("stage=%s elapsed=%s", stage, time.Since(started).Round(time.Millisecond))
+}
+
+func (b *processBroker) markOutputPeerGone() {
+	b.mu.Lock()
+	b.outputPeerGone = true
+	output := b.output
+	b.mu.Unlock()
+	// Closing the broker side is the transport-level wakeup for an encoder Write
+	// already blocked in the kernel. Peer EOF alone is not guaranteed to wake a
+	// concurrent writer promptly on every Unix implementation.
+	if output != nil {
+		_ = output.Close()
+	}
+}
+
+func (b *processBroker) expectedConsumerGone() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.outputPeerGone && b.stopReason != ""
+}
+
+func (b *processBroker) stopRequested() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stopReason != ""
+}
+
+func (b *processBroker) stoppedContainerExited() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stopReason != "" && b.waitResult != nil
+}
+
+func (b *processBroker) expectedStoppedReadEnd(err error) bool {
+	if !b.stopRequested() {
+		return false
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
 
 func (b *processBroker) watchParent(parent context.Context) {
 	defer b.wg.Done()
@@ -232,7 +340,43 @@ func (b *processBroker) watchOutputPeer(conn net.Conn) {
 		b.fail(fmt.Errorf("output peer가 금지된 역방향 byte를 전송함"))
 		return
 	}
+	if b.expectedStopConsumerGone(err) {
+		b.markOutputPeerGone()
+		return
+	}
 	b.fail(fmt.Errorf("output peer disconnect: %w", err))
+}
+
+func (b *processBroker) expectedStopConsumerGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopReason == "" {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && !netErr.Timeout()
+}
+
+func (b *processBroker) expectedStopControlGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopReason == "" || !b.exitSent {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && !netErr.Timeout()
 }
 
 func (b *processBroker) armPeerDeadline() {
@@ -267,6 +411,12 @@ func (b *processBroker) handleControl(conn net.Conn, decoder *processwire.Decode
 			if closing || (errors.Is(err, io.EOF) && b.sessionComplete()) {
 				return
 			}
+			// After an explicit stop, ExitObserved is the final control-plane
+			// obligation. The adapter may close this socket once it has consumed
+			// that frame; a disconnect before exitSent remains broker-fatal.
+			if b.expectedStopControlGone(err) {
+				return
+			}
 			b.fail(fmt.Errorf("control read: %w", err))
 			return
 		}
@@ -278,6 +428,13 @@ func (b *processBroker) handleControl(conn net.Conn, decoder *processwire.Decode
 		b.controlAckPending = true
 		b.mu.Unlock()
 		if err := b.handleControlFrame(frame, encoder); err != nil {
+			// A stopped adapter is permitted to close after its durable done. If
+			// the Stop ACK was delivered and the only remaining control obligation
+			// was ExitObserved, a peer-close error is the approved
+			// consumer-gone-after-done terminal state, not a protocol violation.
+			if b.expectedStopControlGone(err) {
+				return
+			}
 			b.protocolError(encoder, frame.Seq, err.Error())
 			return
 		}
@@ -414,6 +571,7 @@ func (b *processBroker) start(_ uint64) error {
 	b.wg.Add(2)
 	go b.observeWait(waiter)
 	go b.drainAttach(attach)
+	go b.forceStoppedStreamEnd()
 	return nil
 }
 
@@ -480,11 +638,19 @@ func (b *processBroker) observeWait(waiter startedCommand) {
 	b.waitResult = &result
 	requested := b.waitAcked && !b.controlAckPending
 	attach := b.attach
+	stopped := b.stopReason != ""
 	b.mu.Unlock()
-	if attach != nil {
+	close(b.containerDone)
+	if attach != nil && stopped {
+		// The authoritative wait has observed container termination. For an
+		// explicit stop, close the parent attach pipes immediately so a Podman /
+		// conmon-held writer cannot strand the drain readers. Natural exits retain
+		// the full output-drain path; stopped test agents have no post-stop output
+		// to preserve.
+		interruptAttach(attach)
+	} else if attach != nil {
 		_ = attach.Stdin().Close()
 	}
-	close(b.containerDone)
 	if requested {
 		if err := b.sendExit(); err != nil {
 			b.fail(err)
@@ -528,22 +694,43 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 	defer close(b.streamDone)
 	defer attach.ClosePipes()
 	chunks := make(chan outputChunk)
+	forwardDone := make(chan struct{})
+	defer close(forwardDone)
 	var readers sync.WaitGroup
 	readOne := func(reader io.Reader, kind processwire.Kind, stream processwire.Stream) {
 		defer readers.Done()
 		buf := make([]byte, processwire.MaxPayload)
 		for {
+			if deadline, ok := reader.(readDeadlineSetter); ok {
+				// The deadline only returns control from a blocking kernel Read. A
+				// timeout never decides termination: only the authoritative Podman
+				// wait result plus an explicit stop does that.
+				_ = deadline.SetReadDeadline(time.Now().Add(processReadPollInterval))
+			}
 			n, err := reader.Read(buf)
 			if n > 0 {
 				chunk := outputChunk{kind: kind, stream: stream, data: append([]byte(nil), buf[:n]...)}
+				leave := b.enterStreamStage(streamStageChunkForward)
 				select {
 				case chunks <- chunk:
+				case <-forwardDone:
+					leave()
+					return
 				case <-b.ctx.Done():
+					leave()
 					return
 				}
+				leave()
 			}
 			if err != nil {
-				if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) {
+				var netErr net.Error
+				if errors.As(err, &netErr) && netErr.Timeout() {
+					if b.stoppedContainerExited() {
+						return
+					}
+					continue
+				}
+				if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) && !b.expectedStoppedReadEnd(err) {
 					b.fail(fmt.Errorf("attach output read: %w", err))
 				}
 				return
@@ -553,31 +740,183 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 	readers.Add(2)
 	go readOne(attach.Stdout(), processwire.KindStdoutData, processwire.StreamStdout)
 	go readOne(attach.Stderr(), processwire.KindStderrData, processwire.StreamStderr)
-	go func() { readers.Wait(); close(chunks) }()
+	readersDone := make(chan struct{})
+	go func() {
+		leave := b.enterStreamStage(streamStageReaderDrain)
+		readers.Wait()
+		leave()
+		close(chunks)
+		close(readersDone)
+	}()
+	go func() {
+		select {
+		case <-readersDone:
+			return
+		case <-b.containerDone:
+		}
+		b.mu.Lock()
+		stopped := b.stopReason != ""
+		b.mu.Unlock()
+		if !stopped {
+			// Natural, abnormal, and orphan exits must retain the original
+			// full-drain behavior; there may still be valid output to forward.
+			return
+		}
+		// A stopped container has no future output. Give the attach readers a
+		// short grace to drain kernel buffers; if the podman attach client still
+		// holds a pipe, kill that client so stream teardown cannot consume the
+		// lease cleanup budget. Normal output remains untouched when readers
+		// reach EOF first.
+		timer := time.NewTimer(processAttachExitGrace)
+		defer timer.Stop()
+		select {
+		case <-readersDone:
+		case <-timer.C:
+			// Podman/conmon may retain the pipe writer after the client leader is
+			// killed. This path is only for an explicitly stopped container; close
+			// the parent read ends as the final bounded-release operation so the
+			// drain readers cannot hold the lease indefinitely.
+			interruptAttach(attach)
+		}
+	}()
 	b.mu.Lock()
 	encoder := b.outputEncoder
 	b.mu.Unlock()
 	for chunk := range chunks {
-		if _, err := encoder.Write(chunk.kind, chunk.stream, 0, chunk.data); err != nil {
+		if err := b.writeOutput(encoder, chunk.kind, chunk.stream, chunk.data); err != nil {
+			if b.expectedConsumerGone() || b.expectedStopConsumerGone(err) {
+				b.markOutputPeerGone()
+				b.markStreamEnded()
+				return
+			}
 			b.fail(fmt.Errorf("output write: %w", err))
 			return
 		}
 	}
-	<-attach.Done()
+	// Both attach pipes have reached EOF, so all container bytes have already
+	// been forwarded. A podman start --attach client can nevertheless remain
+	// alive after a forced container SIGKILL; do not spend the whole lease
+	// cleanup budget waiting for that client. Killing only the attach process
+	// after the readers finish preserves output while bounding stream teardown.
+	if b.stopRequested() {
+		// Explicit stop plus completed reader drain is authoritative: the
+		// container cannot produce more bytes and every buffered byte has already
+		// entered the broker stream. End the attach client now instead of using a
+		// grace timeout as the normal stopped-path termination mechanism.
+		attach.Kill()
+	}
+	leaveAttach := b.enterStreamStage(streamStageAttachExit)
+	err := waitStartedCommandExit(attach, processAttachExitGrace)
+	leaveAttach()
+	if err != nil {
+		b.fail(fmt.Errorf("attach process exit: %w", err))
+		return
+	}
 	attachErr := attach.ExitErr()
 	end := processwire.StreamEnd{}
 	if attachErr != nil {
 		end.AttachError = attachErr.Error()
 	}
-	payload, _ := processwire.Marshal(end)
-	if _, err := encoder.Write(processwire.KindStreamEnd, processwire.StreamControl, 0, payload); err != nil {
+	if err := b.sendStreamEnd(encoder, end); err != nil {
+		if b.expectedConsumerGone() || b.expectedStopConsumerGone(err) {
+			b.markOutputPeerGone()
+			b.markStreamEnded()
+			return
+		}
 		b.fail(fmt.Errorf("stream_end: %w", err))
 		return
+	}
+	b.finishIfComplete()
+}
+
+func (b *processBroker) writeOutput(encoder *processwire.Encoder, kind processwire.Kind, stream processwire.Stream, payload []byte) error {
+	b.outputMu.Lock()
+	defer b.outputMu.Unlock()
+	b.mu.Lock()
+	ended := b.streamEnded
+	b.mu.Unlock()
+	if ended {
+		return nil
+	}
+	leave := b.enterStreamStage(streamStageOutputWrite)
+	_, err := encoder.Write(kind, stream, 0, payload)
+	leave()
+	return err
+}
+
+func (b *processBroker) sendStreamEnd(encoder *processwire.Encoder, end processwire.StreamEnd) error {
+	b.outputMu.Lock()
+	defer b.outputMu.Unlock()
+	b.mu.Lock()
+	if b.streamEnded {
+		b.mu.Unlock()
+		return nil
+	}
+	b.mu.Unlock()
+	payload, _ := processwire.Marshal(end)
+	leave := b.enterStreamStage(streamStageStreamEndWrite)
+	_, err := encoder.Write(processwire.KindStreamEnd, processwire.StreamControl, 0, payload)
+	leave()
+	if err != nil {
+		return err
 	}
 	b.mu.Lock()
 	b.streamEnded = true
 	b.mu.Unlock()
+	return nil
+}
+
+func (b *processBroker) markStreamEnded() {
+	b.mu.Lock()
+	b.streamEnded = true
+	b.mu.Unlock()
 	b.finishIfComplete()
+}
+
+func (b *processBroker) forceStoppedStreamEnd() {
+	select {
+	case <-b.containerDone:
+	case <-b.ctx.Done():
+		return
+	}
+	b.mu.Lock()
+	stopped := b.stopReason != ""
+	encoder := b.outputEncoder
+	b.mu.Unlock()
+	if !stopped || encoder == nil {
+		return
+	}
+	timer := time.NewTimer(processAttachExitGrace)
+	defer timer.Stop()
+	select {
+	case <-b.streamDone:
+		return
+	case <-timer.C:
+	}
+	// Explicit stop has no post-stop agent output. If Podman attach/conmon has
+	// not delivered EOF by now, close the client and publish the terminal frame
+	// from the broker so the adapter cannot remain circularly blocked on EOF.
+	b.closeStoppedAttachPipes()
+	if err := b.sendStreamEnd(encoder, processwire.StreamEnd{AttachError: "stopped attach stream forced closed"}); err != nil {
+		b.fail(fmt.Errorf("stream_end: %w", err))
+		return
+	}
+	b.finishIfComplete()
+}
+
+func waitStartedCommandExit(process startedCommand, grace time.Duration) error {
+	select {
+	case <-process.Done():
+		return nil
+	case <-time.After(grace):
+		process.Kill()
+	}
+	select {
+	case <-process.Done():
+		return nil
+	case <-time.After(grace):
+		return fmt.Errorf("attach process did not exit after kill")
+	}
 }
 
 func (b *processBroker) stopContainer(ctx context.Context, reason string) error {
@@ -597,6 +936,7 @@ func (b *processBroker) stopContainer(ctx context.Context, reason string) error 
 		done := b.waitResult != nil
 		b.mu.Unlock()
 		if done {
+			b.closeStoppedAttachPipes()
 			return nil
 		}
 		if _, killErr := b.runner.Run(ctx, "kill", b.containerID); killErr != nil {
@@ -604,6 +944,39 @@ func (b *processBroker) stopContainer(ctx context.Context, reason string) error 
 		}
 	}
 	return nil
+}
+
+func (b *processBroker) closeStoppedAttachPipes() {
+	b.mu.Lock()
+	attach := b.attach
+	b.mu.Unlock()
+	if attach != nil {
+		// Explicit stop has completed at the container boundary. The attach
+		// client must not keep its parent pipes open while the broker drains the
+		// terminal stream. Kill the client as well as closing its parent ends;
+		// ClosePipes is idempotent and the process reaper still owns command exit
+		// observation.
+		interruptAttach(attach)
+	}
+}
+
+type readDeadlineSetter interface {
+	SetReadDeadline(time.Time) error
+}
+
+func interruptAttach(attach startedCommand) {
+	// On Linux, closing a pipe fd in another goroutine does not reliably wake a
+	// read already executing in the kernel. Container exit is the authoritative
+	// proof that no new bytes can be produced; expire both reads at that boundary
+	// before closing the parent pipe ends. This is event-driven, not a timeout
+	// used as a normal termination mechanism.
+	for _, reader := range []io.ReadCloser{attach.Stdout(), attach.Stderr()} {
+		if deadline, ok := reader.(readDeadlineSetter); ok {
+			_ = deadline.SetReadDeadline(time.Now())
+		}
+	}
+	attach.Kill()
+	attach.ClosePipes()
 }
 
 func (b *processBroker) fail(err error) {
@@ -662,19 +1035,46 @@ func (b *processBroker) Shutdown(ctx context.Context) error {
 	_ = b.listener.Close()
 	joined := b.stopContainer(ctx, "lease shutdown")
 	if started {
+		containerObserved := false
 		select {
 		case <-b.containerDone:
+			containerObserved = true
 		case <-ctx.Done():
-			joined = errors.Join(joined, ctx.Err())
+			joined = errors.Join(joined, fmt.Errorf("world/local: process broker container exit observation: %w (%s)", ctx.Err(), b.streamStageDiagnostic(true)))
+		}
+		if !containerObserved {
+			// No container boundary was observed. Cancel and close the transport now;
+			// otherwise reader goroutines can remain blocked on a dead attach.
+			b.cancel()
+			b.closeConnections()
+			b.closeStartedCommands()
 		}
 		select {
 		case <-b.streamDone:
-		case <-ctx.Done():
-			joined = errors.Join(joined, ctx.Err())
+		case <-time.After(2 * time.Second):
+			joined = errors.Join(joined, fmt.Errorf("world/local: process broker output stream drain: timeout (%s)", b.streamStageDiagnostic(true)))
+			b.cancel()
+			b.closeConnections()
+			b.closeStartedCommands()
+			select {
+			case <-b.streamDone:
+			case <-time.After(2 * time.Second):
+				joined = errors.Join(joined, fmt.Errorf("world/local: process broker output stream drain: forced cleanup timeout (%s)", b.streamStageDiagnostic(true)))
+			}
 		}
 	}
 	b.cancel()
 	b.closeConnections()
+	b.closeStartedCommands()
+	b.wg.Wait()
+	if err := os.RemoveAll(b.rootDir); err != nil {
+		joined = errors.Join(joined, err)
+	}
+	b.doneOnce.Do(func() { close(b.done) })
+	return errors.Join(joined, b.Err())
+}
+
+func (b *processBroker) closeStartedCommands() {
 	b.mu.Lock()
 	attach, waiter := b.attach, b.waiter
 	b.mu.Unlock()
@@ -686,10 +1086,4 @@ func (b *processBroker) Shutdown(ctx context.Context) error {
 		waiter.Kill()
 		waiter.ClosePipes()
 	}
-	b.wg.Wait()
-	if err := os.RemoveAll(b.rootDir); err != nil {
-		joined = errors.Join(joined, err)
-	}
-	b.doneOnce.Do(func() { close(b.done) })
-	return errors.Join(joined, b.Err())
 }
