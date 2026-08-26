@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -546,6 +547,17 @@ func TestProcessBrokerOutputDisconnectIsFatalBeforeContainerStart(t *testing.T) 
 	}
 	_ = client.control.Close()
 	shutdownBrokerAllowError(t, b)
+}
+
+func TestStopControlCloseIsExpectedOnlyAfterFinalExitAttempt(t *testing.T) {
+	b := &processBroker{stopReason: "user stop"}
+	if b.expectedStopControlGone(syscall.EPIPE) {
+		t.Fatal("exit_observed 전 control close가 정상 종말로 분류됨")
+	}
+	b.exitSent = true
+	if !b.expectedStopControlGone(syscall.EPIPE) {
+		t.Fatal("최종 exit_observed 쓰기의 peer close가 정상 종말로 분류되지 않음")
+	}
 }
 
 func TestProcessBrokerStopConsumerCloseIsExpectedTerminal(t *testing.T) {

@@ -428,6 +428,13 @@ func (b *processBroker) handleControl(conn net.Conn, decoder *processwire.Decode
 		b.controlAckPending = true
 		b.mu.Unlock()
 		if err := b.handleControlFrame(frame, encoder); err != nil {
+			// A stopped adapter is permitted to close after its durable done. If
+			// the Stop ACK was delivered and the only remaining control obligation
+			// was ExitObserved, a peer-close error is the approved
+			// consumer-gone-after-done terminal state, not a protocol violation.
+			if b.expectedStopControlGone(err) {
+				return
+			}
 			b.protocolError(encoder, frame.Seq, err.Error())
 			return
 		}
