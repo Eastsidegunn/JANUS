@@ -185,20 +185,21 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 	}
 
 	commandErr := make(chan error, 1)
+	stopRequested := make(chan struct{})
 	stopped := make(chan struct{})
 	stopScanDone := make(chan struct{})
 	defer close(stopScanDone)
 	go func() {
 		select {
-		case <-stopped:
+		case <-stopRequested:
 			// Unblock the native scanner without closing the broker output socket.
-			// This lets the adapter emit its synthetic stopped/done event before
-			// it explicitly closes the process output endpoint.
+			// The main goroutine still waits for the stop ACK before emitting its
+			// synthetic stopped/done event and closing the process endpoint.
 			_ = stdoutR.CloseWithError(errAdapterStopped)
 		case <-stopScanDone:
 		}
 	}()
-	go monitorCommands(ctx, scanner, vals, process, approvals, stopped, commandErr)
+	go monitorCommands(ctx, scanner, vals, process, approvals, stopRequested, stopped, commandErr)
 
 	native := bufio.NewScanner(stdoutR)
 	native.Buffer(make([]byte, 0, 64*1024), maxCommandBytes)
@@ -250,16 +251,28 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 			return err
 		}
 	}
-	wasStopped := process.OutputClosed()
-	if !wasStopped {
+	stopWasRequested := false
+	select {
+	case <-stopRequested:
+		stopWasRequested = true
+	default:
+	}
+	if err := native.Err(); err != nil && !stopWasRequested {
+		return fmt.Errorf("worldadapter: container stdout scan: %w", err)
+	}
+	wasStopped := false
+	if stopWasRequested {
 		select {
 		case <-stopped:
 			wasStopped = true
-		default:
+		case err := <-commandErr:
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("worldadapter: stop ACK 없이 command 종료")
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-	}
-	if err := native.Err(); err != nil && !wasStopped {
-		return fmt.Errorf("worldadapter: container stdout scan: %w", err)
 	}
 	doneEmitted := false
 	if wasStopped && !doneEmitted {
@@ -324,7 +337,7 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 	return exitErr
 }
 
-func monitorCommands(ctx context.Context, scanner *bufio.Scanner, vals *validate.Validators, process *processClient, approvals *approvalClient, stopped chan<- struct{}, result chan<- error) {
+func monitorCommands(ctx context.Context, scanner *bufio.Scanner, vals *validate.Validators, process *processClient, approvals *approvalClient, stopRequested, stopped chan<- struct{}, result chan<- error) {
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
 		if err := vals.ValidateCommand(line); err != nil {
@@ -354,6 +367,7 @@ func monitorCommands(ctx context.Context, scanner *bufio.Scanner, vals *validate
 				result <- err
 				return
 			}
+			close(stopRequested)
 			if err := process.Stop(ctx, string(stop.Reason)); err != nil {
 				result <- err
 				return

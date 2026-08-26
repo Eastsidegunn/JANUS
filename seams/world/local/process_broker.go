@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/core/world"
@@ -161,9 +160,18 @@ func (b *processBroker) streamStageDiagnostic(markBlocked bool) string {
 	defer b.stageMu.Unlock()
 	stage := streamStage("")
 	started := time.Time{}
-	for candidate, at := range b.activeStages {
-		if stage == "" || at.Before(started) {
+	// A reader-drain watcher exists for most of the session. Prefer the narrow
+	// operation that can actually block progress when stages overlap.
+	for _, candidate := range []streamStage{
+		streamStageOutputWrite,
+		streamStageChunkForward,
+		streamStageStreamEndWrite,
+		streamStageAttachExit,
+		streamStageReaderDrain,
+	} {
+		if at, ok := b.activeStages[candidate]; ok {
 			stage, started = candidate, at
+			break
 		}
 	}
 	if markBlocked && b.firstBlockedStage == "" && stage != "" {
@@ -184,7 +192,14 @@ func (b *processBroker) streamStageDiagnostic(markBlocked bool) string {
 func (b *processBroker) markOutputPeerGone() {
 	b.mu.Lock()
 	b.outputPeerGone = true
+	output := b.output
 	b.mu.Unlock()
+	// Closing the broker side is the transport-level wakeup for an encoder Write
+	// already blocked in the kernel. Peer EOF alone is not guaranteed to wake a
+	// concurrent writer promptly on every Unix implementation.
+	if output != nil {
+		_ = output.Close()
+	}
 }
 
 func (b *processBroker) expectedConsumerGone() bool {
@@ -317,7 +332,11 @@ func (b *processBroker) expectedStopConsumerGone(err error) bool {
 	if b.stopReason == "" {
 		return false
 	}
-	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && !netErr.Timeout()
 }
 
 func (b *processBroker) armPeerDeadline() {
