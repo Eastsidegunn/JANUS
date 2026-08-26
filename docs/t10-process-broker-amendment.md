@@ -1,6 +1,6 @@
 # T10 process broker amendment — bounded shutdown and stream-consumer ownership
 
-상태: **승인된 개정안·구현 진행 중**. 대상: FR-LOG-09, FR-SBX-05, FR-ADP-10.
+상태: **승인·구현·Linux 관통 검증 완료**. 대상: FR-LOG-09, FR-SBX-05, FR-ADP-10.
 
 이 문서는 T10 lifecycle-stop 회귀에서 관측된 30초 정지를 타임아웃 숫자로
 덮지 않고, 어디에서 대기가 생겼는지 식별하고 출력 스트림의 소유권을
@@ -52,10 +52,20 @@ Linux 관통 게이트의 실패는 다음과 같다.
 먼저 끝난 경우와 output peer를 의도적으로 먼저 닫은 경우를 별도 케이스로
 둔다. 새 run은 단계 표식이 없으면 성공 증거로 인정하지 않는다.
 
-현재는 위 baseline run 중 어느 것도 이 표식을 포함하지 않으므로 **30초를
-소진한 지점은 아직 특정되지 않았다**. 구현 후 표식이 일치하는 Linux run ID를
-PR에 첨부하고, 두 모드 모두 5회 연속 green이 될 때만 이 amendment를 닫는다.
+실패 run `32933127519`는 `reader-drain`, `32933493316`은 `attach-exit`,
+`32933927934`는 ACK/terminal ordering 경합으로 단계별 원인을 특정했다. 수정
+후 동일 SHA `62aa0ad`의 Linux run `32934687022` attempts 1, 2, 3, 4, 5가
+각각 graceful/stop-ignore 관통 게이트와 전체 `make ci-linux`를 통과했다. 성공
+경로에는 blocked stage가 없고, 테스트가 `containerDone`·`streamDone`·consumer
+종말·cleanup bounded 및 runtime artifact 0을 단정한다. 이 5회 연속 증거로
+amendment를 닫는다.
 타임아웃을 늘리거나 실패 케이스를 제거하는 것은 허용하지 않는다.
+
+참고로 GitHub Actions의 기본 `go test` 출력은 성공한 `t.Log`를 숨긴다. 따라서
+성공 run의 단계 표식은 “blocked stage 없음”으로 해석하고, 각 단계 enum은 실제
+대기 실패 시 오류에 보존된다. 성공 여부는 단계 문자열의 부재가 아니라
+`containerDone`·`streamDone` 수렴, bounded cleanup, runtime artifact 0이라는
+관통 단정으로 판정한다.
 
 ## 2. FR-LOG-09의 독자 경계
 

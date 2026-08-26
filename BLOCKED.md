@@ -16,31 +16,28 @@ macOS 로컬 설치(A·B안)를 택하지 않은 이유는 편의가 아니라 �
 에서는 어떤 런타임도 Linux VM 안에서 돌고 overlayfs도 VM 내부 커널에서
 성립하므로, 거기서 통과한 통합 테스트가 배포 대상을 대표하지 못한다.
 
-## T10 lifecycle-stop 회귀 (2026-08-25)
+## T10 lifecycle-stop 회귀 (2026-08-25 — 해소)
 
-**현재 차단**: PID 1의 graceful SIGTERM 경로와 SIGTERM 무시 후 SIGKILL 경로를
-분리한 `stop` / `stop-ignore` 관통 테스트를 추가했지만, Linux rootless Podman에서
-두 경로 모두 process broker의 `streamDone` 대기를 30초 소진한다.
+**해소**: `docs/t10-process-broker-amendment.md`의 선택지 (a)를 구현하고,
+실패를 단계별로 계측한 뒤 Linux rootless Podman 관통 게이트를 동일 SHA에서
+5회 연속 통과했다. `lifecycle-stop`(graceful SIGTERM)과
+`lifecycle-stop-ignore`(SIGKILL escalation) 모두 bounded `Wait`·`streamDone`·
+Lease cleanup 및 runtime artifact 0을 매번 단정한다.
 
-관측된 오류는 `process broker output stream drain: context deadline exceeded` 뒤
-`stream_end: write ... use of closed network connection`이다. 정상·abnormal·orphan
-경로는 최신 반복 실행에서 이 증상 없이 진행됐고, 단계명 진단도 추가했다.
+구현한 불변식은 다음과 같다:
 
-시도한 보완(attach Kill/ClosePipes, stop 전용 강제 StreamEnd)은 로컬 CI에서는
-통과하지만 실물 runner에서 문제를 닫지 못했다. 따라서 테스트를 약화하거나
-timeout을 늘려 green으로 만들지 않는다. attach/conmon의 pipe 보유와 broker의
-stream 종료 순서를 추가로 계측·재설계해야 하며, 원인이 확정되기 전에는 PR #31을
-머지하지 않는다.
+- container `podman wait`가 종료 권위이며, 종료 관측 뒤 attach reader의 유한
+  drain과 attach client reap을 분리한다.
+- explicit stop + 완전한 output drain 뒤 attach client를 즉시 kill/reap하고,
+  adapter의 durable done 뒤 output/control peer close는
+  `consumer-gone-after-done` 정상 종말로 분류한다. done 이전 peer 이탈은 여전히
+  `ErrStreamConsumerGone` fatal이다.
+- `ExitObserved`와 Stop ACK의 합법적인 선후 경합을 client가 상관하며, ACK가
+  terminal frame에 가려져 EOF로 오인되지 않는다. pre-exit control 단절은 계속
+  fatal이다.
 
-검증 run: 32826754125, 32832407162, 32832960325, 32833303870,
-32833741349, 32834630518, 32835050107, 32835632685, 32836344535,
-32837057504 (모두 lifecycle stop 계열 실패).
-
-개정안 `docs/t10-process-broker-amendment.md`의 선택지 (a)를 반영한 구현을
-추가했다. stop ACK 뒤 adapter가 output socket을 명시적으로 닫고, broker는
-`consumer-gone-after-done`을 정상 종말로, done 이전 이탈을 fatal로 구분한다.
-`chunk-forward`·`output-write`·`reader-drain`·`attach-exit`·
-`stream-end-write` 단계 표식과 회귀를 로컬에서 검증했으며 `make ci`는 권한 있는
-환경에서 exit 0이다. 다만 Linux rootless Podman에서 graceful/stop-ignore 각각
-5회 연속 green과 단계별 run ID는 아직 없다. 이 증거가 첨부되기 전까지 T10
-lifecycle 차단은 유지한다.
+실패를 숨기지 않고 확인한 단계 증거는 `32933127519`(reader-drain),
+`32933493316`(attach-exit), `32933927934`(ACK/terminal 경합)이며, 각 수정 뒤
+최종 동일 SHA `62aa0ad`의 Linux run `32934687022` attempts 1–5가 모두 green이다.
+`make ci`도 로컬에서 exit 0이다. 이 항목의 차단을 해소하고 PR #31의 구현을
+검수 대상으로 전환한다.
