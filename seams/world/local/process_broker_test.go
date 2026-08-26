@@ -560,6 +560,25 @@ func TestStopControlCloseIsExpectedOnlyAfterFinalExitAttempt(t *testing.T) {
 	}
 }
 
+func TestConsumerGoneRequiresExplicitStop(t *testing.T) {
+	b := &processBroker{outputPeerGone: true}
+	if b.expectedConsumerGone() {
+		t.Fatal("output peer 이탈만으로 정상 consumer-gone 종말을 허용함")
+	}
+	b.stopReason = "user stop"
+	if !b.expectedConsumerGone() {
+		t.Fatal("명시 stop 뒤 consumer-gone을 정상 종말로 분류하지 않음")
+	}
+}
+
+func TestStopConsumerGoneRejectsTimeout(t *testing.T) {
+	b := &processBroker{stopReason: "user stop"}
+	timeout := &net.DNSError{Err: "synthetic timeout", IsTimeout: true}
+	if b.expectedStopConsumerGone(timeout) {
+		t.Fatal("timeout을 consumer-gone 정상 종말로 분류함")
+	}
+}
+
 func TestProcessBrokerStopConsumerCloseIsExpectedTerminal(t *testing.T) {
 	waiter, attach := newFakeStartedCommand(t), newFakeStartedCommand(t)
 	runtime := &fakeProcessRuntime{waiter: waiter, attach: attach}
