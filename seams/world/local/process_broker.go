@@ -24,6 +24,7 @@ const (
 	processHandshakeTimeout = 2 * time.Second
 	processStopSeconds      = "10"
 	processAttachExitGrace  = 2 * time.Second
+	processReadPollInterval = 100 * time.Millisecond
 	maxWaitOutput           = 4096
 )
 
@@ -214,6 +215,12 @@ func (b *processBroker) stopRequested() bool {
 	return b.stopReason != ""
 }
 
+func (b *processBroker) stoppedContainerExited() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stopReason != "" && b.waitResult != nil
+}
+
 func (b *processBroker) expectedStoppedReadEnd(err error) bool {
 	if !b.stopRequested() {
 		return false
@@ -356,6 +363,22 @@ func (b *processBroker) expectedStopConsumerGone(err error) bool {
 	return errors.As(err, &netErr) && !netErr.Timeout()
 }
 
+func (b *processBroker) expectedStopControlGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopReason == "" || !b.exitSent {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && !netErr.Timeout()
+}
+
 func (b *processBroker) armPeerDeadline() {
 	b.mu.Lock()
 	both := b.controlUsed && b.outputUsed
@@ -386,6 +409,12 @@ func (b *processBroker) handleControl(conn net.Conn, decoder *processwire.Decode
 			closing := b.closing
 			b.mu.Unlock()
 			if closing || (errors.Is(err, io.EOF) && b.sessionComplete()) {
+				return
+			}
+			// After an explicit stop, ExitObserved is the final control-plane
+			// obligation. The adapter may close this socket once it has consumed
+			// that frame; a disconnect before exitSent remains broker-fatal.
+			if b.expectedStopControlGone(err) {
 				return
 			}
 			b.fail(fmt.Errorf("control read: %w", err))
@@ -665,6 +694,12 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 		defer readers.Done()
 		buf := make([]byte, processwire.MaxPayload)
 		for {
+			if deadline, ok := reader.(readDeadlineSetter); ok {
+				// The deadline only returns control from a blocking kernel Read. A
+				// timeout never decides termination: only the authoritative Podman
+				// wait result plus an explicit stop does that.
+				_ = deadline.SetReadDeadline(time.Now().Add(processReadPollInterval))
+			}
 			n, err := reader.Read(buf)
 			if n > 0 {
 				chunk := outputChunk{kind: kind, stream: stream, data: append([]byte(nil), buf[:n]...)}
@@ -681,6 +716,13 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 				leave()
 			}
 			if err != nil {
+				var netErr net.Error
+				if errors.As(err, &netErr) && netErr.Timeout() {
+					if b.stoppedContainerExited() {
+						return
+					}
+					continue
+				}
 				if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) && !b.expectedStoppedReadEnd(err) {
 					b.fail(fmt.Errorf("attach output read: %w", err))
 				}

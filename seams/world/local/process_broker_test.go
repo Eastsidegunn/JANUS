@@ -560,15 +560,22 @@ func TestProcessBrokerStopConsumerCloseIsExpectedTerminal(t *testing.T) {
 	client := connectProcessClient(t, b)
 	client.send(t, processwire.KindStart, nil)
 	client.ack(t, "start ack")
+	client.send(t, processwire.KindWait, nil)
+	client.ack(t, "wait ack")
 	stopPayload, err := processwire.Marshal(processwire.Stop{Reason: "user stop"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	client.send(t, processwire.KindStop, stopPayload)
 	client.ack(t, "stop ack")
+	if f := readFrame(t, client.control, client.controlDec, "exit observed"); f.Kind != processwire.KindExitObserved {
+		t.Fatalf("exit kind=%d", f.Kind)
+	}
 	// This is the adapter's explicit terminal close after it has consumed the
-	// native stop result. It must not become a fatal broker error.
+	// native stop result. Neither output nor the now-complete control plane may
+	// become a fatal broker error.
 	_ = client.output.Close()
+	_ = client.control.Close()
 	select {
 	case <-b.streamDone:
 	case <-time.After(2 * time.Second):
