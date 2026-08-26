@@ -208,6 +208,23 @@ func (b *processBroker) expectedConsumerGone() bool {
 	return b.outputPeerGone && b.stopReason != ""
 }
 
+func (b *processBroker) stopRequested() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stopReason != ""
+}
+
+func (b *processBroker) expectedStoppedReadEnd(err error) bool {
+	if !b.stopRequested() {
+		return false
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
 func (b *processBroker) watchParent(parent context.Context) {
 	defer b.wg.Done()
 	select {
@@ -587,17 +604,17 @@ func (b *processBroker) observeWait(waiter startedCommand) {
 	attach := b.attach
 	stopped := b.stopReason != ""
 	b.mu.Unlock()
+	close(b.containerDone)
 	if attach != nil && stopped {
 		// The authoritative wait has observed container termination. For an
 		// explicit stop, close the parent attach pipes immediately so a Podman /
 		// conmon-held writer cannot strand the drain readers. Natural exits retain
 		// the full output-drain path; stopped test agents have no post-stop output
 		// to preserve.
-		attach.ClosePipes()
+		interruptAttach(attach)
 	} else if attach != nil {
 		_ = attach.Stdin().Close()
 	}
-	close(b.containerDone)
 	if requested {
 		if err := b.sendExit(); err != nil {
 			b.fail(err)
@@ -664,7 +681,7 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 				leave()
 			}
 			if err != nil {
-				if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) {
+				if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) && !b.expectedStoppedReadEnd(err) {
 					b.fail(fmt.Errorf("attach output read: %w", err))
 				}
 				return
@@ -706,12 +723,11 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 		select {
 		case <-readersDone:
 		case <-timer.C:
-			attach.Kill()
 			// Podman/conmon may retain the pipe writer after the client leader is
 			// killed. This path is only for an explicitly stopped container; close
 			// the parent read ends as the final bounded-release operation so the
 			// drain readers cannot hold the lease indefinitely.
-			attach.ClosePipes()
+			interruptAttach(attach)
 		}
 	}()
 	b.mu.Lock()
@@ -871,7 +887,6 @@ func (b *processBroker) stopContainer(ctx context.Context, reason string) error 
 			return errors.Join(err, killErr)
 		}
 	}
-	b.closeStoppedAttachPipes()
 	return nil
 }
 
@@ -885,9 +900,27 @@ func (b *processBroker) closeStoppedAttachPipes() {
 		// terminal stream. Kill the client as well as closing its parent ends;
 		// ClosePipes is idempotent and the process reaper still owns command exit
 		// observation.
-		attach.Kill()
-		attach.ClosePipes()
+		interruptAttach(attach)
 	}
+}
+
+type readDeadlineSetter interface {
+	SetReadDeadline(time.Time) error
+}
+
+func interruptAttach(attach startedCommand) {
+	// On Linux, closing a pipe fd in another goroutine does not reliably wake a
+	// read already executing in the kernel. Container exit is the authoritative
+	// proof that no new bytes can be produced; expire both reads at that boundary
+	// before closing the parent pipe ends. This is event-driven, not a timeout
+	// used as a normal termination mechanism.
+	for _, reader := range []io.ReadCloser{attach.Stdout(), attach.Stderr()} {
+		if deadline, ok := reader.(readDeadlineSetter); ok {
+			_ = deadline.SetReadDeadline(time.Now())
+		}
+	}
+	attach.Kill()
+	attach.ClosePipes()
 }
 
 func (b *processBroker) fail(err error) {
