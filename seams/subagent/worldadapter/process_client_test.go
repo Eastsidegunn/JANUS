@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 )
 
 func TestAwaitResponsePreservesAckBeforeTerminalClose(t *testing.T) {
@@ -14,6 +15,21 @@ func TestAwaitResponsePreservesAckBeforeTerminalClose(t *testing.T) {
 		if err := c.awaitResponse(context.Background(), responseWith(nil)); err != nil {
 			t.Fatalf("terminal close overtook ACK: %v", err)
 		}
+	}
+}
+
+func TestAwaitResponseWaitsForAckAfterExitObserved(t *testing.T) {
+	c := &processClient{done: make(chan struct{}), exitSet: true}
+	response := make(chan error, 1)
+	close(c.done)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		response <- nil
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := c.awaitResponse(ctx, response); err != nil {
+		t.Fatalf("exit_observed overtook later ACK: %v", err)
 	}
 }
 

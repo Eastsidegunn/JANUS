@@ -101,18 +101,35 @@ func (c *processClient) awaitResponse(ctx context.Context, response <-chan error
 		return err
 	case <-c.done:
 		// readControl delivers an ACK to response before it can observe the next
-		// terminal frame or EOF and close done. If both are ready, the request ACK
-		// wins; Go select alone would choose randomly and misreport a successful
-		// Stop as EOF.
+		// terminal frame or EOF. If both are ready, the request ACK wins; Go select
+		// alone would choose randomly and misreport a successful Stop as EOF.
 		select {
 		case err := <-response:
 			return err
 		default:
 		}
+		if c.observedExitWithoutFailure() {
+			// Podman wait may race ahead of decoding the Stop request, so the
+			// asynchronous ExitObserved frame is allowed to precede that request's
+			// ACK. readControl remains alive and will still correlate the ACK (or a
+			// wire error); do not turn a valid ordering into a spurious EOF.
+			select {
+			case err := <-response:
+				return err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 		return c.failure()
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (c *processClient) observedExitWithoutFailure() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.exitSet && c.err == nil
 }
 
 func (c *processClient) readControl(dec *processwire.Decoder) {
