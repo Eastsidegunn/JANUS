@@ -791,6 +791,13 @@ func (b *processBroker) drainAttach(attach startedCommand) {
 	// alive after a forced container SIGKILL; do not spend the whole lease
 	// cleanup budget waiting for that client. Killing only the attach process
 	// after the readers finish preserves output while bounding stream teardown.
+	if b.stopRequested() {
+		// Explicit stop plus completed reader drain is authoritative: the
+		// container cannot produce more bytes and every buffered byte has already
+		// entered the broker stream. End the attach client now instead of using a
+		// grace timeout as the normal stopped-path termination mechanism.
+		attach.Kill()
+	}
 	leaveAttach := b.enterStreamStage(streamStageAttachExit)
 	err := waitStartedCommandExit(attach, processAttachExitGrace)
 	leaveAttach()

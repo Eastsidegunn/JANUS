@@ -554,7 +554,6 @@ func TestProcessBrokerStopConsumerCloseIsExpectedTerminal(t *testing.T) {
 	runtime.onStop = func() {
 		waiter.completeWait("143")
 		attach.closeWriters()
-		attach.finish(errors.New("stopped"))
 	}
 	b := mustProcessBroker(t, context.Background(), runtime)
 	client := connectProcessClient(t, b)
