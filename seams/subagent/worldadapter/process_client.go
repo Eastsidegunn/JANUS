@@ -92,10 +92,23 @@ func (c *processClient) request(ctx context.Context, kind processwire.Kind, payl
 	if err != nil {
 		return err
 	}
+	return c.awaitResponse(ctx, response)
+}
+
+func (c *processClient) awaitResponse(ctx context.Context, response <-chan error) error {
 	select {
 	case err := <-response:
 		return err
 	case <-c.done:
+		// readControl delivers an ACK to response before it can observe the next
+		// terminal frame or EOF and close done. If both are ready, the request ACK
+		// wins; Go select alone would choose randomly and misreport a successful
+		// Stop as EOF.
+		select {
+		case err := <-response:
+			return err
+		default:
+		}
 		return c.failure()
 	case <-ctx.Done():
 		return ctx.Err()
