@@ -90,5 +90,44 @@ func listPackages(dir, goos string) ([]Pkg, error) {
 		}
 		pkgs = append(pkgs, p)
 	}
+	metadata, err := listDependencyMetadata(dir, goos)
+	if err != nil {
+		return nil, err
+	}
+	for i := range pkgs {
+		pkgs[i].StandardDeps = metadata
+	}
 	return pkgs, nil
+}
+
+func listDependencyMetadata(dir, goos string) (map[string]bool, error) {
+	// -test includes testing and test-only dependencies in the metadata map;
+	// otherwise collector *_test.go imports of stdlib packages look unknown and
+	// would be rejected as external.
+	cmd := exec.Command("go", "list", "-e", "-test", "-deps", "-json=ImportPath,Standard", "./...")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOOS="+goos)
+	out, err := cmd.Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return nil, fmt.Errorf("go list deps (GOOS=%s): %s", goos, ee.Stderr)
+		}
+		return nil, fmt.Errorf("go list deps (GOOS=%s): %w", goos, err)
+	}
+	dec := json.NewDecoder(strings.NewReader(string(out)))
+	result := map[string]bool{}
+	for {
+		var dep struct {
+			ImportPath string
+			Standard   bool
+		}
+		if err := dec.Decode(&dep); err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, fmt.Errorf("go list deps 출력 파싱 (GOOS=%s): %w", goos, err)
+		}
+		result[dep.ImportPath] = dep.Standard
+	}
+	return result, nil
 }
