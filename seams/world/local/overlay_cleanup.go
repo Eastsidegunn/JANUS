@@ -15,23 +15,24 @@ var (
 	errOverlayCleanupResidual = errors.New("world/local: overlay cleanup target remains")
 )
 
-// overlayCleanupTarget is a closed, package-private capability. T10 grants
-// cleanup authority only for work; T11 must define its durable collector ACK
-// before an upper target or call site can exist.
+// overlayCleanupTarget is a closed, package-private capability. Work cleanup
+// is unconditional at lease close; upper cleanup is unlocked only by a
+// lease-bound durable collector receipt.
 type overlayCleanupTarget uint8
 
 const overlayCleanupWork overlayCleanupTarget = iota + 1
+const overlayCleanupUpper overlayCleanupTarget = iota + 2
 
 type overlayCleanupCapability struct {
-	runner                     commandRunner
-	stateRoot, traceID, spanID string
-	stateDir, workDir          string
+	runner                      commandRunner
+	stateRoot, traceID, spanID  string
+	stateDir, workDir, upperDir string
 }
 
 func newOverlayCleanupCapability(stateRoot string, layout overlayLayout, runner commandRunner) overlayCleanupCapability {
 	return overlayCleanupCapability{
 		runner: runner, stateRoot: stateRoot, traceID: layout.traceID, spanID: layout.spanID,
-		stateDir: layout.stateDir, workDir: layout.work,
+		stateDir: layout.stateDir, workDir: layout.work, upperDir: layout.upper,
 	}
 }
 
@@ -69,10 +70,15 @@ func (c overlayCleanupCapability) validateTarget(target overlayCleanupTarget) (s
 	switch target {
 	case overlayCleanupWork:
 		path = c.workDir
+	case overlayCleanupUpper:
+		path = c.upperDir
 	default:
 		return "", fmt.Errorf("%w: 허용되지 않은 target=%d", errOverlayCleanupPath, target)
 	}
 	expectedTarget := filepath.Join(expectedState, "overlay", "work")
+	if target == overlayCleanupUpper {
+		expectedTarget = filepath.Join(expectedState, "overlay", "upper")
+	}
 	if path != expectedTarget || filepath.Clean(path) != path || !pathWithin(c.stateRoot, path) {
 		return "", fmt.Errorf("%w: work target 불일치: %q", errOverlayCleanupPath, path)
 	}

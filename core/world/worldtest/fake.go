@@ -162,13 +162,14 @@ type FakeActiveLease struct {
 	upperDir string
 	effects  []world.EffectAttempt
 
-	mu           sync.Mutex
-	stageErrors  map[FakeCloseStage]error
-	stageGates   map[FakeCloseStage]<-chan struct{}
-	stageReached map[FakeCloseStage]chan struct{}
-	closeOrder   []FakeCloseStage
-	closeDone    chan struct{}
-	closeErr     error
+	mu              sync.Mutex
+	stageErrors     map[FakeCloseStage]error
+	stageGates      map[FakeCloseStage]<-chan struct{}
+	stageReached    map[FakeCloseStage]chan struct{}
+	closeOrder      []FakeCloseStage
+	closeDone       chan struct{}
+	closeErr        error
+	collectionAcked bool
 }
 
 func NewFakeActiveLease(process world.ProcessEndpoint, approval world.ApprovalEndpoint, upperDir string, effects []world.EffectAttempt) *FakeActiveLease {
@@ -241,6 +242,20 @@ func (f *FakeActiveLease) Close(ctx context.Context) error {
 	close(done)
 	f.mu.Unlock()
 	return joined
+}
+
+func (f *FakeActiveLease) AcknowledgeCollection(receipt world.CollectionReceipt) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closeDone == nil {
+		return errors.New("worldtest: collection ACK before Close")
+	}
+	if f.collectionAcked {
+		return nil
+	}
+	_ = receipt
+	f.collectionAcked = true
+	return nil
 }
 
 func (f *FakeActiveLease) FakeSetCloseError(stage FakeCloseStage, err error) {

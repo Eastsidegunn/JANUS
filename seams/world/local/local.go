@@ -271,6 +271,12 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 	if err != nil {
 		return nil, err
 	}
+	// Production surfaces defer the proxy ACK until their collector has
+	// durably appended the corresponding effect. Fake brokers retain their
+	// simpler immediate-ACK behavior for lifecycle unit tests.
+	if durable, ok := broker.(interface{ EnableDurableAck() }); ok {
+		durable.EnableDurableAck()
+	}
 	approval, err := startApprovalBroker(ctx, layout.stateDir, spec.SpanID(), spec.Policy().Budget().TimeMs, b.approvalCapacity)
 	if err != nil {
 		_ = broker.Shutdown(context.Background())
@@ -360,6 +366,7 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 		approval: approval, process: process,
 		processEndpoint: process.Endpoint(), approvalEndpoint: approval.Endpoint(),
 		closeToken:     makeCloseToken(),
+		spanID:         spec.SpanID(),
 		metadata:       prepared.metadata.Clone(),
 		overlayCleanup: newOverlayCleanupCapability(b.stateRoot, layout, b.runner),
 	}, nil
@@ -668,12 +675,14 @@ type lease struct {
 	process          *processBroker
 	processEndpoint  world.ProcessEndpoint
 	approvalEndpoint world.ApprovalEndpoint
+	spanID           string
 	overlayCleanup   overlayCleanupCapability
 
 	closeToken       chan struct{}
 	processesStopped bool
 	closed           bool
 	closeErr         error
+	collectionAcked  bool
 }
 
 var _ world.ActiveLease = (*lease)(nil)
@@ -685,6 +694,28 @@ func (l *lease) ApprovalEndpoint() world.ApprovalEndpoint { return l.approvalEnd
 // T11 must classify them with lstat(mode+rdev), never with an owner filter.
 func (l *lease) UpperDir() string                    { return l.upperDir }
 func (l *lease) Effects() <-chan world.EffectAttempt { return l.effects }
+
+// AcknowledgeCollection consumes a durable, lease-bound fs snapshot receipt
+// and only then removes this lease's upper directory. No raw path is accepted;
+// the package-private capability computes the exact target from lease state.
+func (l *lease) AcknowledgeCollection(receipt world.CollectionReceipt) error {
+	if err := world.ValidateCollectionReceipt(receipt, l.processEndpoint.LeaseID(), l.spanID); err != nil {
+		return err
+	}
+	if !l.closed {
+		return errors.New("world/local: collection ACK는 lease Close 이후여야 함")
+	}
+	if l.collectionAcked {
+		return nil
+	}
+	ctx, cancel := cleanupContext(context.Background())
+	defer cancel()
+	if err := l.overlayCleanup.remove(ctx, overlayCleanupUpper); err != nil {
+		return fmt.Errorf("world/local: upper cleanup: %w", err)
+	}
+	l.collectionAcked = true
+	return nil
+}
 
 func (l *lease) Close(ctx context.Context) error {
 	acquired := false

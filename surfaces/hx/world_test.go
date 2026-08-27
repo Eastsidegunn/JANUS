@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -44,6 +45,10 @@ func TestProductionWorldRejectsNoneWithoutActivation(t *testing.T) {
 
 func TestProductionWorldActivationFailureIsNotMisreportedAsAbortFailure(t *testing.T) {
 	ctx := context.Background()
+	lower := t.TempDir()
+	if err := os.WriteFile(lower+"/seed.txt", []byte("seed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	log, err := sqlite.Open(ctx, t.TempDir()+"/events.db")
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +59,7 @@ func TestProductionWorldActivationFailureIsNotMisreportedAsAbortFailure(t *testi
 	prepared := worldtest.NewFakePreparedLease(world.SpawnMetadata{
 		Backend: gen.SubagentSpawnPayloadWorldBackendLocalPodman, ProfileID: profileID,
 		ImageDigest: digest, Mounts: []gen.SubagentSpawnMount{{
-			SourcePath: "/workspace", TargetPath: gen.SubagentSpawnMountTargetPathWorkspace,
+			SourcePath: lower, TargetPath: gen.SubagentSpawnMountTargetPathWorkspace,
 			Mode: gen.SubagentSpawnMountModeOverlay, UpperRef: "world/upper",
 		}},
 	}, "/host/upper", nil)
@@ -68,7 +73,7 @@ func TestProductionWorldActivationFailureIsNotMisreportedAsAbortFailure(t *testi
 		Backend: backend, Writer: log.Writer, TraceID: strings.Repeat("1", 32), ParentSpan: strings.Repeat("3", 16),
 		SpawnSpec: world.NewSpawnSpec(effective, world.NewImageReference("repo", digest), []string{"agent"}, 0,
 			strings.Repeat("1", 32), strings.Repeat("2", 16), world.AgentIdentity{UID: 1000, GID: 1000}, nil),
-		AdapterCommand: []string{"unused"}, AdapterName: "world", Instruction: "x", Workspace: "/workspace",
+		AdapterCommand: []string{"unused"}, AdapterName: "world", Instruction: "x", Workspace: lower,
 		Budget: gen.Budget{Tokens: 1, TimeMs: 1, MaxDepth: 1}, ProfileID: profileID,
 	})
 	if !errors.Is(err, activationErr) || strings.Contains(err.Error(), "Abort") {
