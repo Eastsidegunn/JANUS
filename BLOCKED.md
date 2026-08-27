@@ -41,3 +41,23 @@ Lease cleanup 및 runtime artifact 0을 매번 단정한다.
 최종 동일 SHA `62aa0ad`의 Linux run `32934687022` attempts 1–5가 모두 green이다.
 `make ci`도 로컬에서 exit 0이다. 이 항목의 차단을 해소하고 PR #31의 구현을
 검수 대상으로 전환한다.
+
+## T11 collector — opaque overlay 표현 불일치 (2026-08-27 — 차단)
+
+§2.3 선행 Linux probe `33041950035`에서 제안서의 opaque-directory 표와 다른
+실물 표현을 확인해 정지했다. rootless native overlay에서 lower의 `opaque/`
+디렉터리를 컨테이너 안에서 통째로 삭제했을 때 host upper에는
+`opaque` 경로의 **subuid 소유 character-device whiteout (rdev 0:0)**가
+생겼다. opaque xattr 또는 `.wh..wh..opq` marker가 아니었다. 같은 probe에서
+rename은 원본 경로 whiteout + 새 regular file, hardlink는 동일 inode 두 경로,
+symlink는 upper symbolic link로 관측됐다.
+
+현재 collector 구현은 directory를 가리키는 whiteout을 잘못된 대상으로
+거부하고 opaque xattr/marker만 subtree 삭제로 확장하므로, 이 실측을 임의로
+정상 처리하도록 바꾸지 않는다. 디렉터리 whiteout을 opaque subtree 삭제로
+해석할지, 표와 계약을 어떻게 개정할지 명세 소유자의 재제안·승인이 필요하다.
+probe의 최종 host cleanup은 work 디렉터리 subuid 권한으로 실패했지만, 위
+upper `lstat/stat` 출력은 수집되어 표현 불일치 판단의 근거로 보존했다.
+
+해소 조건: directory whiteout 의미론과 collector 변경 범위를 승인하는 개정
+제안, 그리고 동일 Linux 조건에서 개정 표를 재확인하는 probe run이다.
