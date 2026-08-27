@@ -115,6 +115,7 @@ func Diff(ctx context.Context, baseline Manifest, upper string, limits Limits) (
 		scanState: scanState{ctx: ctx, limits: limits},
 		baseline:  baseline.entries,
 		seen:      make(map[string]bool),
+		emitted:   make(map[string]bool),
 		changes:   make([]gen.FsChangedPayloadChangesItem, 0),
 		opaque:    make([]string, 0),
 	}
@@ -122,20 +123,10 @@ func Diff(ctx context.Context, baseline Manifest, upper string, limits Limits) (
 		return gen.FsChangedPayload{}, err
 	}
 	// Native overlay may represent an opaque directory with an xattr rather
-	// than explicit whiteouts. Expand absent baseline leaves deterministically.
-	for _, dir := range upperState.opaque {
-		prefix := dir + "/"
-		for path, old := range baseline.entries {
-			if !strings.HasPrefix(path, prefix) || upperState.seen[path] {
-				continue
-			}
-			if old.kind != "regular" && old.kind != "symlink" {
-				continue
-			}
-			if err := upperState.addChange(path, old.hash, gen.FsChangedPayloadChangesItemChangeTypeDeleted); err != nil {
-				return gen.FsChangedPayload{}, err
-			}
-		}
+	// than explicit whiteouts. Directory-path whiteouts have the same meaning.
+	// Expand absent baseline leaves deterministically.
+	if err := upperState.expandOpaque(); err != nil {
+		return gen.FsChangedPayload{}, err
 	}
 
 	sort.Slice(upperState.changes, func(i, j int) bool {
@@ -347,8 +338,27 @@ type upperScanState struct {
 	scanState
 	baseline map[string]manifestEntry
 	seen     map[string]bool
+	emitted  map[string]bool
 	changes  []gen.FsChangedPayloadChangesItem
 	opaque   []string
+}
+
+func (s *upperScanState) expandOpaque() error {
+	for _, dir := range s.opaque {
+		prefix := dir + "/"
+		for path, old := range s.baseline {
+			if !strings.HasPrefix(path, prefix) || s.seen[path] {
+				continue
+			}
+			if old.kind != "regular" && old.kind != "symlink" {
+				continue
+			}
+			if err := s.addChange(path, old.hash, gen.FsChangedPayloadChangesItemChangeTypeDeleted); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *upperScanState) walkUpper(root, rel string, depth int) error {
@@ -386,7 +396,18 @@ func (s *upperScanState) walkUpper(root, rel string, depth int) error {
 		s.seen[childRel] = true
 		if isWhiteout(info) {
 			old, ok := s.baseline[childRel]
-			if !ok || (old.kind != "regular" && old.kind != "symlink") {
+			if !ok {
+				return fmt.Errorf("collector: invalid whiteout target %s", childRel)
+			}
+			if old.kind == "dir" {
+				// Native overlayfs uses a directory-path whiteout when the
+				// lower directory is removed. The baseline tells us which
+				// descendant leaves must be expanded; the directory itself is
+				// not an event candidate.
+				s.opaque = append(s.opaque, childRel)
+				continue
+			}
+			if old.kind != "regular" && old.kind != "symlink" {
 				return fmt.Errorf("collector: invalid whiteout target %s", childRel)
 			}
 			if err := s.addChange(childRel, old.hash, gen.FsChangedPayloadChangesItemChangeTypeDeleted); err != nil {
@@ -396,7 +417,11 @@ func (s *upperScanState) walkUpper(root, rel string, depth int) error {
 		}
 		if info.IsDir() {
 			if old, ok := s.baseline[childRel]; ok && old.kind != "dir" {
-				return fmt.Errorf("collector: node kind conflict %s", childRel)
+				// A directory replacing a lower leaf is represented by a
+				// deletion of that leaf followed by its new descendants.
+				if err := s.addChange(childRel, old.hash, gen.FsChangedPayloadChangesItemChangeTypeDeleted); err != nil {
+					return err
+				}
 			}
 			if err := s.walkUpper(root, childRel, depth+1); err != nil {
 				return err
@@ -419,10 +444,16 @@ func (s *upperScanState) walkUpper(root, rel string, depth int) error {
 		}
 		old, exists := s.baseline[childRel]
 		if exists && old.kind != kind {
-			return fmt.Errorf("collector: node kind conflict %s", childRel)
+			if old.kind != "dir" {
+				return fmt.Errorf("collector: node kind conflict %s", childRel)
+			}
+			// A regular file or symlink replacing a lower directory hides
+			// every baseline leaf below it. The replacement itself is an
+			// added leaf because baseline directories are not event candidates.
+			s.opaque = append(s.opaque, childRel)
 		}
 		change := gen.FsChangedPayloadChangesItemChangeTypeAdded
-		if exists {
+		if exists && old.kind == kind {
 			change = gen.FsChangedPayloadChangesItemChangeTypeModified
 		}
 		if err := s.addChange(childRel, hash, change); err != nil {
@@ -433,9 +464,13 @@ func (s *upperScanState) walkUpper(root, rel string, depth int) error {
 }
 
 func (s *upperScanState) addChange(path, hash string, change gen.FsChangedPayloadChangesItemChangeType) error {
+	if s.emitted[path] {
+		return nil
+	}
 	if len(s.changes) >= s.limits.MaxChanges {
 		return errors.New("collector: changed-file limit exceeded")
 	}
+	s.emitted[path] = true
 	s.changes = append(s.changes, gen.FsChangedPayloadChangesItem{Path: path, Hash: hash, ChangeType: change})
 	return nil
 }

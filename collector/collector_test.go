@@ -108,6 +108,69 @@ func TestDiffRejectsLowerMutationBeforeUpperAndReturnsNoPartial(t *testing.T) {
 	}
 }
 
+func TestDiffExpandsDirectoryReplacementAndOpaqueLeaves(t *testing.T) {
+	lower, upper := t.TempDir(), t.TempDir()
+	writeFile(t, lower, "dir/a.txt", "a")
+	writeFile(t, lower, "dir/link-target.txt", "target")
+	if err := os.Symlink("link-target.txt", filepath.Join(lower, "dir", "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	base, err := BuildBaseline(context.Background(), lower, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A lower directory replaced by a file has no directory event. Its
+	// baseline leaves are deleted and the replacement leaf is added.
+	if err := os.WriteFile(filepath.Join(upper, "dir"), []byte("replacement"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Diff(context.Background(), base, upper, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Changes) != 4 {
+		t.Fatalf("changes=%+v, want replacement plus three deleted leaves", got.Changes)
+	}
+	byPath := make(map[string]gen.FsChangedPayloadChangesItem)
+	for _, change := range got.Changes {
+		byPath[change.Path] = change
+	}
+	if byPath["dir"].ChangeType != gen.FsChangedPayloadChangesItemChangeTypeAdded {
+		t.Fatalf("replacement=%+v, want added", byPath["dir"])
+	}
+	for _, path := range []string{"dir/a.txt", "dir/link-target.txt", "dir/link.txt"} {
+		change, ok := byPath[path]
+		if !ok || change.ChangeType != gen.FsChangedPayloadChangesItemChangeTypeDeleted {
+			t.Fatalf("path %q change=%+v, want deleted", path, change)
+		}
+		if change.Hash != base.entries[path].hash {
+			t.Fatalf("path %q hash=%q, want baseline %q", path, change.Hash, base.entries[path].hash)
+		}
+	}
+}
+
+func TestExpandOpaqueDeduplicatesDirectoryWhiteoutLeaves(t *testing.T) {
+	s := upperScanState{
+		baseline: map[string]manifestEntry{
+			"dir":       {kind: "dir"},
+			"dir/a.txt": {kind: "regular", hash: "sha256:a"},
+			"dir/link":  {kind: "symlink", hash: "sha256:b"},
+			"dir/sub":   {kind: "dir"},
+		},
+		seen:      map[string]bool{},
+		emitted:   map[string]bool{"dir/link": true},
+		changes:   []gen.FsChangedPayloadChangesItem{{Path: "dir/link", Hash: "sha256:b", ChangeType: gen.FsChangedPayloadChangesItemChangeTypeDeleted}},
+		opaque:    []string{"dir", "dir"}, // native directory whiteout may be observed once per path
+		scanState: scanState{limits: testLimits()},
+	}
+	if err := s.expandOpaque(); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.changes) != 2 || s.changes[1].Path != "dir/a.txt" {
+		t.Fatalf("changes=%+v, want one new deleted leaf without duplicates", s.changes)
+	}
+}
+
 func TestCollectorLimitsFailClosed(t *testing.T) {
 	lower, upper := t.TempDir(), t.TempDir()
 	writeFile(t, lower, "base", "x")
