@@ -706,7 +706,7 @@ func (l *lease) AcknowledgeCollection(receipt world.CollectionReceipt) error {
 		return errors.New("world/local: collection ACK는 lease Close 이후여야 함")
 	}
 	if l.collectionAcked {
-		return nil
+		return errors.New("world/local: collection receipt가 이미 소비됨")
 	}
 	ctx, cancel := cleanupContext(context.Background())
 	defer cancel()
