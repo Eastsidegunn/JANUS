@@ -161,6 +161,7 @@ func genEventSequence(r *rand.Rand) []gen.EventRecord {
 			add(gen.KindCollectorEgress, "collector", rootSpan, nil, gen.EgressPayload{
 				Domain: "registry.npmjs.org", Method: "GET",
 				SizeBytes: r.Int63n(1 << 20), AtMs: ts,
+				Decision: gen.EgressPayloadDecisionAllow,
 			}, nil)
 		case 11:
 			add(gen.KindSessionFork, "parent", rootSpan, nil, gen.SessionForkPayload{

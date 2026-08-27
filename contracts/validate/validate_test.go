@@ -2,6 +2,7 @@ package validate
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
@@ -58,7 +59,8 @@ func TestValidateRecordValid(t *testing.T) {
 		"subagent/done":               envelope(`"kind":"subagent/done","payload":{"status":"ok","result":"완료 요약"}`),
 		"policy/decision":             envelope(`"kind":"policy/decision","payload":{"decision":"deny","profile_id":"opaque-default","reason":"egress 미허용"}`),
 		"collector/fs_changed":        `{"seq":9,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/fs_changed","payload":{"changes":[{"path":"a/b.txt","hash":"sha256:` + hex64 + `","change_type":"modified"}]}}`,
-		"collector/egress":            `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"registry.npmjs.org","method":"GET","size_bytes":1024,"at_ms":1700000000001}}`,
+		"collector/egress allow":      `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"registry.npmjs.org","method":"GET","size_bytes":1024,"at_ms":1700000000001,"decision":"allow"}}`,
+		"collector/egress deny":       `{"seq":11,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"blocked.example","method":"CONNECT","size_bytes":0,"at_ms":1700000000002,"decision":"deny","reason":"도메인이 허용 목록 밖임"}}`,
 		"int64 최대값":                   envelope(`"kind":"session/end","payload":{},"usage_in":9223372036854775807`),
 	}
 	for name, sample := range cases {
@@ -129,6 +131,12 @@ func TestValidateRecordInvalid(t *testing.T) {
 		"continue에 대체값":               envelope(`"kind":"hook/verdict","payload":{"point":"pre_step","verdict":"continue","rewrite":{}}`),
 		"done result 누락":              envelope(`"kind":"subagent/done","payload":{"status":"ok"}`),
 		"fs_changed 잘못된 해시":           `{"seq":9,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/fs_changed","payload":{"changes":[{"path":"a","hash":"md5:abc","change_type":"added"}]}}`,
+		"egress allow에 reason":        `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"x","method":"GET","size_bytes":1,"at_ms":1,"decision":"allow","reason":"사유"}}`,
+		"egress deny reason 누락":       `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"x","method":"GET","size_bytes":1,"at_ms":1,"decision":"deny"}}`,
+		"egress 미지 decision":          `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"x","method":"GET","size_bytes":1,"at_ms":1,"decision":"maybe"}}`,
+		"egress decision 누락":          `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"x","method":"GET","size_bytes":1,"at_ms":1}}`,
+		"egress 분기 혼입":                `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"x","method":"GET","size_bytes":1,"at_ms":1,"decision":"deny","reason":"거부","extra":"혼입"}}`,
+		"egress reason 513자":          `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"x","method":"GET","size_bytes":1,"at_ms":1,"decision":"deny","reason":"` + strings.Repeat("x", 513) + `"}}`,
 	}
 	for name, sample := range cases {
 		if err := v.ValidateRecord([]byte(sample)); err == nil {

@@ -9,11 +9,20 @@ type AssistantMessagePayload struct {
 	Text string `json:"text"`
 }
 
+type EgressPayloadDecision string
+
+const (
+	EgressPayloadDecisionAllow EgressPayloadDecision = "allow"
+	EgressPayloadDecisionDeny  EgressPayloadDecision = "deny"
+)
+
 type EgressPayload struct {
-	AtMs      int64  `json:"at_ms"`
-	Domain    string `json:"domain"`
-	Method    string `json:"method"`
-	SizeBytes int64  `json:"size_bytes"`
+	AtMs      int64                 `json:"at_ms"`
+	Decision  EgressPayloadDecision `json:"decision"`
+	Domain    string                `json:"domain"`
+	Method    string                `json:"method"`
+	Reason    *string               `json:"reason,omitempty"`
+	SizeBytes int64                 `json:"size_bytes"`
 }
 
 type FsChangedPayloadChangesItemChangeType string
