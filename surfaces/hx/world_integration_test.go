@@ -195,7 +195,7 @@ func TestWorldIntegration(t *testing.T) {
 	t.Run("surface-overlay-egress-approval-backpressure", func(t *testing.T) {
 		runNormalIntegration(t, ctx, artifacts)
 	})
-	for _, mode := range []string{"abnormal", "stop", "orphan"} {
+	for _, mode := range []string{"abnormal", "stop", "stop-ignore", "orphan"} {
 		t.Run("lifecycle-"+mode, func(t *testing.T) {
 			runLifecycleIntegration(t, ctx, artifacts, mode)
 		})
@@ -411,7 +411,7 @@ func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts int
 		}
 		close(effectsDone)
 	}()
-	if mode == "stop" {
+	if mode == "stop" || mode == "stop-ignore" {
 		waitRecord(t, store, gen.KindSubagentReady, 30*time.Second)
 		if err := active.Subagent.Stop(gen.StopPayloadReasonUser); err != nil {
 			t.Fatal(err)
@@ -429,7 +429,7 @@ func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts int
 	if closeErr != nil || time.Since(started) > 20*time.Second {
 		t.Fatalf("%s bounded cleanup: elapsed=%v err=%v", mode, time.Since(started), closeErr)
 	}
-	if mode == "stop" {
+	if mode == "stop" || mode == "stop-ignore" {
 		if waitErr != nil || done.Status != gen.DonePayloadStatusStopped {
 			t.Fatalf("stop result=%+v err=%v", done, waitErr)
 		}

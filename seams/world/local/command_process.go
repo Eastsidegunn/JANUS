@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -50,6 +51,28 @@ func startCommand(ctx context.Context, binary string, args ...string) (startedCo
 		_ = stdin.Close()
 		_ = stdout.Close()
 		return nil, fmt.Errorf("%s %s stderr: %w", binary, strings.Join(args, " "), err)
+	}
+	for _, pipe := range []struct {
+		name string
+		file io.ReadCloser
+	}{{"stdout", stdout}, {"stderr", stderr}} {
+		file, ok := pipe.file.(*os.File)
+		if !ok {
+			_ = stdin.Close()
+			_ = stdout.Close()
+			_ = stderr.Close()
+			return nil, fmt.Errorf("%s %s %s pipe 형식=%T", binary, strings.Join(args, " "), pipe.name, pipe.file)
+		}
+		// A blocking pipe read cannot be interrupted reliably by Close or a
+		// deadline from another goroutine on Linux. Nonblocking mode lets os.File
+		// register the fd with the runtime poller while retaining blocking Read
+		// semantics for callers and makes containerDone-driven deadlines effective.
+		if err := syscall.SetNonblock(int(file.Fd()), true); err != nil {
+			_ = stdin.Close()
+			_ = stdout.Close()
+			_ = stderr.Close()
+			return nil, fmt.Errorf("%s %s %s nonblock: %w", binary, strings.Join(args, " "), pipe.name, err)
+		}
 	}
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
