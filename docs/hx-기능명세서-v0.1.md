@@ -148,7 +148,7 @@ contracts  →  core  →  seams  →  surfaces
 |---|---|
 | FR-COL-01 | 수집기는 에이전트의 협조 없이 동작해야 한다(MUST). 에이전트가 비정상 종료해도 수집된 관측은 보존된다. |
 | FR-COL-02 | fs diff: spawn 시 워크스페이스 상태를 기준으로, done 시 변경 파일 목록(경로, 해시, 변경 유형)을 `collector/fs_changed` 이벤트로 방출해야 한다(MUST). overlayfs upper 디렉토리를 diff 소스로 사용한다(SHOULD). |
-| FR-COL-03 | egress: 프록시를 통과한 요청(도메인, 메서드, 크기, 시각)을 `collector/egress` 이벤트로 방출해야 한다(MUST). 페이로드 본문은 기록하지 않는다(MUST NOT) — 메타데이터만. |
+| FR-COL-03 | egress: 강제 프록시가 관측한 allow/deny 요청 시도(도메인, 메서드, 크기, 시각, 판정)를 `collector/egress` 이벤트로 방출해야 한다(MUST). deny에는 비어 있지 않은 사유를 포함한다. 페이로드 본문·헤더·자격증명·resolved IP는 기록하지 않는다(MUST NOT) — 메타데이터만. |
 | FR-COL-04 | exec 감사(eBPF 기반 syscall 관측)는 v2 범위로 한다(MAY). 인터페이스 자리만 v0.1에 확보한다. |
 | FR-COL-05 | 모든 수집 이벤트는 해당 서브에이전트의 span_id로 귀속되어야 한다(MUST). |
 | FR-COL-06 | 수집 이벤트도 writer를 경유해 동일 로그에 기록된다(MUST). actor 필드로 의도 평면 이벤트와 구분한다. |
@@ -288,7 +288,7 @@ v0.1은 다음이 모두 참일 때 완료로 본다.
 1. 리플레이 결정론 속성 테스트가 CI에서 통과한다 (FR-LOG-06).
 2. Claude Code와 Codex 어댑터가 골든 픽스처 테스트를 통과하고, 실 세션에서 자식 툴 콜이 child span으로 기록된다 (FR-ADP-05, FR-ADP-09).
 3. 임의 세션에 대해 `hx audit`이 fs diff 기반 대조 리포트를 산출하고, 인위적 불일치(에이전트가 보고하지 않은 파일 변경)를 검출한다 (FR-AUD-01/02).
-4. egress allow 리스트 밖의 도메인 접근이 실제로 차단되고 `collector/egress`에 시도가 기록된다 (FR-SBX-03, FR-COL-03).
+4. egress allow 리스트 밖의 도메인 접근이 실제로 차단되고, 프록시의 deny 판정과 사유가 `collector/egress`에 시도로 기록된다 (FR-SBX-03, FR-COL-03). 허용된 요청도 allow 판정으로 기록되어 양쪽 시도가 로그에서 구분된다.
 5. 프로파일 오버레이로 권한이 넓어지는 조합이 존재하지 않음을 속성 테스트로 검증한다 (FR-POL-03).
 6. `hx fork` 후 두 세션이 독립적으로 진행되며 원본 로그가 불변임이 확인된다 (FR-LOG-05).
 7. OTel export된 trace가 표준 뷰어(Jaeger 등)에서 부모-자식 span 트리로 렌더링된다 (FR-OBS-01).

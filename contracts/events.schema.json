@@ -522,7 +522,7 @@
     },
     "egressPayload": {
       "type": "object",
-      "description": "egress 관측 메타데이터 — 도메인, 메서드, 크기, 시각 (FR-COL-03). 페이로드 본문은 기록 금지(MUST NOT)",
+      "description": "프록시가 관측한 egress 요청 시도 메타데이터 — allow/deny 판정, 도메인, 메서드, 크기, 시각 (FR-COL-03). 페이로드 본문은 기록 금지(MUST NOT)",
       "properties": {
         "domain": {
           "type": "string",
@@ -538,15 +538,79 @@
         "at_ms": {
           "$ref": "#/$defs/int64NonNeg",
           "$comment": "요청 시각. 이벤트 envelope ts는 기록 시각이므로 별도 유지"
+        },
+        "decision": {
+          "enum": [
+            "allow",
+            "deny"
+          ]
         }
       },
       "required": [
         "domain",
         "method",
         "size_bytes",
-        "at_ms"
+        "at_ms",
+        "decision"
       ],
-      "additionalProperties": false
+      "oneOf": [
+        {
+          "properties": {
+            "domain": {
+              "type": "string",
+              "minLength": 1
+            },
+            "method": {
+              "type": "string",
+              "minLength": 1
+            },
+            "size_bytes": {
+              "$ref": "#/$defs/int64NonNeg"
+            },
+            "at_ms": {
+              "$ref": "#/$defs/int64NonNeg",
+              "$comment": "요청 시각. 이벤트 envelope ts는 기록 시각이므로 별도 유지"
+            },
+            "decision": {
+              "const": "allow"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "properties": {
+            "domain": {
+              "type": "string",
+              "minLength": 1
+            },
+            "method": {
+              "type": "string",
+              "minLength": 1
+            },
+            "size_bytes": {
+              "$ref": "#/$defs/int64NonNeg"
+            },
+            "at_ms": {
+              "$ref": "#/$defs/int64NonNeg",
+              "$comment": "요청 시각. 이벤트 envelope ts는 기록 시각이므로 별도 유지"
+            },
+            "decision": {
+              "const": "deny"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "$comment": "판정 사유만 기록한다. header·body·credential·resolved IP는 포함 금지"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "$comment": "decision은 프록시가 관측한 시도의 판정이다. allow/deny를 모두 기록하며 deny reason에는 header·body·credential·resolved IP를 기록하지 않는다."
     },
     "turnBoundaryPayload": {
       "type": "object",
