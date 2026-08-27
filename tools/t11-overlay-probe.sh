@@ -38,6 +38,50 @@ func main() {
 }
 EOF
 CGO_ENABLED=0 go build -trimpath -o "$root/probe" "$root/probe.go"
+cat > "$root/xattrs.go" <<'EOF'
+//go:build linux
+
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"syscall"
+)
+
+func main() {
+	if len(os.Args) != 2 { panic("usage: xattrs ROOT") }
+	root := os.Args[1]
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil { return err }
+		if info.Mode()&os.ModeSymlink != 0 { return nil }
+		n, err := syscall.Listxattr(path, nil)
+		if err != nil || n <= 0 { return nil }
+		buf := make([]byte, n)
+		n, err = syscall.Listxattr(path, buf)
+		if err != nil { return err }
+		for _, name := range split(buf[:n]) {
+			value := make([]byte, 64)
+			vn, getErr := syscall.Getxattr(path, name, value)
+			if getErr != nil { return getErr }
+			fmt.Printf("xattr path=%s name=%s value=%q\n", path, name, value[:vn])
+		}
+		return nil
+	})
+	if err != nil { panic(err) }
+}
+
+func split(buf []byte) []string {
+	var out []string
+	start := 0
+	for i, b := range buf {
+		if b == 0 { if i > start { out = append(out, string(buf[start:i])) }; start = i + 1 }
+	}
+	return out
+}
+EOF
+CGO_ENABLED=0 go build -trimpath -o "$root/xattrs" "$root/xattrs.go"
 printf 'FROM scratch\nCOPY probe /probe\nENTRYPOINT ["/probe"]\n' > "$root/Containerfile"
 podman build --pull=never -t localhost/t11-overlay-probe:latest -f "$root/Containerfile" "$root" >/dev/null
 digest=$(podman image inspect --format '{{.Digest}}' localhost/t11-overlay-probe:latest)
@@ -64,6 +108,7 @@ run_case() {
 	find "$upper" -mindepth 1 -exec stat -c 'path=%n type=%F uid=%u gid=%g mode=%a inode=%i rdev=%t:%T' {} \; | sort
 	echo '--- upper xattrs ---'
 	if command -v getfattr >/dev/null 2>&1; then getfattr -R -d -m- "$upper" 2>&1 || true; else echo 'getfattr unavailable'; fi
+	"$root/xattrs" "$upper"
 }
 
 run_case recreate
