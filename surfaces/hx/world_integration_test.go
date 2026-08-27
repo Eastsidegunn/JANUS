@@ -294,6 +294,11 @@ func runNormalIntegration(t *testing.T, parent context.Context, artifacts integr
 	mustWrite(t, filepath.Join(lower, "modified.txt"), "original-modified\n")
 	mustWrite(t, filepath.Join(lower, "deleted.txt"), "original-deleted\n")
 	mustWrite(t, filepath.Join(lower, "untouched.txt"), "original-untouched\n")
+	for _, dir := range []string{"opaque-dir", "replace-dir", "partial-dir"} {
+		if err := os.Mkdir(filepath.Join(lower, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	mustWrite(t, filepath.Join(lower, "opaque-dir", "old-a.txt"), "opaque-a\n")
 	mustWrite(t, filepath.Join(lower, "opaque-dir", "old-b.txt"), "opaque-b\n")
 	mustWrite(t, filepath.Join(lower, "replace-dir", "old.txt"), "replace-old\n")
