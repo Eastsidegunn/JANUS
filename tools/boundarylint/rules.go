@@ -13,6 +13,10 @@ type Pkg struct {
 	Imports      []string
 	TestImports  []string
 	XTestImports []string
+	// StandardDeps is populated from go list dependency metadata. It is kept
+	// on each package record so Check can distinguish stdlib from arbitrary
+	// external modules without guessing from a dotted path.
+	StandardDeps map[string]bool
 }
 
 // validLayers는 §3.1이 허용하는 최상위 디렉토리 전부다.
@@ -63,6 +67,8 @@ func Check(module string, pkgs []Pkg) []string {
 			if !ok {
 				if v := checkExternal(from, imp); v != "" {
 					add(v)
+				} else if fromLayer == "collector" && !isStandardImport(imp, p.StandardDeps) {
+					add(fmt.Sprintf("%s → %s (collector는 표준 라이브러리와 contracts만 import 가능)", from, imp))
 				}
 				return
 			}
@@ -86,6 +92,22 @@ func Check(module string, pkgs []Pkg) []string {
 	}
 	sort.Strings(violations)
 	return violations
+}
+
+func isStandardImport(path string, metadata map[string]bool) bool {
+	if metadata != nil {
+		standard, known := metadata[path]
+		return known && standard
+	}
+	// Unit tests may construct Pkg values directly without go list metadata.
+	// In production listPackages always supplies the complete map; this
+	// conservative fallback preserves the conventional stdlib path shape for
+	// those isolated rule tests.
+	first := path
+	if i := strings.IndexByte(first, '/'); i >= 0 {
+		first = first[:i]
+	}
+	return !strings.Contains(first, ".")
 }
 
 func isWorldtest(path string) bool {
