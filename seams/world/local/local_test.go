@@ -394,6 +394,57 @@ func TestCollectionReceiptFailuresPreserveUpper(t *testing.T) {
 	})
 }
 
+func TestCollectionReceiptIsOneShot(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("8", 64)
+	lower, stateRoot := testDirs(t)
+	runner := newFakePodman(digest)
+	backend := mustBackend(t, stateRoot, runner, statDevice)
+	activeValue, err := openTestLease(t, backend, context.Background(), testSpec(lower, digest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := activeValue.(*lease)
+	if err := active.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	receipt := commitCollectionReceiptForTest(t, active)
+	if err := active.AcknowledgeCollection(receipt); err != nil {
+		t.Fatalf("첫 collection ACK가 실패함: %v", err)
+	}
+	cleanupCalls := countCall(callKeys(runner.snapshot()), "unshare")
+	err = active.AcknowledgeCollection(receipt)
+	if err == nil || !strings.Contains(err.Error(), "이미 소비됨") {
+		t.Fatalf("같은 lease에서 receipt 재사용이 명확한 오류로 거부되지 않음: %v", err)
+	}
+	if got := countCall(callKeys(runner.snapshot()), "unshare"); got != cleanupCalls {
+		t.Fatalf("재사용 receipt가 upper cleanup을 반복함: %d → %d", cleanupCalls, got)
+	}
+}
+
+func TestCollectionReceiptRequiresClose(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("9", 64)
+	lower, stateRoot := testDirs(t)
+	runner := newFakePodman(digest)
+	backend := mustBackend(t, stateRoot, runner, statDevice)
+	activeValue, err := openTestLease(t, backend, context.Background(), testSpec(lower, digest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := activeValue.(*lease)
+	receipt := commitCollectionReceiptForTest(t, active)
+	upper := active.UpperDir()
+	if err := active.AcknowledgeCollection(receipt); err == nil || !strings.Contains(err.Error(), "Close 이후") {
+		t.Fatalf("Close 전 collection ACK가 명확한 오류로 거부되지 않음: %v", err)
+	}
+	assertUpperPreserved(t, upper)
+	if got := countCall(callKeys(runner.snapshot()), "unshare"); got != 0 {
+		t.Fatalf("Close 전 collection ACK가 upper cleanup을 수행함: %d", got)
+	}
+	if err := active.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func commitCollectionReceiptForTest(t *testing.T, active *lease) world.CollectionReceipt {
 	t.Helper()
 	store := &localMemoryStore{}
