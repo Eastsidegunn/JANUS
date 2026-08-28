@@ -314,6 +314,169 @@ func TestReceiptFailuresDoNotCreatePodmanResources(t *testing.T) {
 	}
 }
 
+func TestCollectionReceiptFailuresPreserveUpper(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("7", 64)
+
+	t.Run("zero receipt", func(t *testing.T) {
+		lower, stateRoot := testDirs(t)
+		runner := newFakePodman(digest)
+		backend := mustBackend(t, stateRoot, runner, statDevice)
+		activeValue, err := openTestLease(t, backend, context.Background(), testSpec(lower, digest))
+		if err != nil {
+			t.Fatal(err)
+		}
+		active := activeValue.(*lease)
+		if err := active.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		upper := active.UpperDir()
+		if err := active.AcknowledgeCollection(world.CollectionReceipt{}); err == nil {
+			t.Fatal("zero collection receipt가 수용됨")
+		}
+		assertUpperPreserved(t, upper)
+	})
+
+	t.Run("cross lease receipt", func(t *testing.T) {
+		lower, stateRoot := testDirs(t)
+		runner := newFakePodman(digest)
+		backend := mustBackend(t, stateRoot, runner, statDevice)
+		specA := testSpec(lower, digest)
+		specB := world.NewSpawnSpec(specA.Policy(), specA.Image(), specA.AgentArgv(), specA.Depth(), specA.TraceID(), strings.Repeat("4", 16), specA.AgentIdentity(), specA.Credentials())
+		activeAValue, err := openTestLease(t, backend, context.Background(), specA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		activeBValue, err := openTestLease(t, backend, context.Background(), specB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		activeA, activeB := activeAValue.(*lease), activeBValue.(*lease)
+		if err := activeA.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if err := activeB.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		receiptA := commitCollectionReceiptForTest(t, activeA)
+		upperB := activeB.UpperDir()
+		if err := activeB.AcknowledgeCollection(receiptA); err == nil {
+			t.Fatal("cross-lease collection receipt가 수용됨")
+		}
+		assertUpperPreserved(t, upperB)
+		if err := activeA.AcknowledgeCollection(receiptA); err != nil {
+			t.Fatalf("원래 lease의 collection receipt가 거부됨: %v", err)
+		}
+	})
+
+	t.Run("receipt reuse", func(t *testing.T) {
+		lower, stateRoot := testDirs(t)
+		runner := newFakePodman(digest)
+		backend := mustBackend(t, stateRoot, runner, statDevice)
+		activeValue, err := openTestLease(t, backend, context.Background(), testSpec(lower, digest))
+		if err != nil {
+			t.Fatal(err)
+		}
+		active := activeValue.(*lease)
+		if err := active.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		receipt := commitCollectionReceiptForTest(t, active)
+		if err := active.AcknowledgeCollection(receipt); err != nil {
+			t.Fatalf("첫 collection ACK가 실패함: %v", err)
+		}
+		cleanupCalls := countCall(callKeys(runner.snapshot()), "unshare")
+		if err := active.AcknowledgeCollection(receipt); err == nil {
+			t.Fatal("재사용 collection receipt가 수용됨")
+		}
+		if got := countCall(callKeys(runner.snapshot()), "unshare"); got != cleanupCalls {
+			t.Fatalf("재사용 receipt가 upper cleanup을 반복함: %d → %d", cleanupCalls, got)
+		}
+	})
+}
+
+func TestCollectionReceiptIsOneShot(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("8", 64)
+	lower, stateRoot := testDirs(t)
+	runner := newFakePodman(digest)
+	backend := mustBackend(t, stateRoot, runner, statDevice)
+	activeValue, err := openTestLease(t, backend, context.Background(), testSpec(lower, digest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := activeValue.(*lease)
+	if err := active.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	receipt := commitCollectionReceiptForTest(t, active)
+	if err := active.AcknowledgeCollection(receipt); err != nil {
+		t.Fatalf("첫 collection ACK가 실패함: %v", err)
+	}
+	cleanupCalls := countCall(callKeys(runner.snapshot()), "unshare")
+	err = active.AcknowledgeCollection(receipt)
+	if err == nil || !strings.Contains(err.Error(), "이미 소비됨") {
+		t.Fatalf("같은 lease에서 receipt 재사용이 명확한 오류로 거부되지 않음: %v", err)
+	}
+	if got := countCall(callKeys(runner.snapshot()), "unshare"); got != cleanupCalls {
+		t.Fatalf("재사용 receipt가 upper cleanup을 반복함: %d → %d", cleanupCalls, got)
+	}
+}
+
+func TestCollectionReceiptRequiresClose(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("9", 64)
+	lower, stateRoot := testDirs(t)
+	runner := newFakePodman(digest)
+	backend := mustBackend(t, stateRoot, runner, statDevice)
+	activeValue, err := openTestLease(t, backend, context.Background(), testSpec(lower, digest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := activeValue.(*lease)
+	receipt := commitCollectionReceiptForTest(t, active)
+	upper := active.UpperDir()
+	if err := active.AcknowledgeCollection(receipt); err == nil || !strings.Contains(err.Error(), "Close 이후") {
+		t.Fatalf("Close 전 collection ACK가 명확한 오류로 거부되지 않음: %v", err)
+	}
+	assertUpperPreserved(t, upper)
+	if got := countCall(callKeys(runner.snapshot()), "unshare"); got != 0 {
+		t.Fatalf("Close 전 collection ACK가 upper cleanup을 수행함: %d", got)
+	}
+	if err := active.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func commitCollectionReceiptForTest(t *testing.T, active *lease) world.CollectionReceipt {
+	t.Helper()
+	store := &localMemoryStore{}
+	writer, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(gen.FsChangedPayload{Changes: []gen.FsChangedPayloadChangesItem{}})
+	if err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	raw := ""
+	record := gen.EventRecord{TraceID: strings.Repeat("a", 32), SpanID: active.spanID, Ts: 2,
+		Kind: gen.KindCollectorFsChanged, Actor: "collector", Payload: payload, Raw: &raw}
+	receipt, err := world.CommitCollection(context.Background(), writer, active, record)
+	if closeErr := writer.Close(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return receipt
+}
+
+func assertUpperPreserved(t *testing.T, upper string) {
+	t.Helper()
+	if _, err := os.Stat(upper); err != nil {
+		t.Fatalf("잘못된 collection receipt 뒤 upper가 제거됨: %v", err)
+	}
+}
+
 func TestSpawnCommitFailureLeavesContainerCreateAtZero(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("5", 64)
 	lower, stateRoot := testDirs(t)

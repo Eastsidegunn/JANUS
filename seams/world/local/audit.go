@@ -55,6 +55,7 @@ type unixAuditBroker struct {
 	connections  map[net.Conn]struct{}
 	handlerSlots chan struct{}
 	err          error
+	deferAck     bool
 	handlers     sync.WaitGroup
 }
 
@@ -101,6 +102,7 @@ func (b *unixAuditBroker) SocketDir() string                   { return b.dir }
 func (b *unixAuditBroker) Effects() <-chan world.EffectAttempt { return b.effects }
 func (b *unixAuditBroker) Done() <-chan struct{}               { return b.done }
 func (b *unixAuditBroker) Err() error                          { b.mu.Lock(); defer b.mu.Unlock(); return b.err }
+func (b *unixAuditBroker) EnableDurableAck()                   { b.deferAck = true }
 func (b *unixAuditBroker) setErr(err error) {
 	b.mu.Lock()
 	b.err = errors.Join(b.err, err)
@@ -211,9 +213,34 @@ func (b *unixAuditBroker) handle(connection net.Conn) {
 			AtUnixMs: envelope.Attempt.AtUnixMs, Decision: world.EffectDecision(envelope.Attempt.Decision),
 			Reason: envelope.Attempt.Reason,
 		}
+		ack := make(chan error, 1)
+		if b.deferAck {
+			attempt.Ack = func(err error) {
+				select {
+				case ack <- err:
+				default:
+				}
+			}
+		}
 		select {
 		case b.queue <- attempt:
-			b.reply(connection, true, "")
+			if !b.deferAck {
+				b.reply(connection, true, "")
+				return
+			}
+			// The proxy ACK is deliberately held until the surface has durably
+			// committed the corresponding collector event. This prevents a
+			// successful network exchange from outrunning the append-only log.
+			select {
+			case ackErr := <-ack:
+				if ackErr != nil {
+					b.reply(connection, false, ackErr.Error())
+				} else {
+					b.reply(connection, true, "")
+				}
+			case <-time.After(auditIOTimeout):
+				b.reply(connection, false, "audit durable ACK timeout")
+			}
 		default:
 			b.reply(connection, false, "audit queue 포화")
 		}

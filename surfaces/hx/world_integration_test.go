@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -295,6 +294,16 @@ func runNormalIntegration(t *testing.T, parent context.Context, artifacts integr
 	mustWrite(t, filepath.Join(lower, "modified.txt"), "original-modified\n")
 	mustWrite(t, filepath.Join(lower, "deleted.txt"), "original-deleted\n")
 	mustWrite(t, filepath.Join(lower, "untouched.txt"), "original-untouched\n")
+	for _, dir := range []string{"opaque-dir", "replace-dir", "partial-dir"} {
+		if err := os.Mkdir(filepath.Join(lower, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite(t, filepath.Join(lower, "opaque-dir", "old-a.txt"), "opaque-a\n")
+	mustWrite(t, filepath.Join(lower, "opaque-dir", "old-b.txt"), "opaque-b\n")
+	mustWrite(t, filepath.Join(lower, "replace-dir", "old.txt"), "replace-old\n")
+	mustWrite(t, filepath.Join(lower, "partial-dir", "gone.txt"), "partial-gone\n")
+	mustWrite(t, filepath.Join(lower, "partial-dir", "kept.txt"), "partial-kept\n")
 	store := newIntegrationStore(t, filepath.Join(t.TempDir(), "events.ndjson"), true)
 	writer, err := logd.NewWriter(ctx, store, logd.WithQueueCap(1))
 	if err != nil {
@@ -328,18 +337,6 @@ func runNormalIntegration(t *testing.T, parent context.Context, artifacts integr
 	if err != nil {
 		t.Fatal(err)
 	}
-	var effectsMu sync.Mutex
-	var effects []world.EffectAttempt
-	effectsDone := make(chan struct{})
-	go func() {
-		defer close(effectsDone)
-		for effect := range active.Lease.Effects() {
-			effectsMu.Lock()
-			effects = append(effects, effect)
-			effectsMu.Unlock()
-		}
-	}()
-
 	waitSignal(t, store.floodSeen, 45*time.Second, "flood-start durable event")
 	agentCID := findAgentContainer(t, ctx, artifacts.agentRepository+"@"+artifacts.agentDigest)
 	assertContainerIsolation(t, ctx, agentCID, artifacts.adapter, active.Lease)
@@ -358,9 +355,8 @@ func runNormalIntegration(t *testing.T, parent context.Context, artifacts integr
 		t.Fatalf("normal subagent: done=%+v err=%v", done, err)
 	}
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	closeErr := active.Lease.Close(closeCtx)
+	closeErr := active.FinalizeCollection(closeCtx)
 	closeCancel()
-	waitSignal(t, effectsDone, 2*time.Second, "effect drain")
 	assertNoRuntimeArtifacts(t, ctx, artifacts.agentRepository+"@"+artifacts.agentDigest, childSpan)
 	if closeErr != nil {
 		t.Fatal(closeErr)
@@ -368,14 +364,61 @@ func runNormalIntegration(t *testing.T, parent context.Context, artifacts integr
 	if got := fileSHA256(t, artifacts.adapter); got != adapterHashBefore {
 		t.Fatalf("host adapter binary가 변조됨: before=%s after=%s", adapterHashBefore, got)
 	}
-	assertLowerAndUpper(t, lower, active.Lease.UpperDir())
+	assertLowerUnchanged(t, lower)
 	records := store.snapshot()
 	assertSpawnBeforeStart(t, records, store)
 	assertApprovalAndFlood(t, records, decider)
-	effectsMu.Lock()
-	gotEffects := append([]world.EffectAttempt(nil), effects...)
-	effectsMu.Unlock()
+	assertFilesystemCollection(t, records, active.Lease.UpperDir())
+	gotEffects, effectErr := active.EffectSnapshot()
+	if effectErr != nil {
+		t.Fatal(effectErr)
+	}
 	assertEgressEffects(t, gotEffects)
+}
+
+func assertFilesystemCollection(t *testing.T, records []gen.EventRecord, upper string) {
+	t.Helper()
+	var payloads []gen.FsChangedPayload
+	for _, record := range records {
+		if record.Kind != gen.KindCollectorFsChanged {
+			continue
+		}
+		if record.Actor != "collector" || record.SpanID == "" || record.Raw == nil || *record.Raw != "" {
+			t.Fatalf("fs collector event attribution/raw invalid: %+v", record)
+		}
+		var payload gen.FsChangedPayload
+		if err := json.Unmarshal(record.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		payloads = append(payloads, payload)
+	}
+	if len(payloads) != 1 {
+		t.Fatalf("fs_changed event count=%d", len(payloads))
+	}
+	seen := map[string]gen.FsChangedPayloadChangesItem{}
+	for _, change := range payloads[0].Changes {
+		seen[change.Path] = change
+	}
+	for path, want := range map[string]gen.FsChangedPayloadChangesItemChangeType{
+		"created.txt":          gen.FsChangedPayloadChangesItemChangeTypeAdded,
+		"modified.txt":         gen.FsChangedPayloadChangesItemChangeTypeModified,
+		"deleted.txt":          gen.FsChangedPayloadChangesItemChangeTypeDeleted,
+		".hidden-created":      gen.FsChangedPayloadChangesItemChangeTypeAdded,
+		"opaque-dir/new.txt":   gen.FsChangedPayloadChangesItemChangeTypeAdded,
+		"opaque-dir/old-a.txt": gen.FsChangedPayloadChangesItemChangeTypeDeleted,
+		"opaque-dir/old-b.txt": gen.FsChangedPayloadChangesItemChangeTypeDeleted,
+		"replace-dir":          gen.FsChangedPayloadChangesItemChangeTypeAdded,
+		"replace-dir/old.txt":  gen.FsChangedPayloadChangesItemChangeTypeDeleted,
+		"partial-dir/gone.txt": gen.FsChangedPayloadChangesItemChangeTypeDeleted,
+	} {
+		change, ok := seen[path]
+		if !ok || change.ChangeType != want {
+			t.Fatalf("fs diff missing/mismatched path=%s want=%s got=%+v", path, want, change)
+		}
+	}
+	if _, err := os.Stat(upper); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("collector ACK 뒤 upper가 제거되지 않음: err=%v", err)
+	}
 }
 
 func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts integrationArtifacts, mode string) {
@@ -405,12 +448,6 @@ func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts int
 	if err != nil {
 		t.Fatal(err)
 	}
-	effectsDone := make(chan struct{})
-	go func() {
-		for range active.Lease.Effects() {
-		}
-		close(effectsDone)
-	}()
 	if mode == "stop" || mode == "stop-ignore" {
 		waitRecord(t, store, gen.KindSubagentReady, 30*time.Second)
 		if err := active.Subagent.Stop(gen.StopPayloadReasonUser); err != nil {
@@ -422,9 +459,8 @@ func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts int
 	waitCancel()
 	started := time.Now()
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 20*time.Second)
-	closeErr := active.Lease.Close(closeCtx)
+	closeErr := active.FinalizeCollection(closeCtx)
 	closeCancel()
-	waitSignal(t, effectsDone, 2*time.Second, mode+" effect drain")
 	assertNoRuntimeArtifacts(t, ctx, artifacts.agentRepository+"@"+artifacts.agentDigest, childSpan)
 	if closeErr != nil || time.Since(started) > 20*time.Second {
 		t.Fatalf("%s bounded cleanup: elapsed=%v err=%v", mode, time.Since(started), closeErr)
@@ -435,6 +471,28 @@ func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts int
 		}
 	} else if waitErr != nil || done.Status != gen.DonePayloadStatusError {
 		t.Fatalf("%s result=%+v err=%v", mode, done, waitErr)
+	}
+	assertCollectionEvent(t, store.snapshot(), childSpan)
+}
+
+func assertCollectionEvent(t *testing.T, records []gen.EventRecord, spanID string) {
+	t.Helper()
+	count := 0
+	for _, record := range records {
+		if record.Kind != gen.KindCollectorFsChanged {
+			continue
+		}
+		count++
+		if record.Actor != "collector" || record.SpanID != spanID || record.Raw == nil || *record.Raw != "" {
+			t.Fatalf("fs_changed attribution invalid: %+v", record)
+		}
+		var payload gen.FsChangedPayload
+		if err := json.Unmarshal(record.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if count != 1 {
+		t.Fatalf("collector fs_changed count=%d", count)
 	}
 }
 
@@ -490,30 +548,17 @@ func assertContainerIsolation(t *testing.T, ctx context.Context, cid, adapter st
 	}
 }
 
-func assertLowerAndUpper(t *testing.T, lower, upper string) {
+func assertLowerUnchanged(t *testing.T, lower string) {
 	t.Helper()
-	for path, want := range map[string]string{"modified.txt": "original-modified\n", "deleted.txt": "original-deleted\n", "untouched.txt": "original-untouched\n"} {
+	for path, want := range map[string]string{
+		"modified.txt": "original-modified\n", "deleted.txt": "original-deleted\n", "untouched.txt": "original-untouched\n",
+		"opaque-dir/old-a.txt": "opaque-a\n", "opaque-dir/old-b.txt": "opaque-b\n",
+		"replace-dir/old.txt": "replace-old\n", "partial-dir/gone.txt": "partial-gone\n", "partial-dir/kept.txt": "partial-kept\n",
+	} {
 		data, err := os.ReadFile(filepath.Join(lower, path))
 		if err != nil || string(data) != want {
 			t.Fatalf("lower가 변함 path=%s got=%q err=%v", path, data, err)
 		}
-	}
-	for path, want := range map[string]string{"created.txt": "created\n", "modified.txt": "modified\n", "approved-marker.txt": "allowed\n", "flood-complete.txt": "complete\n"} {
-		data, err := os.ReadFile(filepath.Join(upper, path))
-		if err != nil || string(data) != want {
-			t.Fatalf("upper file path=%s got=%q err=%v", path, data, err)
-		}
-	}
-	info, err := os.Lstat(filepath.Join(upper, "deleted.txt"))
-	if err != nil {
-		t.Fatalf("delete whiteout lstat: %v", err)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Fatalf("delete whiteout stat 형식=%T", info.Sys())
-	}
-	if info.Mode()&os.ModeCharDevice == 0 || stat.Rdev != 0 {
-		t.Fatalf("delete가 owner-independent char-device whiteout이 아님: mode=%v stat=%T rdev=%d", info.Mode(), info.Sys(), stat.Rdev)
 	}
 }
 

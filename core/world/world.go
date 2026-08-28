@@ -55,6 +55,7 @@ type ActiveLease interface {
 	UpperDir() string
 	Effects() <-chan EffectAttempt
 	Close(context.Context) error
+	AcknowledgeCollection(CollectionReceipt) error
 }
 
 // PreparedID is an opaque, per-prepare identity. Only NewPreparedID can mint a
@@ -89,6 +90,53 @@ type SpawnReceipt struct {
 // SpawnRecord is the strongly named input to CommitSpawn. It remains a full
 // EventRecord because the writer, not world, owns envelope sequencing.
 type SpawnRecord gen.EventRecord
+
+// CollectionReceipt is proof that a collector/fs_changed record was durably
+// committed for one active lease. Its fields are intentionally private so a
+// caller cannot manufacture permission to remove an upper directory.
+type CollectionReceipt struct {
+	leaseID string
+	spanID  string
+	payload [32]byte
+	seq     int64
+}
+
+// CommitCollection validates and durably records a collector fs snapshot,
+// then mints a lease-bound receipt. The backend may accept that receipt only
+// after the writer ACK; this keeps upper cleanup after durable evidence.
+func CommitCollection(ctx context.Context, writer *logd.Writer, lease ActiveLease, record gen.EventRecord) (CollectionReceipt, error) {
+	if writer == nil || lease == nil {
+		return CollectionReceipt{}, fmt.Errorf("world: collection commit 입력이 비어 있음")
+	}
+	if record.Kind != gen.KindCollectorFsChanged || record.Actor != "collector" ||
+		record.Raw == nil || *record.Raw != "" {
+		return CollectionReceipt{}, fmt.Errorf("world: collector/fs_changed envelope 위반")
+	}
+	endpoint := lease.ProcessEndpoint()
+	if endpoint.LeaseID() == "" || record.SpanID == "" || record.TraceID == "" {
+		return CollectionReceipt{}, fmt.Errorf("world: collection lease/span 식별자가 비어 있음")
+	}
+	seq, err := writer.Submit(ctx, record)
+	if err != nil {
+		return CollectionReceipt{}, fmt.Errorf("world: collection durable commit: %w", err)
+	}
+	hash := sha256.Sum256(record.Payload)
+	return CollectionReceipt{leaseID: endpoint.LeaseID(), spanID: record.SpanID, payload: hash, seq: seq}, nil
+}
+
+// ValidateCollectionReceipt is for backend implementations. It verifies the
+// opaque receipt against the active lease and finalizer span; it does not
+// consume the receipt.
+func ValidateCollectionReceipt(receipt CollectionReceipt, leaseID, spanID string) error {
+	if receipt.seq < 1 || receipt.leaseID == "" || receipt.leaseID != leaseID || receipt.spanID != spanID {
+		return fmt.Errorf("world: collection receipt가 lease와 일치하지 않음")
+	}
+	var zero [32]byte
+	if subtle.ConstantTimeCompare(receipt.payload[:], zero[:]) == 1 {
+		return fmt.Errorf("world: collection receipt payload 증명이 비어 있음")
+	}
+	return nil
+}
 
 // CommitSpawn validates and durably records an exact local-podman spawn before
 // minting its one-use activation receipt.
@@ -358,6 +406,10 @@ type EffectAttempt struct {
 	AtUnixMs     int64
 	Decision     EffectDecision
 	Reason       string
+	// Ack is host-local and excluded from wire/log serialization. A world
+	// backend may provide it to hold the proxy response until the surface has
+	// durably recorded this attempt. Callers must invoke it at most once.
+	Ack func(error) `json:"-"`
 }
 
 // EffectDecision records whether the sandbox allowed or denied an observed

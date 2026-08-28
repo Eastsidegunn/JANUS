@@ -101,6 +101,41 @@ func TestAuditBrokerBackpressureAndDrainGate(t *testing.T) {
 	}
 }
 
+func TestAuditBrokerDefersProxyAckUntilEffectDurableAck(t *testing.T) {
+	value, err := startAuditBroker(shortTempDir(t), "3333333333333333", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := value.(*unixAuditBroker)
+	broker.EnableDurableAck()
+	sink := egressproxy.UnixAuditSink{Path: filepath.Join(broker.SocketDir(), auditSocketName)}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- sink.Submit(ctx, auditAttempt("durable.example", 1, egressproxy.DecisionAllow, "")) }()
+	effect := receiveEffect(t, broker.Effects())
+	select {
+	case err := <-done:
+		t.Fatalf("writer ACK 전 proxy ACK가 반환됨: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if effect.Ack == nil {
+		t.Fatal("durable ACK callback이 effect에 없음")
+	}
+	effect.Ack(nil)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("durable ACK 뒤 proxy 응답 timeout")
+	}
+	if err := broker.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAuditBrokerRejectsMalformedAttemptWithoutEnqueue(t *testing.T) {
 	stateDir := shortTempDir(t)
 	value, err := startAuditBroker(stateDir, "2222222222222222", 1)

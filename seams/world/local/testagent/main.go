@@ -122,6 +122,30 @@ func runNormal(workspace string, cfg scenario, startedNS int64) error {
 	if err := os.Remove(filepath.Join(workspace, "deleted.txt")); err != nil {
 		return err
 	}
+	// Exercise collector representations beyond the basic file cases: an
+	// opaque directory recreation, directory-to-file replacement, partial
+	// child deletion, and hidden entries all occur inside the real overlay.
+	if err := os.RemoveAll(filepath.Join(workspace, "opaque-dir")); err != nil {
+		return err
+	}
+	if err := os.Mkdir(filepath.Join(workspace, "opaque-dir"), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "opaque-dir", "new.txt"), []byte("new\n"), 0o600); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(workspace, "replace-dir")); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "replace-dir"), []byte("replacement\n"), 0o600); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(workspace, "partial-dir", "gone.txt")); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".hidden-created"), []byte("hidden\n"), 0o600); err != nil {
+		return err
+	}
 	exe, _ := os.Readlink("/proc/self/exe")
 	if err := emitMessage(fmt.Sprintf("container-evidence pid=%d exe=%s started_ns=%d", os.Getpid(), exe, startedNS)); err != nil {
 		return err
