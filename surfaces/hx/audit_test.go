@@ -78,6 +78,13 @@ func TestAuditSessionFiltersRequireExistingSpanAndActor(t *testing.T) {
 			t.Fatalf("없는 필터가 stdout을 생성함: %+v output=%q", query, out.String())
 		}
 	}
+	var out bytes.Buffer
+	if err := auditSession(context.Background(), auditQuery{Session: db, Span: strings.Repeat("c", 16), Cost: true}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "usage_in\t7\nusage_out\t3\n") {
+		t.Fatalf("span 비용이 logd span projection과 일치하지 않음: %q", out.String())
+	}
 }
 
 func TestAuditAtSeqUsesReplayPrefixBoundary(t *testing.T) {

@@ -96,6 +96,12 @@ func TestReplayUsageAggregation(t *testing.T) {
 	if u := s.UsageByActor["subagent:null:1"]; u.In != 7 || u.Out != 3 {
 		t.Fatalf("actor별 usage 이상: %+v", s.UsageByActor)
 	}
+	if u := s.UsageBySpan[root]; u.In != 107 || u.Out != 53 {
+		t.Fatalf("span별 usage 이상: %+v", s.UsageBySpan)
+	}
+	if u := s.UsageBySpanActor[root]["subagent:null:1"]; u.In != 7 || u.Out != 3 {
+		t.Fatalf("span·actor별 usage 이상: %+v", s.UsageBySpanActor)
+	}
 }
 
 func TestReplayRejectsCorruptSequences(t *testing.T) {

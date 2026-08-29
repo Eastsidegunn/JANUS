@@ -130,16 +130,23 @@ func auditSession(ctx context.Context, query auditQuery, out io.Writer) error {
 	}
 	opts := audit.RenderOptions{IncludeCost: query.Cost}
 	if query.Cost {
-		opts.UsageIn, opts.UsageOut = state.UsageIn, state.UsageOut
-		opts.UsageByActor = make(map[string]audit.UsageTotals, len(state.UsageByActor))
-		for actor, usage := range state.UsageByActor {
+		usageByActor := state.UsageByActor
+		if query.Span != "" {
+			spanUsage := state.UsageBySpan[query.Span]
+			opts.UsageIn, opts.UsageOut = spanUsage.In, spanUsage.Out
+			usageByActor = state.UsageBySpanActor[query.Span]
+		} else {
+			opts.UsageIn, opts.UsageOut = state.UsageIn, state.UsageOut
+		}
+		opts.UsageByActor = make(map[string]audit.UsageTotals, len(usageByActor))
+		for actor, usage := range usageByActor {
 			if query.Actor != "" && actor != query.Actor {
 				continue
 			}
 			opts.UsageByActor[actor] = audit.UsageTotals{In: usage.In, Out: usage.Out}
 		}
 		if query.Actor != "" {
-			usage := state.UsageByActor[query.Actor]
+			usage := usageByActor[query.Actor]
 			opts.UsageIn, opts.UsageOut = usage.In, usage.Out
 		}
 	}
