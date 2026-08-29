@@ -36,6 +36,7 @@ type IntentAction struct {
 	TraceID      string
 	SpanID       string
 	ParentSpanID string
+	Actor        string
 	CallID       string
 	Name         string
 	Path         string
@@ -49,6 +50,7 @@ type EffectAction struct {
 	TraceID      string
 	SpanID       string
 	ParentSpanID string
+	Actor        string
 	Path         string
 	ChangeType   gen.FsChangedPayloadChangesItemChangeType
 	Hash         string
@@ -61,6 +63,7 @@ type Row struct {
 	TraceID        string
 	SpanID         string
 	ParentSpanID   string
+	Actor          string
 	Path           string
 	IntentSeq      int64
 	EffectSeq      int64
@@ -146,7 +149,7 @@ func DecodeEvents(events []gen.EventRecord, workspaceTarget string) ([]IntentAct
 				if err != nil {
 					return nil, nil, Report{}, fmt.Errorf("%w: seq %d", err, event.Seq)
 				}
-				intents = append(intents, IntentAction{TraceID: event.TraceID, SpanID: event.SpanID, ParentSpanID: parentSpanID(event), CallID: payload.CallID, Name: payload.Name, Path: canonical, ChangeType: changeTypeForTool(payload.Name), Seq: event.Seq})
+				intents = append(intents, IntentAction{TraceID: event.TraceID, SpanID: event.SpanID, ParentSpanID: parentSpanID(event), Actor: event.Actor, CallID: payload.CallID, Name: payload.Name, Path: canonical, ChangeType: changeTypeForTool(payload.Name), Seq: event.Seq})
 			}
 		case gen.KindToolCall:
 			var payload gen.ToolCallPayload
@@ -161,7 +164,7 @@ func DecodeEvents(events []gen.EventRecord, workspaceTarget string) ([]IntentAct
 				if err != nil {
 					return nil, nil, Report{}, fmt.Errorf("%w: seq %d", err, event.Seq)
 				}
-				intents = append(intents, IntentAction{TraceID: event.TraceID, SpanID: event.SpanID, ParentSpanID: parentSpanID(event), CallID: fmt.Sprintf("seq-%d", event.Seq), Name: payload.Name, Path: canonical, ChangeType: changeTypeForTool(payload.Name), Seq: event.Seq})
+				intents = append(intents, IntentAction{TraceID: event.TraceID, SpanID: event.SpanID, ParentSpanID: parentSpanID(event), Actor: event.Actor, CallID: fmt.Sprintf("seq-%d", event.Seq), Name: payload.Name, Path: canonical, ChangeType: changeTypeForTool(payload.Name), Seq: event.Seq})
 			}
 		case gen.KindCollectorFsChanged:
 			if event.Actor != "collector" || event.SpanID == "" || event.TraceID == "" {
@@ -180,7 +183,7 @@ func DecodeEvents(events []gen.EventRecord, workspaceTarget string) ([]IntentAct
 				if err != nil {
 					return nil, nil, Report{}, fmt.Errorf("audit: effect path seq %d: %w", event.Seq, err)
 				}
-				effects = append(effects, EffectAction{TraceID: event.TraceID, SpanID: event.SpanID, ParentSpanID: parentSpanID(event), Path: canonical, ChangeType: change.ChangeType, Hash: change.Hash, Seq: event.Seq})
+				effects = append(effects, EffectAction{TraceID: event.TraceID, SpanID: event.SpanID, ParentSpanID: parentSpanID(event), Actor: event.Actor, Path: canonical, ChangeType: change.ChangeType, Hash: change.Hash, Seq: event.Seq})
 			}
 		}
 	}
@@ -302,18 +305,18 @@ func Match(intents []IntentAction, effects []EffectAction, netChangesKnown bool)
 		for i := 0; i < n; i++ {
 			if i < len(is) && i < len(es) && compatible(is[i].ChangeType, es[i].ChangeType) {
 				rows = append(rows, Row{
-					Classification: Matched, TraceID: is[i].TraceID, SpanID: is[i].SpanID, ParentSpanID: firstNonEmpty(is[i].ParentSpanID, es[i].ParentSpanID), Path: is[i].Path,
+					Classification: Matched, TraceID: is[i].TraceID, SpanID: is[i].SpanID, ParentSpanID: firstNonEmpty(is[i].ParentSpanID, es[i].ParentSpanID), Actor: firstNonEmpty(is[i].Actor, es[i].Actor), Path: is[i].Path,
 					IntentSeq: is[i].Seq, EffectSeq: es[i].Seq, CallID: is[i].CallID, Name: is[i].Name,
 					ReportedType: is[i].ChangeType, ObservedType: es[i].ChangeType,
 				})
 				continue
 			}
 			if i < len(is) {
-				row := Row{Classification: ReportedUnobserved, TraceID: is[i].TraceID, SpanID: is[i].SpanID, ParentSpanID: is[i].ParentSpanID, Path: is[i].Path, IntentSeq: is[i].Seq, CallID: is[i].CallID, Name: is[i].Name, ReportedType: is[i].ChangeType, Reason: "effect not observed"}
+				row := Row{Classification: ReportedUnobserved, TraceID: is[i].TraceID, SpanID: is[i].SpanID, ParentSpanID: is[i].ParentSpanID, Actor: is[i].Actor, Path: is[i].Path, IntentSeq: is[i].Seq, CallID: is[i].CallID, Name: is[i].Name, ReportedType: is[i].ChangeType, Reason: "effect not observed"}
 				rows = append(rows, row)
 			}
 			if i < len(es) {
-				row := Row{Classification: ObservedUnreported, TraceID: es[i].TraceID, SpanID: es[i].SpanID, ParentSpanID: es[i].ParentSpanID, Path: es[i].Path, EffectSeq: es[i].Seq, ObservedType: es[i].ChangeType, Reason: "intent not reported"}
+				row := Row{Classification: ObservedUnreported, TraceID: es[i].TraceID, SpanID: es[i].SpanID, ParentSpanID: es[i].ParentSpanID, Actor: es[i].Actor, Path: es[i].Path, EffectSeq: es[i].Seq, ObservedType: es[i].ChangeType, Reason: "intent not reported"}
 				if i < len(is) {
 					row.Reason = "reported change incompatible with observed change"
 				}

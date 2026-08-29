@@ -25,6 +25,8 @@ type DerivedState struct {
 	// Usage는 비용 집계 프로젝션이다: 전체와 actor별.
 	UsageIn, UsageOut int64
 	UsageByActor      map[string]Usage
+	UsageBySpan       map[string]Usage
+	UsageBySpanActor  map[string]map[string]Usage
 	// 턴/스텝/스폰 카운트와 세션 종료 여부.
 	Turns, Steps, Spawns int
 	Ended                bool
@@ -62,9 +64,11 @@ func Replay(events []gen.EventRecord) (*DerivedState, error) {
 		return nil, fmt.Errorf("logd: 빈 이벤트 시퀀스는 세션이 아니다")
 	}
 	s := &DerivedState{
-		TraceID:      events[0].TraceID,
-		RootSpan:     events[0].SpanID,
-		UsageByActor: map[string]Usage{},
+		TraceID:          events[0].TraceID,
+		RootSpan:         events[0].SpanID,
+		UsageByActor:     map[string]Usage{},
+		UsageBySpan:      map[string]Usage{},
+		UsageBySpanActor: map[string]map[string]Usage{},
 	}
 	var prevSeq int64
 	for _, e := range events {
@@ -86,6 +90,21 @@ func Replay(events []gen.EventRecord) (*DerivedState, error) {
 				return nil, fmt.Errorf("logd: seq %d actor %s usage_in: %w", e.Seq, e.Actor, err)
 			}
 			s.UsageByActor[e.Actor] = u
+			spanUsage := s.UsageBySpan[e.SpanID]
+			if err := addUsage(&spanUsage.In, *e.UsageIn); err != nil {
+				return nil, fmt.Errorf("logd: seq %d span %s usage_in: %w", e.Seq, e.SpanID, err)
+			}
+			s.UsageBySpan[e.SpanID] = spanUsage
+			byActor := s.UsageBySpanActor[e.SpanID]
+			if byActor == nil {
+				byActor = map[string]Usage{}
+			}
+			actorSpanUsage := byActor[e.Actor]
+			if err := addUsage(&actorSpanUsage.In, *e.UsageIn); err != nil {
+				return nil, fmt.Errorf("logd: seq %d span %s actor %s usage_in: %w", e.Seq, e.SpanID, e.Actor, err)
+			}
+			byActor[e.Actor] = actorSpanUsage
+			s.UsageBySpanActor[e.SpanID] = byActor
 		}
 		if e.UsageOut != nil {
 			u := s.UsageByActor[e.Actor]
@@ -96,6 +115,21 @@ func Replay(events []gen.EventRecord) (*DerivedState, error) {
 				return nil, fmt.Errorf("logd: seq %d actor %s usage_out: %w", e.Seq, e.Actor, err)
 			}
 			s.UsageByActor[e.Actor] = u
+			spanUsage := s.UsageBySpan[e.SpanID]
+			if err := addUsage(&spanUsage.Out, *e.UsageOut); err != nil {
+				return nil, fmt.Errorf("logd: seq %d span %s usage_out: %w", e.Seq, e.SpanID, err)
+			}
+			s.UsageBySpan[e.SpanID] = spanUsage
+			byActor := s.UsageBySpanActor[e.SpanID]
+			if byActor == nil {
+				byActor = map[string]Usage{}
+			}
+			actorSpanUsage := byActor[e.Actor]
+			if err := addUsage(&actorSpanUsage.Out, *e.UsageOut); err != nil {
+				return nil, fmt.Errorf("logd: seq %d span %s actor %s usage_out: %w", e.Seq, e.SpanID, e.Actor, err)
+			}
+			byActor[e.Actor] = actorSpanUsage
+			s.UsageBySpanActor[e.SpanID] = byActor
 		}
 
 		switch e.Kind {
