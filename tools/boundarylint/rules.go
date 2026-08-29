@@ -76,6 +76,10 @@ func Check(module string, pkgs []Pkg) []string {
 				add(fmt.Sprintf("%s → %s (worldtest는 _test.go에서만 import 가능)", from, to))
 				return
 			}
+			if isAudit(from) && isAuditForbidden(to) {
+				add(fmt.Sprintf("%s → %s (audit는 contracts와 자체 value type만 import 가능)", from, to))
+				return
+			}
 			if !allowed(from, to) {
 				add(fmt.Sprintf("%s → %s", from, to))
 			}
@@ -92,6 +96,17 @@ func Check(module string, pkgs []Pkg) []string {
 	}
 	sort.Strings(violations)
 	return violations
+}
+
+func isAudit(path string) bool {
+	return path == "core/audit" || strings.HasPrefix(path, "core/audit/")
+}
+
+func isAuditForbidden(path string) bool {
+	return path == "collector" || strings.HasPrefix(path, "collector/") ||
+		path == "core/logd" || strings.HasPrefix(path, "core/logd/") ||
+		path == "seams" || strings.HasPrefix(path, "seams/") ||
+		path == "surfaces" || strings.HasPrefix(path, "surfaces/")
 }
 
 func isStandardImport(path string, metadata map[string]bool) bool {

@@ -203,6 +203,74 @@ func TestDecodeRejectsMultipleTraces(t *testing.T) {
 	}
 }
 
+func TestRenderIsDeterministicAndSummaryMatchesRows(t *testing.T) {
+	r := Report{
+		EffectComplete:  true,
+		NetChangesKnown: true,
+		Rows: []Row{
+			{Classification: ObservedUnreported, SpanID: "child-b", ParentSpanID: "root", Path: "z.txt", EffectSeq: 8, ObservedType: gen.FsChangedPayloadChangesItemChangeTypeAdded, Reason: "intent not reported"},
+			{Classification: Matched, SpanID: "child-a", ParentSpanID: "root", Path: "m.txt", IntentSeq: 2, EffectSeq: 3, ReportedType: gen.FsChangedPayloadChangesItemChangeTypeAdded, ObservedType: gen.FsChangedPayloadChangesItemChangeTypeModified},
+			{Classification: ReportedUnobserved, SpanID: "child-a", ParentSpanID: "root", Path: "a.txt", IntentSeq: 1, ReportedType: gen.FsChangedPayloadChangesItemChangeTypeDeleted, Reason: "effect not observed"},
+		},
+	}
+	var baseline []byte
+	for i := 0; i < 100; i++ {
+		got, err := Render(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			baseline = got
+		} else if string(got) != string(baseline) {
+			t.Fatalf("renderer output changed on repeat %d:\n%s\nwant:\n%s", i, got, baseline)
+		}
+	}
+	text := string(baseline)
+	if !strings.Contains(text, "effect_observation: complete\n") {
+		t.Fatalf("missing complete observation header: %q", text)
+	}
+	if !strings.Contains(text, "a.txt") || !strings.Contains(text, "m.txt") || !strings.Contains(text, "z.txt") {
+		t.Fatalf("missing paths: %q", text)
+	}
+	if !strings.Contains(text, "total\t3\nmatched\t1\nreported_unobserved\t1\nobserved_unreported\t1\n") {
+		t.Fatalf("summary disagrees with rows: %q", text)
+	}
+	if strings.Index(text, "a.txt") > strings.Index(text, "m.txt") || strings.Index(text, "m.txt") > strings.Index(text, "z.txt") {
+		t.Fatalf("rows are not path-deterministic: %q", text)
+	}
+}
+
+func TestRenderRejectsIncompleteObservationWithoutTable(t *testing.T) {
+	for _, report := range []Report{
+		{EffectComplete: false, NetChangesKnown: true},
+		{EffectComplete: true, NetChangesKnown: false},
+	} {
+		got, err := Render(report)
+		if !errors.Is(err, ErrIncompleteObservation) {
+			t.Fatalf("Render error=%v, want ErrIncompleteObservation", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("incomplete report emitted bytes: %q", got)
+		}
+	}
+}
+
+func TestDecodePreservesParentSpanOnAuditRows(t *testing.T) {
+	parent := "root"
+	args, _ := json.Marshal(map[string]string{"path": "/workspace/a.txt"})
+	fs, _ := json.Marshal(gen.FsChangedPayload{Changes: []gen.FsChangedPayloadChangesItem{{Path: "a.txt", Hash: "sha256:a", ChangeType: gen.FsChangedPayloadChangesItemChangeTypeAdded}}})
+	_, _, report, err := DecodeEvents([]gen.EventRecord{
+		{Seq: 1, TraceID: "t", SpanID: "child", ParentSpanID: &parent, Kind: gen.KindSubagentToolCall, Payload: mustJSON(t, gen.SubagentToolCallPayload{CallID: "c", Name: "Write", Args: args})},
+		{Seq: 2, TraceID: "t", SpanID: "child", ParentSpanID: &parent, Actor: "collector", Kind: gen.KindCollectorFsChanged, Payload: fs},
+	}, "/workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Rows) != 1 || report.Rows[0].ParentSpanID != parent {
+		t.Fatalf("parent span not preserved: %+v", report.Rows)
+	}
+}
+
 func mustJSON(t *testing.T, value any) json.RawMessage {
 	t.Helper()
 	b, err := json.Marshal(value)
