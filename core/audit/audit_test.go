@@ -86,6 +86,36 @@ func TestMatchDeterministicForRepeatedPath(t *testing.T) {
 	}
 }
 
+func TestMatchDeterministicAcrossMultiplePaths(t *testing.T) {
+	intents := []IntentAction{
+		{TraceID: "t", SpanID: "s", CallID: "c-z", Name: "Write", Path: "z.txt", ChangeType: gen.FsChangedPayloadChangesItemChangeTypeAdded, Seq: 6},
+		{TraceID: "t", SpanID: "s", CallID: "c-a", Name: "Write", Path: "a.txt", ChangeType: gen.FsChangedPayloadChangesItemChangeTypeAdded, Seq: 2},
+		{TraceID: "t", SpanID: "s", CallID: "c-m", Name: "Write", Path: "m.txt", ChangeType: gen.FsChangedPayloadChangesItemChangeTypeAdded, Seq: 4},
+	}
+	effects := []EffectAction{
+		{TraceID: "t", SpanID: "s", Path: "m.txt", ChangeType: gen.FsChangedPayloadChangesItemChangeTypeAdded, Seq: 5},
+		{TraceID: "t", SpanID: "s", Path: "z.txt", ChangeType: gen.FsChangedPayloadChangesItemChangeTypeAdded, Seq: 7},
+		{TraceID: "t", SpanID: "s", Path: "a.txt", ChangeType: gen.FsChangedPayloadChangesItemChangeTypeAdded, Seq: 3},
+	}
+	var baseline []Row
+	for i := 0; i < 100; i++ {
+		rows, err := Match(intents, effects, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			baseline = rows
+			continue
+		}
+		if !reflect.DeepEqual(rows, baseline) {
+			t.Fatalf("반복 실행 결과가 달라짐: run=%d got=%+v baseline=%+v", i, rows, baseline)
+		}
+	}
+	if got := []string{baseline[0].Path, baseline[1].Path, baseline[2].Path}; !reflect.DeepEqual(got, []string{"a.txt", "m.txt", "z.txt"}) {
+		t.Fatalf("경로 정렬=%v", got)
+	}
+}
+
 func TestMatchNeverCrossesSpan(t *testing.T) {
 	rows, err := Match(
 		[]IntentAction{{TraceID: "t", SpanID: "child-a", CallID: "c", Name: "Write", Path: "same.txt", ChangeType: gen.FsChangedPayloadChangesItemChangeTypeAdded, Seq: 2}},
@@ -121,6 +151,25 @@ func TestEmptyChangesNeverBecomeReportedUnobserved(t *testing.T) {
 	_, _, _, err := DecodeEvents(events, "/workspace")
 	if !errors.Is(err, ErrIncompleteObservation) {
 		t.Fatalf("empty changes err=%v, want ErrIncompleteObservation", err)
+	}
+}
+
+func TestDecodeRequiresCollectorObservation(t *testing.T) {
+	args, _ := json.Marshal(map[string]string{"path": "/workspace/x"})
+	tests := []struct {
+		name   string
+		events []gen.EventRecord
+	}{
+		{name: "intent without collector", events: []gen.EventRecord{{Seq: 1, TraceID: "t", SpanID: "s", Kind: gen.KindSubagentToolCall, Payload: mustJSON(t, gen.SubagentToolCallPayload{CallID: "c", Name: "Write", Args: args})}}},
+		{name: "no intent and no collector", events: []gen.EventRecord{{Seq: 1, TraceID: "t", SpanID: "s", Kind: gen.KindSessionStart, Payload: json.RawMessage(`{}`)}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, err := DecodeEvents(tt.events, "/workspace")
+			if !errors.Is(err, ErrIncompleteObservation) {
+				t.Fatalf("collector 부재 err=%v, want ErrIncompleteObservation", err)
+			}
+		})
 	}
 }
 

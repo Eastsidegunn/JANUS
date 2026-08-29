@@ -311,18 +311,8 @@ func Match(intents []IntentAction, effects []EffectAction, netChangesKnown bool)
 			}
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].SpanID != rows[j].SpanID {
-			return rows[i].SpanID < rows[j].SpanID
-		}
-		if rows[i].Path != rows[j].Path {
-			return rows[i].Path < rows[j].Path
-		}
-		if rows[i].IntentSeq != rows[j].IntentSeq {
-			return rows[i].IntentSeq < rows[j].IntentSeq
-		}
-		return rows[i].EffectSeq < rows[j].EffectSeq
-	})
+	// rows inherit the deterministic key order above and seq order within each
+	// group; a second global sort would make the key-order guard unobservable.
 	return rows, nil
 }
 
