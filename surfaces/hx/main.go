@@ -7,15 +7,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
+	"github.com/Eastsidegunn/JANUS/core/audit"
 	"github.com/Eastsidegunn/JANUS/core/logd"
 	"github.com/Eastsidegunn/JANUS/core/policy"
 	sqlite "github.com/Eastsidegunn/JANUS/seams/store/sqlite"
@@ -33,6 +37,8 @@ func main() {
 		err = runCmd(os.Args[2:])
 	case "replay":
 		err = replayCmd(os.Args[2:])
+	case "audit":
+		err = auditCmd(os.Args[2:])
 	default:
 		err = fmt.Errorf("미지의 하위 명령 %q", os.Args[1])
 	}
@@ -40,6 +46,181 @@ func main() {
 		fmt.Fprintln(os.Stderr, "hx:", err)
 		os.Exit(1)
 	}
+}
+
+type auditQuery struct {
+	Session string
+	Span    string
+	Actor   string
+	Cost    bool
+	AtSeq   int64
+}
+
+// auditCmd is intentionally a write-after-success wrapper. auditSession builds
+// the complete output in memory, so malformed/incomplete logs cannot leak a
+// partial table to stdout.
+func auditCmd(args []string) error {
+	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
+	session := fs.String("session", "", "세션 로그 파일 경로 (필수)")
+	span := fs.String("span", "", "특정 child span으로 제한")
+	actor := fs.String("actor", "", "특정 actor로 제한")
+	cost := fs.Bool("cost", false, "usage 비용 집계 포함")
+	atSeq := fs.Int64("at-seq", 0, "이 seq까지 포함 (0 = 전체)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *session == "" && fs.NArg() == 1 {
+		*session = fs.Arg(0)
+	}
+	if *session == "" || fs.NArg() > 1 || *atSeq < 0 {
+		return fmt.Errorf("사용법: hx audit --session <db> [--span <id>] [--actor <name>] [--cost] [--at-seq <seq>]")
+	}
+	var out bytes.Buffer
+	if err := auditSession(context.Background(), auditQuery{Session: *session, Span: *span, Actor: *actor, Cost: *cost, AtSeq: *atSeq}, &out); err != nil {
+		return err
+	}
+	_, err := os.Stdout.Write(out.Bytes())
+	return err
+}
+
+// auditSession is the sole surface assembly point: one Reader snapshot feeds
+// both logd.Replay (cost/context) and audit.DecodeEvents (comparison). It never
+// obtains a writer or mutates the session log.
+func auditSession(ctx context.Context, query auditQuery, out io.Writer) error {
+	log, err := sqlite.Open(ctx, query.Session)
+	if err != nil {
+		return err
+	}
+	defer log.Close()
+	events, err := log.Reader.ReadFrom(ctx, 1)
+	if err != nil {
+		return err
+	}
+	events = prefixEvents(events, query.AtSeq)
+	if len(events) == 0 {
+		return fmt.Errorf("audit: 빈 세션 또는 지정 seq 이전에 이벤트가 없음")
+	}
+	if query.Span != "" && !eventHasSpan(events, query.Span) {
+		return fmt.Errorf("audit: span %q를 찾을 수 없음", query.Span)
+	}
+	if query.Actor != "" && !eventHasActor(events, query.Actor) {
+		return fmt.Errorf("audit: actor %q를 찾을 수 없음", query.Actor)
+	}
+	state, err := logd.Replay(events)
+	if err != nil {
+		return fmt.Errorf("audit replay: %w", err)
+	}
+	_, _, report, err := audit.DecodeEvents(events, "/workspace")
+	if err != nil {
+		return err
+	}
+	if query.Span != "" || query.Actor != "" {
+		filtered := report
+		filtered.Rows = filtered.Rows[:0]
+		for _, row := range report.Rows {
+			if query.Span != "" && row.SpanID != query.Span {
+				continue
+			}
+			if query.Actor != "" && row.Actor != query.Actor {
+				continue
+			}
+			filtered.Rows = append(filtered.Rows, row)
+		}
+		report = filtered
+	}
+	opts := audit.RenderOptions{IncludeCost: query.Cost}
+	if query.Cost {
+		opts.UsageIn, opts.UsageOut = state.UsageIn, state.UsageOut
+		opts.UsageByActor = make(map[string]audit.UsageTotals, len(state.UsageByActor))
+		for actor, usage := range state.UsageByActor {
+			if query.Actor != "" && actor != query.Actor {
+				continue
+			}
+			opts.UsageByActor[actor] = audit.UsageTotals{In: usage.In, Out: usage.Out}
+		}
+		if query.Actor != "" {
+			usage := state.UsageByActor[query.Actor]
+			opts.UsageIn, opts.UsageOut = usage.In, usage.Out
+		}
+	}
+	if query.AtSeq > 0 {
+		opts.AtSeqContext = make([]audit.ContextEntry, 0, len(state.Messages))
+		for _, message := range state.Messages {
+			opts.AtSeqContext = append(opts.AtSeqContext, audit.ContextEntry{
+				Seq: message.Seq, Role: string(message.Role), SpanID: message.SpanID,
+				Summary: contextSummary(message.Role, message.Content),
+			})
+		}
+	}
+	rendered, err := audit.RenderWithOptions(report, opts)
+	if err != nil {
+		return err
+	}
+	_, err = out.Write(rendered)
+	return err
+}
+
+func prefixEvents(events []gen.EventRecord, to int64) []gen.EventRecord {
+	if to <= 0 {
+		return events
+	}
+	cut := make([]gen.EventRecord, 0, len(events))
+	for _, event := range events {
+		if event.Seq <= to {
+			cut = append(cut, event)
+		}
+	}
+	return cut
+}
+
+func eventHasSpan(events []gen.EventRecord, span string) bool {
+	for _, event := range events {
+		if event.SpanID == span {
+			return true
+		}
+	}
+	return false
+}
+
+func eventHasActor(events []gen.EventRecord, actor string) bool {
+	for _, event := range events {
+		if event.Actor == actor {
+			return true
+		}
+	}
+	return false
+}
+
+func contextSummary(role logd.Role, payload json.RawMessage) string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil {
+		return string(role)
+	}
+	if raw, ok := fields["text"]; ok {
+		var text string
+		if json.Unmarshal(raw, &text) == nil {
+			return text
+		}
+	}
+	if raw, ok := fields["name"]; ok {
+		var name string
+		if json.Unmarshal(raw, &name) == nil {
+			return "tool:" + name
+		}
+	}
+	if raw, ok := fields["status"]; ok {
+		var status string
+		if json.Unmarshal(raw, &status) == nil {
+			return "status:" + status
+		}
+	}
+	if raw, ok := fields["result"]; ok {
+		var result string
+		if json.Unmarshal(raw, &result) == nil {
+			return result
+		}
+	}
+	return strings.TrimSpace(string(role))
 }
 
 // runCmd는 새 세션을 시작한다 (FR-CLI-01):
@@ -179,16 +360,7 @@ func readTo(ctx context.Context, r logd.Reader, to int64) ([]gen.EventRecord, er
 	if err != nil {
 		return nil, err
 	}
-	if to <= 0 {
-		return events, nil
-	}
-	cut := events[:0:0]
-	for _, e := range events {
-		if e.Seq <= to {
-			cut = append(cut, e)
-		}
-	}
-	return cut, nil
+	return prefixEvents(events, to), nil
 }
 
 func printSnapshot(events []gen.EventRecord) error {
