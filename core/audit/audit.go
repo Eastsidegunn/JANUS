@@ -33,24 +33,26 @@ const (
 // IntentAction is the contracts-only representation of a filesystem claim
 // extracted from a tool call. Path is canonical and relative to the workspace.
 type IntentAction struct {
-	TraceID    string
-	SpanID     string
-	CallID     string
-	Name       string
-	Path       string
-	ChangeType gen.FsChangedPayloadChangesItemChangeType
-	Seq        int64
+	TraceID      string
+	SpanID       string
+	ParentSpanID string
+	CallID       string
+	Name         string
+	Path         string
+	ChangeType   gen.FsChangedPayloadChangesItemChangeType
+	Seq          int64
 }
 
 // EffectAction is one collector fs_changed leaf. The collector event's span
 // and seq are retained so a report is reproducible from the event log.
 type EffectAction struct {
-	TraceID    string
-	SpanID     string
-	Path       string
-	ChangeType gen.FsChangedPayloadChangesItemChangeType
-	Hash       string
-	Seq        int64
+	TraceID      string
+	SpanID       string
+	ParentSpanID string
+	Path         string
+	ChangeType   gen.FsChangedPayloadChangesItemChangeType
+	Hash         string
+	Seq          int64
 }
 
 // Row is a deterministic report row. A zero seq means that side was absent.
@@ -58,6 +60,7 @@ type Row struct {
 	Classification Classification
 	TraceID        string
 	SpanID         string
+	ParentSpanID   string
 	Path           string
 	IntentSeq      int64
 	EffectSeq      int64
@@ -143,7 +146,7 @@ func DecodeEvents(events []gen.EventRecord, workspaceTarget string) ([]IntentAct
 				if err != nil {
 					return nil, nil, Report{}, fmt.Errorf("%w: seq %d", err, event.Seq)
 				}
-				intents = append(intents, IntentAction{TraceID: event.TraceID, SpanID: event.SpanID, CallID: payload.CallID, Name: payload.Name, Path: canonical, ChangeType: changeTypeForTool(payload.Name), Seq: event.Seq})
+				intents = append(intents, IntentAction{TraceID: event.TraceID, SpanID: event.SpanID, ParentSpanID: parentSpanID(event), CallID: payload.CallID, Name: payload.Name, Path: canonical, ChangeType: changeTypeForTool(payload.Name), Seq: event.Seq})
 			}
 		case gen.KindToolCall:
 			var payload gen.ToolCallPayload
@@ -158,7 +161,7 @@ func DecodeEvents(events []gen.EventRecord, workspaceTarget string) ([]IntentAct
 				if err != nil {
 					return nil, nil, Report{}, fmt.Errorf("%w: seq %d", err, event.Seq)
 				}
-				intents = append(intents, IntentAction{TraceID: event.TraceID, SpanID: event.SpanID, CallID: fmt.Sprintf("seq-%d", event.Seq), Name: payload.Name, Path: canonical, ChangeType: changeTypeForTool(payload.Name), Seq: event.Seq})
+				intents = append(intents, IntentAction{TraceID: event.TraceID, SpanID: event.SpanID, ParentSpanID: parentSpanID(event), CallID: fmt.Sprintf("seq-%d", event.Seq), Name: payload.Name, Path: canonical, ChangeType: changeTypeForTool(payload.Name), Seq: event.Seq})
 			}
 		case gen.KindCollectorFsChanged:
 			if event.Actor != "collector" || event.SpanID == "" || event.TraceID == "" {
@@ -177,7 +180,7 @@ func DecodeEvents(events []gen.EventRecord, workspaceTarget string) ([]IntentAct
 				if err != nil {
 					return nil, nil, Report{}, fmt.Errorf("audit: effect path seq %d: %w", event.Seq, err)
 				}
-				effects = append(effects, EffectAction{TraceID: event.TraceID, SpanID: event.SpanID, Path: canonical, ChangeType: change.ChangeType, Hash: change.Hash, Seq: event.Seq})
+				effects = append(effects, EffectAction{TraceID: event.TraceID, SpanID: event.SpanID, ParentSpanID: parentSpanID(event), Path: canonical, ChangeType: change.ChangeType, Hash: change.Hash, Seq: event.Seq})
 			}
 		}
 	}
@@ -190,6 +193,13 @@ func DecodeEvents(events []gen.EventRecord, workspaceTarget string) ([]IntentAct
 	}
 	report.Rows = rows
 	return intents, effects, report, nil
+}
+
+func parentSpanID(event gen.EventRecord) string {
+	if event.ParentSpanID == nil {
+		return ""
+	}
+	return *event.ParentSpanID
 }
 
 func canonicalEffectPath(raw string) (string, error) {
@@ -292,18 +302,18 @@ func Match(intents []IntentAction, effects []EffectAction, netChangesKnown bool)
 		for i := 0; i < n; i++ {
 			if i < len(is) && i < len(es) && compatible(is[i].ChangeType, es[i].ChangeType) {
 				rows = append(rows, Row{
-					Classification: Matched, TraceID: is[i].TraceID, SpanID: is[i].SpanID, Path: is[i].Path,
+					Classification: Matched, TraceID: is[i].TraceID, SpanID: is[i].SpanID, ParentSpanID: firstNonEmpty(is[i].ParentSpanID, es[i].ParentSpanID), Path: is[i].Path,
 					IntentSeq: is[i].Seq, EffectSeq: es[i].Seq, CallID: is[i].CallID, Name: is[i].Name,
 					ReportedType: is[i].ChangeType, ObservedType: es[i].ChangeType,
 				})
 				continue
 			}
 			if i < len(is) {
-				row := Row{Classification: ReportedUnobserved, TraceID: is[i].TraceID, SpanID: is[i].SpanID, Path: is[i].Path, IntentSeq: is[i].Seq, CallID: is[i].CallID, Name: is[i].Name, ReportedType: is[i].ChangeType, Reason: "effect not observed"}
+				row := Row{Classification: ReportedUnobserved, TraceID: is[i].TraceID, SpanID: is[i].SpanID, ParentSpanID: is[i].ParentSpanID, Path: is[i].Path, IntentSeq: is[i].Seq, CallID: is[i].CallID, Name: is[i].Name, ReportedType: is[i].ChangeType, Reason: "effect not observed"}
 				rows = append(rows, row)
 			}
 			if i < len(es) {
-				row := Row{Classification: ObservedUnreported, TraceID: es[i].TraceID, SpanID: es[i].SpanID, Path: es[i].Path, EffectSeq: es[i].Seq, ObservedType: es[i].ChangeType, Reason: "intent not reported"}
+				row := Row{Classification: ObservedUnreported, TraceID: es[i].TraceID, SpanID: es[i].SpanID, ParentSpanID: es[i].ParentSpanID, Path: es[i].Path, EffectSeq: es[i].Seq, ObservedType: es[i].ChangeType, Reason: "intent not reported"}
 				if i < len(is) {
 					row.Reason = "reported change incompatible with observed change"
 				}
@@ -314,6 +324,15 @@ func Match(intents []IntentAction, effects []EffectAction, netChangesKnown bool)
 	// rows inherit the deterministic key order above and seq order within each
 	// group; a second global sort would make the key-order guard unobservable.
 	return rows, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func compatible(reported, observed gen.FsChangedPayloadChangesItemChangeType) bool {
