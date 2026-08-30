@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
+	"github.com/Eastsidegunn/JANUS/core/audit"
 	"github.com/Eastsidegunn/JANUS/core/logd"
 	"github.com/Eastsidegunn/JANUS/core/policy"
 	"github.com/Eastsidegunn/JANUS/core/world"
@@ -369,11 +370,42 @@ func runNormalIntegration(t *testing.T, parent context.Context, artifacts integr
 	assertSpawnBeforeStart(t, records, store)
 	assertApprovalAndFlood(t, records, decider)
 	assertFilesystemCollection(t, records, active.Lease.UpperDir())
+	assertAuditClassification(t, records, childSpan)
 	gotEffects, effectErr := active.EffectSnapshot()
 	if effectErr != nil {
 		t.Fatal(effectErr)
 	}
 	assertEgressEffects(t, gotEffects)
+}
+
+func assertAuditClassification(t *testing.T, records []gen.EventRecord, childSpan string) {
+	t.Helper()
+	_, _, report, err := audit.DecodeEvents(records, "/workspace")
+	if err != nil {
+		t.Fatalf("durable log audit decode: %v", err)
+	}
+	want := map[string]audit.Classification{
+		"approved-marker.txt": audit.Matched,
+		"created.txt":         audit.ObservedUnreported,
+		"modified.txt":        audit.ObservedUnreported,
+		"deleted.txt":         audit.ObservedUnreported,
+		"reported-only.txt":   audit.ReportedUnobserved,
+	}
+	for path, classification := range want {
+		found := false
+		for _, row := range report.Rows {
+			if row.Path == path && row.Classification == classification {
+				if row.SpanID != childSpan {
+					t.Fatalf("audit row span mismatch path=%s got=%s want=%s", path, row.SpanID, childSpan)
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("audit classification missing path=%s want=%s rows=%+v", path, classification, report.Rows)
+		}
+	}
 }
 
 func assertFilesystemCollection(t *testing.T, records []gen.EventRecord, upper string) {
