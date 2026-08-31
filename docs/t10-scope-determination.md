@@ -80,6 +80,23 @@ FR-SBX-04는 단기·좁은 스코프 토큰을 MUST로 요구하고 장기 자�
 bind mount의 워크스페이스 격리(자명해 보였고 실측이 반증). T15 착수 전에
 T9 smoke와 같은 [H] 실측을 수행한다.
 
+**2026-08-31 확인([H])**: 이 환경에는 AWS Bedrock·GCP Vertex 접근이 둘 다
+없다. 경로 4(3P STS)는 이 환경에서 실측 불가하다.
+
+남은 실측 후보가 하나 있다 — **OAuth access token 단독 주입.** Keychain의
+자격증명은 단기 access token + 장기 refresh token 쌍이다. refresh token을
+호스트에 남기고 access token만 spawn 시 주입하면 "단기 토큰 주입"의 문면에
+접근한다(스코프 축소는 미충족 — 명세 소유자 판단 필요). 성립 여부는 두
+실측으로 분해된다:
+(i) 격리된 환경에서 access token 하나만으로 claude가 인증되는가 — [H] 로컬
+(ii) 컨테이너 안에서 claude가 인증 직전까지 기동하는가 — 자격증명 불요, CI
+
+(i)·(ii)가 모두 성립하면 T15는 Bedrock 없이 진행 가능하다. 어느 쪽이든
+실패하면 명세 판단(FR-SBX-04 개정 또는 어댑터 제외)으로 간다. 참고로
+자격증명 문제는 Claude Code 고유가 아니다 — Codex(OpenAI) API key도
+장기 자격증명이므로, "Claude Code 제외" 선택은 문제를 옮길 뿐 없애지
+않는다.
+
 ## 7. 즉시 진행
 
 1. `process broker` + `Open → spawn ACK → Start` 분리 재제안 (모든 선택지에서 필요)
