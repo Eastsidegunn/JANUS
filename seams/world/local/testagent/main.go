@@ -243,6 +243,21 @@ func runNormal(workspace string, cfg scenario, startedNS int64) error {
 	}); err != nil {
 		return err
 	}
+	// Deliberately report a filesystem intent whose effect never occurs. The
+	// T12 audit integration gate must classify this as reported_unobserved from
+	// the durable child-span log, rather than treating an empty effect as proof
+	// that no intent was emitted.
+	if err := emit(gen.EventKindSubagentToolCall, gen.AgentToolCallPayload{
+		CallID: "call-no-effect", Name: "Write", Args: json.RawMessage(`{"path":"/workspace/reported-only.txt"}`),
+	}); err != nil {
+		return err
+	}
+	noEffect := "simulated no-op"
+	if err := emit(gen.EventKindSubagentToolResult, gen.AgentToolResultPayload{
+		CallID: "call-no-effect", Status: gen.AgentToolResultPayloadStatusError, Error: &noEffect,
+	}); err != nil {
+		return err
+	}
 
 	if err := emitMessage("flood-start"); err != nil {
 		return err

@@ -162,6 +162,26 @@ func TestWorldEndpointImplementationImportDirection(t *testing.T) {
 	})
 }
 
+// audit는 contracts와 자체 value type만 사용하는 순수 비교 계층이다.
+// collector/logd 내부 타입이나 seams/surfaces를 import하면 저장소·실행
+// seam과 결합되어 query-time 재계산 경계가 무너진다 (T12-2).
+func TestAuditImportDirection(t *testing.T) {
+	pkgs := []Pkg{
+		{ImportPath: mod + "/core/audit", Imports: []string{
+			mod + "/collector",
+			mod + "/core/logd",
+			mod + "/seams/world/local",
+			mod + "/surfaces/hx",
+		}},
+	}
+	assertViolations(t, Check(mod, pkgs), []string{
+		"core/audit → collector (audit는 contracts와 자체 value type만 import 가능)",
+		"core/audit → core/logd (audit는 contracts와 자체 value type만 import 가능)",
+		"core/audit → seams/world/local (audit는 contracts와 자체 value type만 import 가능)",
+		"core/audit → surfaces/hx (audit는 contracts와 자체 value type만 import 가능)",
+	})
+}
+
 func TestCheckClean(t *testing.T) {
 	pkgs := []Pkg{
 		{ImportPath: mod + "/core", Imports: []string{mod + "/contracts", "os"}},
