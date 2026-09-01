@@ -1,0 +1,39 @@
+# T15 착수 조건 (ii) 일회성 프로브: 리눅스 컨테이너 안에서 claude가
+# 인증 관문까지 기동하는가. 자격증명을 쓰지 않으며 API 호출도 없다
+# (인증 실패가 곧 통과 기준). 결과 기록 후 삭제한다.
+name: t15-container-claude-probe
+
+on:
+  push:
+    branches: [t15/container-claude-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: containerized claude reaches auth gate without credentials
+        run: |
+          set -uo pipefail
+          podman pull -q docker.io/library/node:22-slim >/dev/null
+          out=$(podman run --rm docker.io/library/node:22-slim bash -c '
+            set -e
+            npm install -g @anthropic-ai/claude-code >/dev/null 2>&1
+            export HOME=/root
+            mkdir -p /work && cd /work
+            printf %s "{\"hasCompletedOnboarding\":true,\"projects\":{\"/work\":{\"hasTrustDialogAccepted\":true}}}" > /root/.claude.json
+            claude --version
+            claude -p "say ok" --setting-sources project,local 2>&1 || true
+          ' 2>&1) || true
+          echo "$out"
+          echo "$out" | grep -qiE "claude code" || { echo "PROBE claude_started=false"; exit 1; }
+          echo "PROBE claude_started=true"
+          if echo "$out" | grep -qiE "not logged in|/login|401|invalid api key|authentication"; then
+            echo "PROBE auth_gate_reached=true"
+          else
+            echo "PROBE auth_gate_reached=false"
+            exit 1
+          fi
