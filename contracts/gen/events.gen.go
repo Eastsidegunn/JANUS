@@ -159,6 +159,14 @@ type SubagentReadyPayload struct {
 	Tools           []string                  `json:"tools,omitempty"`
 }
 
+type SubagentSpawnExtension struct {
+	ArtifactDigest string `json:"artifact_digest"`
+	Integrity      string `json:"integrity"`
+	Name           string `json:"name"`
+	Source         string `json:"source"`
+	Version        string `json:"version"`
+}
+
 type SubagentSpawnMountMode string
 
 const (
@@ -189,6 +197,7 @@ type SubagentSpawnPayload struct {
 	Adapter      string                           `json:"adapter"`
 	Budget       SpawnBudget                      `json:"budget"`
 	Depth        int64                            `json:"depth"`
+	Extensions   []SubagentSpawnExtension         `json:"extensions,omitempty"`
 	ImageDigest  *string                          `json:"image_digest,omitempty"`
 	Instruction  string                           `json:"instruction"`
 	Mounts       []SubagentSpawnMount             `json:"mounts,omitempty"`

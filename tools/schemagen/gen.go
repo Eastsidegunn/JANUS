@@ -97,7 +97,9 @@ func checkContract(node any, path string, errs *[]error) {
 
 // checkOneOf는 판별 union의 구조 규칙을 강제한다:
 // 비어 있지 않음, 분기당 판별 const 정확히 하나, 전 분기 동일 판별 필드,
-// 판별 값 중복 없음, 판별 필드는 base required이거나 모든 분기에서 required.
+// 판별 값 중복 없음(단, additionalProperties:false와 required 필드로 서로
+// 배타적인 분기는 같은 값을 사용할 수 있음), 판별 필드는 base required이거나
+// 모든 분기에서 required.
 // parent는 oneOf를 담은 스키마 객체다(base required 확인용).
 func checkOneOf(parent map[string]any, v any, path string, errs *[]error) {
 	addErr := func(format string, a ...any) {
@@ -110,6 +112,7 @@ func checkOneOf(parent map[string]any, v any, path string, errs *[]error) {
 	}
 	discName := ""
 	seenValues := map[string]bool{}
+	seenBranches := map[string][]map[string]any{}
 	discRequiredInAll := true
 	structureOK := true
 	for i, b := range branches {
@@ -142,9 +145,15 @@ func checkOneOf(parent map[string]any, v any, path string, errs *[]error) {
 			continue
 		}
 		if seenValues[value] {
-			*errs = append(*errs, fmt.Errorf("%s: 판별 const 값 중복 %q", bp, value))
+			for _, previous := range seenBranches[value] {
+				if !disjointBranches(previous, bm) {
+					*errs = append(*errs, fmt.Errorf("%s: 판별 const 값 중복 %q", bp, value))
+					break
+				}
+			}
 		}
 		seenValues[value] = true
+		seenBranches[value] = append(seenBranches[value], bm)
 		if !stringSet(bm["required"])[name] {
 			discRequiredInAll = false
 		}
@@ -154,6 +163,38 @@ func checkOneOf(parent map[string]any, v any, path string, errs *[]error) {
 			addErr("판별 필드 %q는 base required 또는 모든 분기에서 required여야 함", discName)
 		}
 	}
+}
+
+// disjointBranches는 duplicate discriminator 값을 허용할 수 있는 최소한의
+// 구조적 증거를 확인한다. 한 분기가 required로 요구하는 필드를 다른 분기가
+// properties에 전혀 선언하지 않고 additionalProperties:false인 경우, 해당
+// 인스턴스는 양쪽을 동시에 만족할 수 없다. 이 완화는 T13의 local-podman
+// extension 없음/있음 분기처럼 필드 존재 여부로 갈리는 union만 허용한다.
+func disjointBranches(a, b map[string]any) bool {
+	if a["additionalProperties"] != false || b["additionalProperties"] != false {
+		return false
+	}
+	props := func(branch map[string]any) map[string]bool {
+		out := map[string]bool{}
+		if p, ok := branch["properties"].(map[string]any); ok {
+			for name := range p {
+				out[name] = true
+			}
+		}
+		return out
+	}
+	aProps, bProps := props(a), props(b)
+	for name := range stringSet(a["required"]) {
+		if !bProps[name] {
+			return true
+		}
+	}
+	for name := range stringSet(b["required"]) {
+		if !aProps[name] {
+			return true
+		}
+	}
+	return false
 }
 
 // branchConstFields는 분기 properties 중 const를 가진 필드의 이름→값 표다.
