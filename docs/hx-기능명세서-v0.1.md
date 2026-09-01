@@ -219,10 +219,13 @@ CREATE TABLE events (
 `subagent/spawn` payload는 `world_backend` 판별자로 폐쇄한다
 (SCP-T10-001, 2026-08-21 [H] 승인). 공통 필드는 `adapter`, `instruction`,
 `depth`, `budget`, `world_backend`다. `world_backend:"none"`은 기존 null adapter와
-테스트 경로를 표현하며 sandbox metadata를 허용하지 않는다.
+테스트 경로를 표현하며 sandbox metadata와 확장 metadata를 허용하지 않는다.
 `world_backend:"local-podman"`은 `profile_id`, tag가 아닌
 `sha256:<64 lowercase hex>` image digest, workspace overlay `mounts`를 추가로
-필수화한다. 두 분기 모두 미지 필드를 거부한다. schema가 `none`을 허용하는 것은
+필수화한다. T13의 extension-bearing local-podman 분기는 프로비저닝으로 확정된
+`extensions[]`(name, 정확한 version, integrity, source, artifact_digest)를
+추가로 필수화하고, extension 없는 local-podman 분기는 기존 필드만 허용한다.
+확장 배열과 항목은 미지 필드·중복·비결정적 순서를 거부한다. 두 분기 모두 미지 필드를 거부한다. schema가 `none`을 허용하는 것은
 production 권한이 아니며, production surface는 FR-SBX-01에 따라 이를 거부한다.
 
 스키마 확장 규칙: 새 모델 가시 입력은 반드시 새 kind 추가로 처리한다(FR-LOG-03의 계). kind의 제거·의미 변경은 메이저 버전에서만 허용한다.
@@ -292,7 +295,11 @@ v0.1은 다음이 모두 참일 때 완료로 본다.
 5. 프로파일 오버레이로 권한이 넓어지는 조합이 존재하지 않음을 속성 테스트로 검증한다 (FR-POL-03).
 6. `hx fork` 후 두 세션이 독립적으로 진행되며 원본 로그가 불변임이 확인된다 (FR-LOG-05).
 7. OTel export된 trace가 표준 뷰어(Jaeger 등)에서 부모-자식 span 트리로 렌더링된다 (FR-OBS-01).
-8. 확장 선언이 있는 spawn에서 프로비저닝 단계의 레지스트리 접근은 성공하고, 실행 단계의 동일 도메인 접근은 차단되며, 설치된 확장 세트가 spawn 이벤트에 기록된다 (FR-EXT-03/04).
+8. 확장 선언이 있는 spawn은 요청된 버전·digest를 검증한 뒤 프로비저닝 단계의
+레지스트리 접근에 성공하고, 프로비저닝 결과의 설치 세트와 artifact digest를
+spawn durable metadata에 기록한 뒤 실행을 시작한다. 실행 단계에서는 동일
+registry 도메인이 자동 승계되지 않아 차단되며, 정책을 통과해 선언된 실행
+egress만 허용된다 (FR-EXT-03/04/05/06).
 
 ---
 

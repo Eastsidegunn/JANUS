@@ -10,7 +10,9 @@ package validate
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -64,7 +66,56 @@ func New() (*Validators, error) {
 
 // ValidateRecord는 §5.1 이벤트 레코드 한 건을 검증한다.
 func (v *Validators) ValidateRecord(data []byte) error {
-	return validate(v.record, data)
+	if err := validate(v.record, data); err != nil {
+		return err
+	}
+	// JSON Schema validates each extension item, but array order and duplicate
+	// identities are semantic replay guarantees and are checked here as well.
+	var envelope struct {
+		Kind    string          `json:"kind"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return fmt.Errorf("레코드 envelope: %w", err)
+	}
+	if envelope.Kind == "subagent/spawn" {
+		if err := validateSpawnExtensions(envelope.Payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSpawnExtensions(payload json.RawMessage) error {
+	var p struct {
+		Extensions []struct {
+			Name           string `json:"name"`
+			Version        string `json:"version"`
+			Integrity      string `json:"integrity"`
+			Source         string `json:"source"`
+			ArtifactDigest string `json:"artifact_digest"`
+		} `json:"extensions"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return fmt.Errorf("spawn extensions: %w", err)
+	}
+	seen := map[string]bool{}
+	previous := ""
+	for i, ext := range p.Extensions {
+		// The declaration identity follows SCP-T13-001: the same
+		// (name, version, integrity, source) cannot occur twice.
+		identity := strings.Join([]string{ext.Name, ext.Version, ext.Integrity, ext.Source}, "\x00")
+		if seen[identity] {
+			return fmt.Errorf("spawn extensions[%d]: 중복 identity", i)
+		}
+		seen[identity] = true
+		order := strings.Join([]string{ext.Name, ext.Version, ext.Source, ext.Integrity, ext.ArtifactDigest}, "\x00")
+		if i > 0 && order < previous {
+			return fmt.Errorf("spawn extensions[%d]: 결정적 순서 위반", i)
+		}
+		previous = order
+	}
+	return nil
 }
 
 // ValidateCommand는 코어→어댑터 메시지(§5.2 stdin) 한 줄을 검증한다.

@@ -257,3 +257,21 @@ func TestGenerateBranchConflict(t *testing.T) {
 		t.Errorf("병합 불가 오류 기대, got %v", err)
 	}
 }
+
+// 같은 discriminator 값이라도 additionalProperties:false와 required 필드의
+// 비대칭으로 서로 배타적임이 증명되면 생성기가 허용한다. T13의
+// local-podman 확장 없음/있음 분기가 이 형태다.
+func TestGenerateAllowsDisjointDuplicateDiscriminator(t *testing.T) {
+	root := parse(t, `{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"type": "object",
+		"required": ["kind"],
+		"oneOf": [
+			{"properties": {"kind": {"const": "local"}, "base": {"type": "string"}}, "additionalProperties": false},
+			{"properties": {"kind": {"const": "local"}, "extension": {"type": "string"}}, "required": ["extension"], "additionalProperties": false}
+		]
+	}`)
+	if _, _, err := Generate(root, "disjoint.schema.json", "Disjoint"); err != nil {
+		t.Fatalf("구조적으로 배타적인 중복 discriminator가 거부됨: %v", err)
+	}
+}
