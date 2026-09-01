@@ -59,6 +59,23 @@ func TestEffectivePolicyAndSpawnSpecAreSnapshots(t *testing.T) {
 	}
 }
 
+func TestExtensionBundleIsHostOnlyAndDefensivelyCopied(t *testing.T) {
+	meta := []gen.SubagentSpawnExtension{{Name: "demo", Version: "1.0.0", Integrity: "sha256:" + strings.Repeat("a", 64), Source: "registry.example", ArtifactDigest: "sha256:" + strings.Repeat("b", 64)}}
+	bundle := world.NewExtensionBundle("/state/bundle", "sha256:"+strings.Repeat("c", 64), meta)
+	meta[0].Name = "mutated"
+	got := bundle.Extensions()
+	if got[0].Name != "demo" || bundle.Path() != "/state/bundle" {
+		t.Fatalf("bundle alias/path leak: %+v", got)
+	}
+	cfg := policy.SandboxConfig{Extensions: []gen.Extension{{Name: "demo", Version: "1.0.0", Integrity: "sha256:" + strings.Repeat("d", 64), Source: "registry.example"}}}
+	effective := world.NewEffectivePolicy(cfg)
+	copied := effective.Extensions()
+	copied[0].Name = "mutated"
+	if effective.Extensions()[0].Name != "demo" {
+		t.Fatal("effective policy extension snapshot aliases caller")
+	}
+}
+
 func TestUpperDirExistsOnlyOnHostLeaseBoundary(t *testing.T) {
 	for _, typ := range []reflect.Type{
 		reflect.TypeOf(world.SpawnSpec{}),

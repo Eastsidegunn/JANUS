@@ -213,6 +213,17 @@ func metadataMatchesPayload(metadata SpawnMetadata, payload gen.SubagentSpawnPay
 	if subtle.ConstantTimeCompare(left, right) != 1 {
 		return fmt.Errorf("world: spawn mount metadata 불일치")
 	}
+	left, err = json.Marshal(payload.Extensions)
+	if err != nil {
+		return err
+	}
+	right, err = json.Marshal(metadata.Extensions)
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare(left, right) != 1 {
+		return fmt.Errorf("world: spawn extension metadata 불일치")
+	}
 	return nil
 }
 
@@ -220,24 +231,26 @@ func metadataMatchesPayload(metadata SpawnMetadata, payload gen.SubagentSpawnPay
 // exposes no merge or mutation operation: a world backend receives the already
 // narrowed values and may only bake those values into its sandbox.
 type EffectivePolicy struct {
-	profileID string
-	workspace string
-	fsScope   []string
-	egress    []string
-	budget    gen.Budget
-	approval  policy.ApprovalMode
+	profileID  string
+	workspace  string
+	fsScope    []string
+	egress     []string
+	budget     gen.Budget
+	approval   policy.ApprovalMode
+	extensions []gen.Extension
 }
 
 // NewEffectivePolicy snapshots an already evaluated SandboxConfig. Slice
 // fields are copied so later caller mutation cannot widen an opened world.
 func NewEffectivePolicy(cfg policy.SandboxConfig) EffectivePolicy {
 	return EffectivePolicy{
-		profileID: cfg.ProfileID,
-		workspace: cfg.Workspace,
-		fsScope:   append([]string(nil), cfg.FSScope...),
-		egress:    append([]string(nil), cfg.Egress...),
-		budget:    cfg.Budget,
-		approval:  cfg.Approval,
+		profileID:  cfg.ProfileID,
+		workspace:  cfg.Workspace,
+		fsScope:    append([]string(nil), cfg.FSScope...),
+		egress:     append([]string(nil), cfg.Egress...),
+		budget:     cfg.Budget,
+		approval:   cfg.Approval,
+		extensions: cloneWorldExtensions(cfg.Extensions),
 	}
 }
 
@@ -247,6 +260,7 @@ func (p EffectivePolicy) Budget() gen.Budget            { return p.budget }
 func (p EffectivePolicy) Approval() policy.ApprovalMode { return p.approval }
 func (p EffectivePolicy) Egress() []string              { return append([]string(nil), p.egress...) }
 func (p EffectivePolicy) FSScope() []string             { return append([]string(nil), p.fsScope...) }
+func (p EffectivePolicy) Extensions() []gen.Extension   { return cloneWorldExtensions(p.extensions) }
 
 // AgentIdentity is the numeric UID/GID declared by the agent image. The local
 // backend maps the invoking rootless user to this identity with keep-id.
@@ -275,6 +289,7 @@ type SpawnSpec struct {
 	spanID      string
 	identity    AgentIdentity
 	credentials []CredentialHandle
+	bundle      ExtensionBundle
 }
 
 func NewSpawnSpec(
@@ -304,6 +319,49 @@ func (s SpawnSpec) SpanID() string               { return s.spanID }
 func (s SpawnSpec) AgentIdentity() AgentIdentity { return s.identity }
 func (s SpawnSpec) Credentials() []CredentialHandle {
 	return append([]CredentialHandle(nil), s.credentials...)
+}
+
+// ExtensionBundle is a host-only, immutable handle to a verified provisioning
+// result. It is intentionally opaque: callers can pass it to a world backend
+// but cannot place its host path in wire payloads or mutate its contents.
+type ExtensionBundle struct {
+	path       string
+	digest     string
+	extensions []gen.SubagentSpawnExtension
+}
+
+// NewExtensionBundle is used by the provisioning seam after it has sealed and
+// hashed a bundle. The path is never serialized into an agent command payload.
+func NewExtensionBundle(path, digest string, extensions []gen.SubagentSpawnExtension) ExtensionBundle {
+	return ExtensionBundle{path: path, digest: digest, extensions: append([]gen.SubagentSpawnExtension(nil), extensions...)}
+}
+
+func (b ExtensionBundle) Path() string   { return b.path }
+func (b ExtensionBundle) Digest() string { return b.digest }
+func (b ExtensionBundle) Extensions() []gen.SubagentSpawnExtension {
+	return append([]gen.SubagentSpawnExtension(nil), b.extensions...)
+}
+func (b ExtensionBundle) IsZero() bool {
+	return b.path == "" && b.digest == "" && len(b.extensions) == 0
+}
+
+// WithExtensionBundle returns a defensive copy with the already verified
+// bundle attached. It does not perform policy evaluation or provisioning.
+func (s SpawnSpec) WithExtensionBundle(bundle ExtensionBundle) SpawnSpec {
+	s.bundle = ExtensionBundle{path: bundle.path, digest: bundle.digest, extensions: bundle.Extensions()}
+	return s
+}
+func (s SpawnSpec) ExtensionBundle() ExtensionBundle {
+	return ExtensionBundle{path: s.bundle.path, digest: s.bundle.digest, extensions: s.bundle.Extensions()}
+}
+
+func cloneWorldExtensions(in []gen.Extension) []gen.Extension {
+	out := make([]gen.Extension, len(in))
+	for i, ext := range in {
+		out[i] = ext
+		out[i].Egress = append([]string(nil), ext.Egress...)
+	}
+	return out
 }
 
 // ImageReference separates the trusted repository lookup name from the
@@ -385,11 +443,13 @@ type SpawnMetadata struct {
 	ProfileID   string
 	ImageDigest string
 	Mounts      []gen.SubagentSpawnMount
+	Extensions  []gen.SubagentSpawnExtension
 }
 
 // Clone returns metadata whose mount slice does not alias the source.
 func (m SpawnMetadata) Clone() SpawnMetadata {
 	m.Mounts = append([]gen.SubagentSpawnMount(nil), m.Mounts...)
+	m.Extensions = append([]gen.SubagentSpawnExtension(nil), m.Extensions...)
 	return m
 }
 

@@ -197,6 +197,9 @@ func (b *Backend) Prepare(ctx context.Context, spec world.SpawnSpec) (prepared w
 	if err != nil {
 		return nil, fmt.Errorf("world/local: egress policy: %w", err)
 	}
+	if len(spec.Policy().Extensions()) > 0 && spec.ExtensionBundle().IsZero() {
+		return nil, fmt.Errorf("world/local: 확장 선언은 검증된 provisioning bundle이 필요함")
+	}
 
 	agentRef, err := b.inspectImage(ctx, spec.Image(), spec.AgentIdentity())
 	if err != nil {
@@ -221,6 +224,7 @@ func (b *Backend) Prepare(ctx context.Context, spec world.SpawnSpec) (prepared w
 			SourcePath: layout.lower, TargetPath: gen.SubagentSpawnMountTargetPathWorkspace,
 			Mode: gen.SubagentSpawnMountModeOverlay, UpperRef: filepath.ToSlash(layout.upperRef),
 		}},
+		Extensions: spec.ExtensionBundle().Extensions(),
 	}
 	return &preparedLease{
 		backend: b, id: id, spec: spec, agentRef: agentRef, proxyRef: proxyRef,
@@ -344,6 +348,12 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 		"--volume", approval.RelayDir() + ":" + approvalRelayMount + ":ro",
 		"--volume", volume,
 		prepared.agentRef.String(),
+	}
+	if bundle := spec.ExtensionBundle(); !bundle.IsZero() {
+		if err := validateBundleMount(prepared.backend.stateRoot, bundle); err != nil {
+			return nil, err
+		}
+		args = append(args[:len(args)-1], "--volume", bundle.Path()+":/opt/hx/extensions:ro", args[len(args)-1])
 	}
 	args = append(args, spec.AgentArgv()...)
 	containerID, err := b.createContainer(ctx, args, cidFile)
@@ -508,6 +518,34 @@ func validateImageReference(ref world.ImageReference) error {
 	}
 	if !digestPattern.MatchString(ref.Digest()) {
 		return fmt.Errorf("digest는 sha256 형식이어야 함(tag 금지): %q", ref.Digest())
+	}
+	return nil
+}
+
+func validateBundleMount(stateRoot string, bundle world.ExtensionBundle) error {
+	if bundle.Path() == "" || !filepath.IsAbs(bundle.Path()) || filepath.Clean(bundle.Path()) != bundle.Path() {
+		return fmt.Errorf("world/local: extension bundle path가 canonical 절대경로가 아님")
+	}
+	if !pathWithin(stateRoot, bundle.Path()) {
+		return fmt.Errorf("world/local: extension bundle이 state root 밖")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(stateRoot)
+	if err != nil {
+		return fmt.Errorf("world/local: bundle state root 확인: %w", err)
+	}
+	resolvedBundle, err := filepath.EvalSymlinks(bundle.Path())
+	if err != nil || !pathWithin(resolvedRoot, resolvedBundle) {
+		return fmt.Errorf("world/local: extension bundle 실경로가 state root 밖")
+	}
+	if !digestPattern.MatchString(bundle.Digest()) {
+		return fmt.Errorf("world/local: extension bundle digest 형식 오류")
+	}
+	info, err := os.Stat(bundle.Path())
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("world/local: extension bundle 디렉터리 접근 실패: %w", err)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("world/local: extension bundle은 쓰기 가능하면 안 됨")
 	}
 	return nil
 }
