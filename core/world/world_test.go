@@ -268,6 +268,53 @@ func TestCommitSpawnRejectsMismatchBeforeWriter(t *testing.T) {
 	}
 }
 
+func TestCommitSpawnRejectsExtensionMountAndBasicMetadataMismatchBeforeWriter(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	metadata := world.SpawnMetadata{
+		Backend: gen.SubagentSpawnPayloadWorldBackendLocalPodman, ProfileID: "profile", ImageDigest: digest,
+		Mounts:     []gen.SubagentSpawnMount{{SourcePath: "/workspace", TargetPath: gen.SubagentSpawnMountTargetPathWorkspace, Mode: gen.SubagentSpawnMountModeOverlay, UpperRef: "world/t/s/upper"}},
+		Extensions: []gen.SubagentSpawnExtension{{Name: "demo", Version: "1.0.0", Integrity: digest, Source: "registry.example", ArtifactDigest: digest}},
+	}
+	parent := "1111111111111111"
+	for _, tc := range []struct {
+		name   string
+		mutate func(*gen.SubagentSpawnPayload)
+	}{
+		{"extensions", func(p *gen.SubagentSpawnPayload) {
+			p.Extensions[0].ArtifactDigest = "sha256:" + strings.Repeat("b", 64)
+		}},
+		{"mounts", func(p *gen.SubagentSpawnPayload) { p.Mounts[0].UpperRef = "world/t/s/other" }},
+		{"basic", func(p *gen.SubagentSpawnPayload) { v := "other"; p.ProfileID = &v }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prepared := worldtest.NewFakePreparedLease(metadata, "/upper", nil)
+			store := &memoryStore{}
+			writer, err := logd.NewWriter(context.Background(), store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+			profile, image := metadata.ProfileID, metadata.ImageDigest
+			payload := gen.SubagentSpawnPayload{Adapter: "world", Instruction: "test", Depth: 0, Budget: gen.SpawnBudget{Tokens: 1, TimeMs: 1, MaxDepth: 1}, WorldBackend: metadata.Backend, ProfileID: &profile, ImageDigest: &image, Mounts: metadata.Mounts, Extensions: metadata.Extensions}
+			tc.mutate(&payload)
+			bytes, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = world.CommitSpawn(context.Background(), writer, prepared, world.SpawnRecord(gen.EventRecord{TraceID: strings.Repeat("1", 32), SpanID: strings.Repeat("2", 16), ParentSpanID: &parent, Ts: 1, Kind: gen.KindSubagentSpawn, Actor: "parent", Payload: bytes}))
+			if err == nil {
+				t.Fatal("metadata mismatch가 거부되지 않음")
+			}
+			if got := len(store.records()); got != 0 {
+				t.Fatalf("거부 후 durable spawn=%d", got)
+			}
+			if got := prepared.FakeActivationCount(); got != 0 {
+				t.Fatalf("거부 후 runtime activation=%d", got)
+			}
+		})
+	}
+}
+
 type memoryStore struct {
 	mu   sync.Mutex
 	recs []gen.EventRecord

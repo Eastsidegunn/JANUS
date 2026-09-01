@@ -198,7 +198,8 @@ func hashMetadata(metadata SpawnMetadata) ([32]byte, error) {
 
 func metadataMatchesPayload(metadata SpawnMetadata, payload gen.SubagentSpawnPayload) error {
 	if payload.WorldBackend != metadata.Backend || payload.ProfileID == nil ||
-		payload.ImageDigest == nil || *payload.ProfileID != metadata.ProfileID ||
+		payload.ImageDigest == nil ||
+		*payload.ProfileID != metadata.ProfileID ||
 		*payload.ImageDigest != metadata.ImageDigest {
 		return fmt.Errorf("world: spawn payload와 prepared metadata 불일치")
 	}

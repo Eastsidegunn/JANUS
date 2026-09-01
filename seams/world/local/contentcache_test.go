@@ -38,6 +38,20 @@ func TestContentCacheRevalidatesHitAndRejectsCorruption(t *testing.T) {
 	}
 }
 
+func TestContentCachePutRejectsDigestMismatchImmediately(t *testing.T) {
+	c, err := NewContentCache(filepath.Join(t.TempDir(), "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := hashBytes([]byte("expected"))
+	if err := c.Put(context.Background(), digest, strings.NewReader("wrong")); !errors.Is(err, ErrCacheCorrupt) {
+		t.Fatalf("Put digest mismatch가 즉시 거부되지 않음: %v", err)
+	}
+	if _, err := c.Get(context.Background(), digest); !errors.Is(err, ErrCacheMiss) {
+		t.Fatalf("실패한 Put이 cache entry를 남김: %v", err)
+	}
+}
+
 func TestProvisionerSealsDeterministicBundleAndNoPartialOnFailure(t *testing.T) {
 	root := t.TempDir()
 	cache, err := NewContentCache(filepath.Join(root, "cache"))
