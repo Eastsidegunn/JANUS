@@ -52,6 +52,12 @@ func assertNarrower(t *testing.T, seed int, label string, narrow, wide Profile) 
 	if !subset(narrow.FSScope, wide.FSScope) {
 		t.Fatalf("seed %d %s: fs 스코프가 넓어짐 (%v ⊄ %v)", seed, label, narrow.FSScope, wide.FSScope)
 	}
+	if !subset(narrow.AllowedExtensions, wide.AllowedExtensions) {
+		t.Fatalf("seed %d %s: 허용 확장이 넓어짐 (%v ⊄ %v)", seed, label, narrow.AllowedExtensions, wide.AllowedExtensions)
+	}
+	if !subset(narrow.AllowedRegistries, wide.AllowedRegistries) {
+		t.Fatalf("seed %d %s: 허용 registry가 넓어짐 (%v ⊄ %v)", seed, label, narrow.AllowedRegistries, wide.AllowedRegistries)
+	}
 	if narrow.Budget.Tokens > wide.Budget.Tokens ||
 		narrow.Budget.TimeMs > wide.Budget.TimeMs ||
 		narrow.Budget.MaxDepth > wide.Budget.MaxDepth {

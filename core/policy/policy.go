@@ -29,11 +29,13 @@ const (
 
 // Profile은 v0.1 정책 프로파일이다 (FR-POL-01 필드).
 type Profile struct {
-	ID       string
-	FSScope  []string     // 마운트 허용 경로 (FR-SBX-02의 입력)
-	Egress   []string     // egress allow 도메인 (FR-SBX-03의 입력)
-	Budget   gen.Budget   // 토큰/시간/spawn 깊이 — contracts 계약 재사용
-	Approval ApprovalMode // manual | auto
+	ID                string
+	FSScope           []string     // 마운트 허용 경로 (FR-SBX-02의 입력)
+	Egress            []string     // egress allow 도메인 (FR-SBX-03의 입력)
+	AllowedExtensions []string     // 확장 이름 또는 name@registry 선택자 (FR-EXT-05)
+	AllowedRegistries []string     // 프로비저닝 registry host allowlist (FR-EXT-03)
+	Budget            gen.Budget   // 토큰/시간/spawn 깊이 — contracts 계약 재사용
+	Approval          ApprovalMode // manual | auto
 }
 
 // Merge는 base 위에 overlay를 얹는다 — 강화만 가능하다 (FR-POL-03):
@@ -45,9 +47,11 @@ func Merge(base, overlay Profile) Profile {
 		approval = ApprovalAuto
 	}
 	return Profile{
-		ID:      mergeID(base.ID, overlay.ID),
-		FSScope: intersect(base.FSScope, overlay.FSScope),
-		Egress:  intersect(base.Egress, overlay.Egress),
+		ID:                mergeID(base.ID, overlay.ID),
+		FSScope:           intersect(base.FSScope, overlay.FSScope),
+		Egress:            intersect(base.Egress, overlay.Egress),
+		AllowedExtensions: intersectExtensionSelectors(base.AllowedExtensions, overlay.AllowedExtensions),
+		AllowedRegistries: intersectCanonicalHosts(base.AllowedRegistries, overlay.AllowedRegistries),
 		Budget: gen.Budget{
 			Tokens:   min64(base.Budget.Tokens, overlay.Budget.Tokens),
 			TimeMs:   min64(base.Budget.TimeMs, overlay.Budget.TimeMs),
@@ -85,6 +89,22 @@ func intersect(a, b []string) []string {
 	return out
 }
 
+func intersectCanonicalHosts(a, b []string) []string {
+	canonicalA := make([]string, 0, len(a))
+	canonicalB := make([]string, 0, len(b))
+	for _, s := range a {
+		if c := canonicalHostForPolicy(s); c != "" {
+			canonicalA = append(canonicalA, c)
+		}
+	}
+	for _, s := range b {
+		if c := canonicalHostForPolicy(s); c != "" {
+			canonicalB = append(canonicalB, c)
+		}
+	}
+	return intersect(canonicalA, canonicalB)
+}
+
 func min64(a, b int64) int64 {
 	if a < b {
 		return a
@@ -94,10 +114,11 @@ func min64(a, b int64) int64 {
 
 // SpawnRequest는 서브에이전트 spawn 요청의 정책 평가 입력이다.
 type SpawnRequest struct {
-	Adapter   string
-	Workspace string   // 요청 워크스페이스 경로
-	Egress    []string // 요청 egress 도메인
-	Depth     int64    // 이 spawn이 위치할 깊이 (root 직계 자식 = 0)
+	Adapter    string
+	Workspace  string          // 요청 워크스페이스 경로
+	Egress     []string        // 요청 egress 도메인
+	Extensions []gen.Extension // 요청된 확장 선언 (FR-EXT-01/02)
+	Depth      int64           // 이 spawn이 위치할 깊이 (root 직계 자식 = 0)
 }
 
 // SandboxConfig는 평가를 통과한 spawn의 샌드박스 설정이다 (FR-POL-02).
@@ -115,6 +136,7 @@ type SandboxConfig struct {
 	// DeniedEgress는 요청됐으나 거부된 도메인이다 — policy/decision
 	// 이벤트의 사유 재료.
 	DeniedEgress []string
+	Extensions   []gen.Extension // 정책을 통과한 확장 선언의 방어 복사본
 	Budget       gen.Budget
 	Approval     ApprovalMode
 }
@@ -150,17 +172,39 @@ func Evaluate(p Profile, req SpawnRequest) (SandboxConfig, *Denial) {
 		return SandboxConfig{}, &Denial{Reason: fmt.Sprintf(
 			"워크스페이스 %q가 fs 스코프 %v 밖", workspace, p.FSScope)}
 	}
+	normalizedExtensions, err := normalizeAndAuthorizeExtensions(req.Extensions, p.AllowedExtensions, p.AllowedRegistries)
+	if err != nil {
+		return SandboxConfig{}, &Denial{Reason: err.Error()}
+	}
 	allowed := map[string]bool{}
 	for _, d := range p.Egress {
-		allowed[d] = true
+		if canonical := canonicalHostForPolicy(d); canonical != "" {
+			allowed[canonical] = true
+		}
+	}
+	requestedEgress := append([]string(nil), req.Egress...)
+	for _, ext := range normalizedExtensions {
+		// source is provisioning-only and is intentionally not inherited by
+		// the execution profile. Only the declaration's explicit egress joins.
+		requestedEgress = append(requestedEgress, ext.Egress...)
 	}
 	granted := []string{}
 	denied := []string{}
-	for _, d := range req.Egress {
-		if allowed[d] {
-			granted = append(granted, d)
-		} else {
-			denied = append(denied, d)
+	seenGranted := map[string]bool{}
+	seenDenied := map[string]bool{}
+	for _, d := range requestedEgress {
+		canonical := canonicalHostForPolicy(d)
+		if canonical == "" {
+			continue
+		}
+		if allowed[canonical] {
+			if !seenGranted[canonical] {
+				granted = append(granted, canonical)
+				seenGranted[canonical] = true
+			}
+		} else if !seenDenied[canonical] {
+			denied = append(denied, canonical)
+			seenDenied[canonical] = true
 		}
 	}
 	sort.Strings(granted)
@@ -171,6 +215,7 @@ func Evaluate(p Profile, req SpawnRequest) (SandboxConfig, *Denial) {
 		FSScope:      append([]string(nil), p.FSScope...),
 		Egress:       granted,
 		DeniedEgress: denied,
+		Extensions:   cloneExtensions(normalizedExtensions),
 		Budget:       p.Budget,
 		Approval:     p.Approval,
 	}, nil

@@ -15,11 +15,13 @@ import (
 // strict 모드는 미지 필드·중복 키만 거부할 뿐 required·enum·비음수를
 // 강제하지 않으므로([H] 리뷰 확인) 검증은 여기서 별도로 한다.
 type profileYAML struct {
-	ID       *string     `yaml:"id"`
-	FSScope  []string    `yaml:"fs_scope"`
-	Egress   []string    `yaml:"egress"`
-	Budget   *budgetYAML `yaml:"budget"`
-	Approval *string     `yaml:"approval"`
+	ID                *string     `yaml:"id"`
+	FSScope           []string    `yaml:"fs_scope"`
+	Egress            []string    `yaml:"egress"`
+	AllowedExtensions []string    `yaml:"allowed_extensions"`
+	AllowedRegistries []string    `yaml:"allowed_registries"`
+	Budget            *budgetYAML `yaml:"budget"`
+	Approval          *string     `yaml:"approval"`
 }
 
 type budgetYAML struct {
@@ -40,6 +42,8 @@ type budgetYAML struct {
 //   - budget 필수, 세 축(tokens/time_ms/max_depth) 전부 명시, 비음수
 //   - fs_scope 엔트리: 비어 있지 않은 절대 경로, POSIX 정규화해 저장
 //   - egress 엔트리: 비어 있지 않음
+//   - allowed_extensions 엔트리: 확장 이름 또는 name@registry 선택자
+//   - allowed_registries 엔트리: canonical registry hostname으로 저장
 func ParseProfile(data []byte) (Profile, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data), yaml.Strict())
 	var raw profileYAML
@@ -86,12 +90,26 @@ func ParseProfile(data []byte) (Profile, error) {
 			return Profile{}, fmt.Errorf("policy: egress 엔트리는 비어 있으면 안 됨")
 		}
 	}
+	extensionSelectors := make([]string, 0, len(raw.AllowedExtensions))
+	for _, name := range raw.AllowedExtensions {
+		selector, err := canonicalExtensionSelector(name)
+		if err != nil {
+			return Profile{}, fmt.Errorf("policy: allowed_extensions %q — invalid selector", name)
+		}
+		extensionSelectors = append(extensionSelectors, selector)
+	}
+	registries, err := canonicalProfileRegistries(raw.AllowedRegistries)
+	if err != nil {
+		return Profile{}, err
+	}
 	return Profile{
-		ID:       *raw.ID,
-		FSScope:  scope,
-		Egress:   raw.Egress,
-		Budget:   budget,
-		Approval: approval,
+		ID:                *raw.ID,
+		FSScope:           scope,
+		Egress:            raw.Egress,
+		AllowedExtensions: append([]string(nil), extensionSelectors...),
+		AllowedRegistries: append([]string(nil), registries...),
+		Budget:            budget,
+		Approval:          approval,
 	}, nil
 }
 
