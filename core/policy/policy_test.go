@@ -7,6 +7,12 @@ import (
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 )
 
+const extensionHash = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
+func testExtension(name, source string) gen.Extension {
+	return gen.Extension{Name: name, Version: "1.2.3", Integrity: extensionHash, Source: source, Egress: []string{"API.Example.com.", "api.example.com"}}
+}
+
 func b(tokens, timeMs, depth int64) gen.Budget {
 	return gen.Budget{Tokens: tokens, TimeMs: timeMs, MaxDepth: depth}
 }
@@ -14,18 +20,22 @@ func b(tokens, timeMs, depth int64) gen.Budget {
 // FR-POL-03: 교집합·최솟값·승인 강화 단위 테스트 (속성 테스트는 core 패키지).
 func TestMerge(t *testing.T) {
 	base := Profile{
-		ID:       "org",
-		FSScope:  []string{"/workspace", "/data"},
-		Egress:   []string{"github.com", "pypi.org", "registry.npmjs.org"},
-		Budget:   b(100_000, 600_000, 3),
-		Approval: ApprovalAuto,
+		ID:                "org",
+		FSScope:           []string{"/workspace", "/data"},
+		Egress:            []string{"github.com", "pypi.org", "registry.npmjs.org"},
+		AllowedExtensions: []string{"mcp-fs", "lint@registry.example"},
+		AllowedRegistries: []string{"Registry.Example."},
+		Budget:            b(100_000, 600_000, 3),
+		Approval:          ApprovalAuto,
 	}
 	overlay := Profile{
-		ID:       "task",
-		FSScope:  []string{"/workspace"},
-		Egress:   []string{"registry.npmjs.org", "github.com", "evil.example"},
-		Budget:   b(50_000, 900_000, 2),
-		Approval: ApprovalAuto,
+		ID:                "task",
+		FSScope:           []string{"/workspace"},
+		Egress:            []string{"registry.npmjs.org", "github.com", "evil.example"},
+		AllowedExtensions: []string{"mcp-fs", "lint@registry.example"},
+		AllowedRegistries: []string{"registry.example"},
+		Budget:            b(50_000, 900_000, 2),
+		Approval:          ApprovalAuto,
 	}
 	m := Merge(base, overlay)
 	if m.ID != "org+task" {
@@ -36,6 +46,12 @@ func TestMerge(t *testing.T) {
 	}
 	if len(m.Egress) != 2 || m.Egress[0] != "github.com" || m.Egress[1] != "registry.npmjs.org" {
 		t.Errorf("Egress = %v (교집합·정렬 기대)", m.Egress)
+	}
+	if len(m.AllowedExtensions) != 2 || m.AllowedExtensions[0] != "lint@registry.example" || m.AllowedExtensions[1] != "mcp-fs" {
+		t.Errorf("AllowedExtensions = %v (교집합·정렬 기대)", m.AllowedExtensions)
+	}
+	if len(m.AllowedRegistries) != 1 || m.AllowedRegistries[0] != "registry.example" {
+		t.Errorf("AllowedRegistries = %v (canonical 교집합 기대)", m.AllowedRegistries)
 	}
 	if m.Budget != b(50_000, 600_000, 2) {
 		t.Errorf("Budget = %+v (축별 최솟값 기대)", m.Budget)
@@ -54,6 +70,16 @@ func TestMerge(t *testing.T) {
 	overlay.Approval = ApprovalAuto
 	if Merge(base2, overlay).Approval != ApprovalManual {
 		t.Error("auto 오버레이가 manual 상위를 완화함")
+	}
+}
+
+func TestMergeExtensionSelectorSpecificity(t *testing.T) {
+	got := Merge(
+		Profile{AllowedExtensions: []string{"mcp-fs"}},
+		Profile{AllowedExtensions: []string{"mcp-fs@Registry.Example."}},
+	).AllowedExtensions
+	if len(got) != 1 || got[0] != "mcp-fs@registry.example" {
+		t.Fatalf("name selector와 name@source 교집합이 source-specific으로 좁혀지지 않음: %v", got)
 	}
 }
 
@@ -203,5 +229,84 @@ func TestIntersectDeterministic(t *testing.T) {
 	}
 	if len(intersect(a, nil)) != 0 {
 		t.Fatal("공집합 교집합이 비어 있지 않음")
+	}
+}
+
+func TestEvaluateExtensionsAndExecutionEgress(t *testing.T) {
+	p := Profile{
+		ID:                "ext-policy",
+		FSScope:           []string{"/workspace"},
+		Egress:            []string{"api.example.com", "registry.example"},
+		AllowedExtensions: []string{"mcp-fs"},
+		AllowedRegistries: []string{"REGISTRY.EXAMPLE."},
+		Budget:            b(10, 10, 2),
+	}
+	ext := testExtension("mcp-fs", "Registry.Example.")
+	ext.Egress = []string{"API.Example.com."}
+	cfg, denial := Evaluate(p, SpawnRequest{Workspace: "/workspace", Depth: 0, Extensions: []gen.Extension{ext}})
+	if denial != nil {
+		t.Fatalf("허용 확장이 거부됨: %v", denial)
+	}
+	if len(cfg.Extensions) != 1 || cfg.Extensions[0].Source != "registry.example" {
+		t.Fatalf("정규화된 확장 이상: %+v", cfg.Extensions)
+	}
+	if len(cfg.Egress) != 1 || cfg.Egress[0] != "api.example.com" {
+		t.Fatalf("실행 egress 편입 이상: %v", cfg.Egress)
+	}
+	// source registry is not inherited merely because provisioning used it.
+	if contains(cfg.Egress, "registry.example") {
+		t.Fatal("source registry가 실행 egress에 자동 편입됨")
+	}
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestEvaluateExtensionDenialsHaveNoSideEffects(t *testing.T) {
+	base := Profile{FSScope: []string{"/workspace"}, Budget: b(10, 10, 2)}
+	ext := testExtension("mcp-fs", "registry.example")
+	cases := []struct {
+		name string
+		p    Profile
+		ext  gen.Extension
+	}{
+		{"omitted allowlists deny", base, ext},
+		{"name outside intersection", Profile{FSScope: []string{"/workspace"}, AllowedExtensions: []string{"other"}, AllowedRegistries: []string{"registry.example"}, Budget: b(10, 10, 2)}, ext},
+		{"registry outside intersection", Profile{FSScope: []string{"/workspace"}, AllowedExtensions: []string{"mcp-fs"}, AllowedRegistries: []string{"other.example"}, Budget: b(10, 10, 2)}, ext},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, denial := Evaluate(tc.p, SpawnRequest{Workspace: "/workspace", Depth: 0, Extensions: []gen.Extension{tc.ext}})
+			if denial == nil {
+				t.Fatal("정책 밖 확장이 허용됨")
+			}
+			if cfg.Extensions != nil || cfg.Egress != nil {
+				t.Fatalf("거부 시 실행 설정이 남음: %+v", cfg)
+			}
+		})
+	}
+}
+
+func TestNormalizeExtensionRejectsUnpinnedDeclarations(t *testing.T) {
+	valid := testExtension("mcp-fs", "registry.example")
+	for _, version := range []string{"latest", "^1.2.3", ">=1.0.0", "v1.2.3", "1.2"} {
+		ext := valid
+		ext.Version = version
+		if _, err := NormalizeExtension(ext); err == nil {
+			t.Errorf("version %q가 허용됨", version)
+		}
+	}
+	for _, integrity := range []string{"md5:abc", "sha256:abc", "sha256:" + strings.Repeat("A", 64)} {
+		ext := valid
+		ext.Integrity = integrity
+		if _, err := NormalizeExtension(ext); err == nil {
+			t.Errorf("integrity %q가 허용됨", integrity)
+		}
 	}
 }

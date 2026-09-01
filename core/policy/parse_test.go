@@ -18,6 +18,11 @@ budget:
   time_ms: 600000
   max_depth: 2
 approval: manual
+allowed_extensions:
+  - mcp-fs
+  - lint@registry.example
+allowed_registries:
+  - Registry.Example.
 `
 
 func TestParseProfileValid(t *testing.T) {
@@ -34,6 +39,9 @@ func TestParseProfileValid(t *testing.T) {
 	// fs_scope는 정규화되어 저장된다
 	if len(p.FSScope) != 2 || p.FSScope[1] != "/tmp/scratch" {
 		t.Fatalf("fs_scope 정규화 안 됨: %v", p.FSScope)
+	}
+	if len(p.AllowedExtensions) != 2 || len(p.AllowedRegistries) != 1 || p.AllowedRegistries[0] != "registry.example" {
+		t.Fatalf("확장 정책 정규화 이상: extensions=%v registries=%v", p.AllowedExtensions, p.AllowedRegistries)
 	}
 }
 
@@ -100,6 +108,18 @@ egress: [""]
 budget: {tokens: 1, time_ms: 1, max_depth: 1}
 approval: manual
 `, "egress"},
+		{"allowed_extensions 빈 엔트리", `
+id: p
+allowed_extensions: [""]
+budget: {tokens: 1, time_ms: 1, max_depth: 1}
+approval: manual
+`, "allowed_extensions"},
+		{"allowed_registries 경로", `
+id: p
+allowed_registries: ["https://registry.example"]
+budget: {tokens: 1, time_ms: 1, max_depth: 1}
+approval: manual
+`, "allowed_registries"},
 		{"암묵적 루트 스코프 — /workspace/..", `
 id: p
 fs_scope: ["/workspace/.."]

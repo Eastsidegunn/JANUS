@@ -201,7 +201,9 @@ var (
 		"registry.npmjs.org", "api.anthropic.com", "github.com",
 		"proxy.golang.org", "pypi.org", "index.docker.io", "example.com",
 	}
-	fsPool = []string{"/workspace", "/workspace/src", "/tmp/scratch", "/data", "/workspace/docs"}
+	extensionPolicyPool = []string{"mcp-fs", "mcp-git", "lint@registry.example", "fmt@tools.example"}
+	registryPolicyPool  = []string{"registry.example", "tools.example", "registry.npmjs.org"}
+	fsPool              = []string{"/workspace", "/workspace/src", "/tmp/scratch", "/data", "/workspace/docs"}
 )
 
 func genProfile(r *rand.Rand) Profile {
@@ -220,9 +222,11 @@ func genProfile(r *rand.Rand) Profile {
 		approval = policy.ApprovalAuto
 	}
 	return Profile{
-		ID:      fmt.Sprintf("p%d", r.Intn(1000)),
-		FSScope: pick(fsPool),
-		Egress:  pick(egressPool),
+		ID:                fmt.Sprintf("p%d", r.Intn(1000)),
+		FSScope:           pick(fsPool),
+		Egress:            pick(egressPool),
+		AllowedExtensions: pick(extensionPolicyPool),
+		AllowedRegistries: pick(registryPolicyPool),
 		Budget: gen.Budget{
 			Tokens:   budgets[r.Intn(len(budgets))],
 			TimeMs:   budgets[r.Intn(len(budgets))],
