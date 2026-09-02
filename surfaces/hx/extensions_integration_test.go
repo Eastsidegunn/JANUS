@@ -149,6 +149,7 @@ func TestExtensionsIntegration(t *testing.T) {
 	if _, err := badProv.ProvisionWithProfile(ctx, profile, []gen.Extension{ext}); !errors.Is(err, localworld.ErrProvisioning) {
 		t.Fatalf("tampered digest accepted: %v", err)
 	}
+	tamper = false
 	// 6: policy denial occurs before any registry/runtime side effect.
 	denied, _ := policy.Evaluate(policy.Profile{AllowedExtensions: nil, AllowedRegistries: nil, FSScope: []string{root}, Budget: gen.Budget{MaxDepth: 2}}, policy.SpawnRequest{Workspace: root, Extensions: []gen.Extension{ext}, Depth: 0})
 	if len(denied.Extensions) != 0 {
@@ -162,7 +163,12 @@ func TestExtensionsIntegration(t *testing.T) {
 	if _, err := cache.Get(ctx, digest); !errors.Is(err, localworld.ErrCacheCorrupt) {
 		t.Fatalf("corrupt cache accepted: %v", err)
 	}
-	_ = bundle
+	// The same real bundle is mounted read-only into the execution world. The
+	// existing T10/T11 container gate then proves runtime registry hostname and
+	// IP attempts are denied, explicit egress is allowed/audited, and metadata
+	// carries the resolved extension set.
+	artifacts := buildIntegrationArtifacts(t, ctx)
+	runNormalIntegration(t, ctx, artifacts, bundle)
 }
 
 func buildProvisionerImage(t *testing.T, ctx context.Context) string {

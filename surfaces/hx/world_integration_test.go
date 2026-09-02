@@ -1,4 +1,4 @@
-//go:build worldintegration
+//go:build worldintegration || extensionsintegration
 
 package main
 
@@ -287,7 +287,7 @@ func buildScratchImage(t *testing.T, ctx context.Context, dir, name, binary, des
 	return repository, digest
 }
 
-func runNormalIntegration(t *testing.T, parent context.Context, artifacts integrationArtifacts) {
+func runNormalIntegration(t *testing.T, parent context.Context, artifacts integrationArtifacts, bundles ...world.ExtensionBundle) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(parent, 4*time.Minute)
 	defer cancel()
@@ -326,6 +326,12 @@ func runNormalIntegration(t *testing.T, parent context.Context, artifacts integr
 		"direct_address": "1.1.1.1:80", "flood_count": integrationFloodCount, "secret": "integration-secret-must-not-appear",
 	})
 	spawnSpec := world.NewSpawnSpec(effective, world.NewImageReference(artifacts.agentRepository, artifacts.agentDigest), []string{"integration"}, 0, traceID, childSpan, world.AgentIdentity{UID: 1000, GID: 1000}, nil)
+	if len(bundles) > 1 {
+		t.Fatalf("extension bundle 인자 중복")
+	}
+	if len(bundles) == 1 {
+		spawnSpec = spawnSpec.WithExtensionBundle(bundles[0])
+	}
 	decider := &allowOnceDecider{}
 	adapterHashBefore := fileSHA256(t, artifacts.adapter)
 	active, err := startProductionWorld(ctx, worldLaunch{
