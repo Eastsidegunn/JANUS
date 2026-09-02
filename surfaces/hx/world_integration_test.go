@@ -316,6 +316,9 @@ func runNormalIntegration(t *testing.T, parent context.Context, artifacts integr
 		t.Fatal(err)
 	}
 	backend := newIntegrationBackend(t, stateRoot, artifacts)
+	if len(bundles) == 1 {
+		bundles[0] = copyIntegrationBundle(t, bundles[0], stateRoot)
+	}
 	budget := gen.Budget{Tokens: 1_000_000, TimeMs: 240_000, MaxDepth: 2}
 	effective := world.NewEffectivePolicy(policy.SandboxConfig{
 		ProfileID: "world-integration", Workspace: lower, FSScope: []string{lower},
@@ -382,6 +385,32 @@ func runNormalIntegration(t *testing.T, parent context.Context, artifacts integr
 		t.Fatal(effectErr)
 	}
 	assertEgressEffects(t, gotEffects)
+}
+
+func copyIntegrationBundle(t *testing.T, bundle world.ExtensionBundle, stateRoot string) world.ExtensionBundle {
+	t.Helper()
+	dst := filepath.Join(stateRoot, "provisioned-bundle")
+	if err := filepath.Walk(bundle.Path(), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(bundle.Path(), path)
+		if err != nil {
+			return err
+		}
+		out := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(out, info.Mode().Perm())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(out, data, info.Mode().Perm())
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return world.NewExtensionBundle(dst, bundle.Digest(), bundle.Extensions())
 }
 
 func assertAuditClassification(t *testing.T, records []gen.EventRecord, childSpan string) {
