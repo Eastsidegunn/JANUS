@@ -448,6 +448,13 @@ type approvalProcessRun struct {
 }
 
 func runApprovalFixtureProcess(t *testing.T, bins adapterBinaries, decision gen.ApprovalResponsePayloadDecision, duplicate, stop bool) approvalProcessRun {
+	return runApprovalFixtureProcessWithOptions(t, bins, decision, duplicate, stop, nil, nil)
+}
+
+// runApprovalFixtureProcessWithOptions keeps the approval request pending while
+// a test-controlled native-output gate establishes one side of the stop race.
+// The fixture itself remains the sole source of native stream-json lines.
+func runApprovalFixtureProcessWithOptions(t *testing.T, bins adapterBinaries, decision gen.ApprovalResponsePayloadDecision, duplicate, stop bool, extraEnv []string, beforeStop func() error) approvalProcessRun {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -465,6 +472,7 @@ func runApprovalFixtureProcess(t *testing.T, bins adapterBinaries, decision gen.
 		"HX_CLAUDE_HOOK_INPUT="+string(hookRaw),
 		"HX_CLAUDE_HOOK_OUT="+hookOut,
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -521,6 +529,11 @@ func runApprovalFixtureProcess(t *testing.T, bins adapterBinaries, decision gen.
 			t.Fatalf("approval raw mismatch err=%v\ngot=%q\nwant=%q", err, decodedRaw, hookRaw)
 		}
 		if stop {
+			if beforeStop != nil {
+				if err := beforeStop(); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if _, err := stdin.Write(stopCommandLine(t)); err != nil {
 				t.Fatal(err)
 			}
@@ -598,10 +611,8 @@ func TestApprovalResponseCorrelationViolations(t *testing.T) {
 	})
 }
 
-func TestStopDeniesPendingHookBeforeNativeTermination(t *testing.T) {
-	bins := buildAdapterBinaries(t)
-	run := runApprovalFixtureProcess(t, bins, gen.ApprovalResponsePayloadDecisionDeny, false, true)
-	t.Logf("stop trace: %s", strings.Join(run.trace, " -> "))
+func assertStoppedApprovalRun(t *testing.T, run approvalProcessRun, result string, nativeRaw bool) {
+	t.Helper()
 	if run.err != nil {
 		t.Fatalf("stop exit: %v\n%s", run.err, run.stderr)
 	}
@@ -609,8 +620,69 @@ func TestStopDeniesPendingHookBeforeNativeTermination(t *testing.T) {
 	if !ok || specific["permissionDecision"] != "deny" {
 		t.Fatalf("pending hook did not receive deny: %v", run.hookOutput)
 	}
-	assertLastDone(t, run.events, gen.DonePayloadStatusStopped,
-		"(결과 없음: subtype=missing_result, terminal_reason=abnormal_exit)", "")
+	approvalIndex, stopIndex, doneIndex := -1, -1, -1
+	for i, item := range run.trace {
+		switch {
+		case item == "event:subagent/approval_request":
+			approvalIndex = i
+		case item == "stop-sent":
+			stopIndex = i
+		case item == "event:subagent/done":
+			doneIndex = i
+		}
+	}
+	if approvalIndex < 0 || stopIndex <= approvalIndex || doneIndex <= stopIndex {
+		t.Fatalf("stop/deny/native order invalid: %s", strings.Join(run.trace, " -> "))
+	}
+	if doneIndex != len(run.trace)-2 { // the following trace item is done:<status>:<result>
+		t.Fatalf("done was not terminal in trace: %s", strings.Join(run.trace, " -> "))
+	}
+	hasRaw := len(run.events) > 0 && run.events[len(run.events)-1].Raw != ""
+	if hasRaw != nativeRaw {
+		t.Fatalf("done raw presence=%v want native=%v", hasRaw, nativeRaw)
+	}
+	var last gen.Event
+	if len(run.events) > 0 {
+		last = run.events[len(run.events)-1]
+	}
+	assertLastDone(t, []gen.Event{last}, gen.DonePayloadStatusStopped, result, last.Raw)
+}
+
+func waitForFile(t *testing.T, path string) error {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return fmt.Errorf("marker %q 대기 timeout", path)
+}
+
+func TestStopDeniesPendingHookBeforeNativeTerminationKillFirst(t *testing.T) {
+	bins := buildAdapterBinaries(t)
+	// The synchronous hook remains pending; after deny, fakeclaude is held
+	// before replaying the remaining fixture lines, so native kill wins.
+	gate := filepath.Join(t.TempDir(), "release-after-hook")
+	run := runApprovalFixtureProcessWithOptions(t, bins, gen.ApprovalResponsePayloadDecisionDeny, false, true,
+		[]string{"HX_CLAUDE_HOLD_AFTER_HOOK=" + gate}, nil)
+	t.Logf("stop trace: %s", strings.Join(run.trace, " -> "))
+	assertStoppedApprovalRun(t, run,
+		"(결과 없음: subtype=missing_result, terminal_reason=abnormal_exit)", false)
+}
+
+func TestStopDeniesPendingHookBeforeNativeTerminationOutputFirst(t *testing.T) {
+	bins := buildAdapterBinaries(t)
+	marker := filepath.Join(t.TempDir(), "result-ready")
+	// The hook is asynchronous and remains pending while the fixture's result
+	// is replayed. The marker lets the test send stop only after native output
+	// has won the race, yielding the other contract-valid result.
+	run := runApprovalFixtureProcessWithOptions(t, bins, gen.ApprovalResponsePayloadDecisionDeny, false, true,
+		[]string{"HX_CLAUDE_HOOK_ASYNC=1", "HX_CLAUDE_RESULT_READY=" + marker},
+		func() error { return waitForFile(t, marker) })
+	t.Logf("stop trace: %s", strings.Join(run.trace, " -> "))
+	assertStoppedApprovalRun(t, run, "2", true)
 }
 
 func TestContextCancellationCleansPendingHookViaProcessDone(t *testing.T) {
