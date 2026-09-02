@@ -421,7 +421,13 @@ func (b *processBroker) handleControl(conn net.Conn, decoder *processwire.Decode
 			// can be a consequence of an output-side backpressure failure; without
 			// this marker the integration gate cannot distinguish the initiating
 			// stage from the peer's final disconnect.
-			b.fail(fmt.Errorf("control read: %w (%s)", err, b.streamStageDiagnostic(true)))
+			b.mu.Lock()
+			started, waitRequested, waitAcked := b.started, b.waitRequested, b.waitAcked
+			exitSent, streamEnded := b.exitSent, b.streamEnded
+			stopReason, waitResult := b.stopReason, b.waitResult
+			b.mu.Unlock()
+			b.fail(fmt.Errorf("control read: %w (%s started=%t wait_requested=%t wait_acked=%t exit_sent=%t stream_ended=%t stop=%t wait_result=%t)",
+				err, b.streamStageDiagnostic(true), started, waitRequested, waitAcked, exitSent, streamEnded, stopReason != "", waitResult != nil))
 			return
 		}
 		if frame.Stream != processwire.StreamControl {
