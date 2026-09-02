@@ -156,6 +156,7 @@ func TestExtensionsIntegration(t *testing.T) {
 	if bundle.IsZero() || len(bundle.Extensions()) != 1 || bundle.Extensions()[0].ArtifactDigest != digest {
 		t.Fatalf("provision metadata=%+v", bundle.Extensions())
 	}
+	assertProvisionerGoneBeforeExecution(t, ctx, image)
 	// 2: bytes tampering is fail-closed and leaves no second bundle.
 	tamper = true
 	badRoot := filepath.Join(root, "bad")
@@ -187,6 +188,17 @@ func TestExtensionsIntegration(t *testing.T) {
 	// carries the resolved extension set.
 	artifacts := buildIntegrationArtifacts(t, ctx)
 	runNormalIntegration(t, ctx, artifacts, bundle)
+}
+
+func assertProvisionerGoneBeforeExecution(t *testing.T, ctx context.Context, image string) {
+	t.Helper()
+	out, err := exec.CommandContext(ctx, "podman", "ps", "-a", "--filter", "ancestor="+image, "--format", "{{.ID}}").Output()
+	if err != nil {
+		t.Fatalf("provisioner 잔존 확인 실패: %v", err)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("실행 world 시작 전에 provisioning container 잔존: %s", strings.TrimSpace(string(out)))
+	}
 }
 
 func buildProvisionerImage(t *testing.T, ctx context.Context) string {
