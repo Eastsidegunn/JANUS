@@ -88,7 +88,8 @@ func startProductionWorld(ctx context.Context, launch worldLaunch) (_ *activeWor
 			Tokens: launch.Budget.Tokens, TimeMs: launch.Budget.TimeMs, MaxDepth: launch.Budget.MaxDepth,
 		},
 		WorldBackend: metadata.Backend, ProfileID: &profileID, ImageDigest: &imageDigest,
-		Mounts: metadata.Mounts,
+		Mounts:     metadata.Mounts,
+		Extensions: metadata.Extensions,
 	})
 	if err != nil {
 		return nil, err
