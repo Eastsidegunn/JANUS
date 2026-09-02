@@ -97,6 +97,24 @@ T9 smoke와 같은 [H] 실측을 수행한다.
 장기 자격증명이므로, "Claude Code 제외" 선택은 문제를 옮길 뿐 없애지
 않는다.
 
+**2026-09-02 실측 결과 — (i)·(ii) 모두 성립. T15 착수 조건 충족.**
+
+(i) [H] 로컬, claude 2.1.252. 차등 대조 설계: 격리 config에서 Keychain의
+단기 access token을 주입한 B는 성공, 마지막 문자를 변조한 C는
+`401 OAuth access token is invalid`로 즉시 실패. 주입한 env 토큰이
+소비되고 우선하며, 실패 시 Keychain·주변 env로 조용히 폴백하지 않는다 —
+주입 자격증명이 유일 자격증명으로 동작한다. (초기 대조군 A의 성공은
+사용자 셸의 주변 `CLAUDE_CODE_OAUTH_TOKEN` 때문으로 판명 — 버전 변화
+가설은 불필요했고 철회한다. 실험은 변조-토큰 차등 대조로 재설계했다.)
+
+(ii) CI run 33536620006. `node:22-slim` 컨테이너에서 claude 2.1.252가
+기동해 "Not logged in · Please run /login"에 도달. 자격증명·API 호출 0.
+
+잔여(T15 설계에서 다룰 것): access token은 스코프 축소가 없다(계정 전체) —
+FR-SBX-04의 "스코프를 좁힌"은 미충족이며 명세 소유자 판단 항목으로 남는다.
+토큰 만료(수 시간)와 spawn 예산의 상호작용, 만료 시 done(error)로의
+관측 가능한 실패 경로도 T15 설계 대상이다.
+
 ## 7. 즉시 진행
 
 1. `process broker` + `Open → spawn ACK → Start` 분리 재제안 (모든 선택지에서 필요)
