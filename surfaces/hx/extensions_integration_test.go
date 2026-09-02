@@ -172,6 +172,9 @@ func TestExtensionsIntegration(t *testing.T) {
 	}
 	// 7: cache hits are revalidated; corruption is never a successful hit.
 	cachePath := filepath.Join(root, "cache", "sha256", strings.TrimPrefix(digest, "sha256:"))
+	if err := os.Chmod(cachePath, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(cachePath, []byte("corrupt"), 0o400); err != nil {
 		t.Fatal(err)
 	}
