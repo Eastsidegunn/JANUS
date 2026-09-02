@@ -37,6 +37,37 @@ func main() {
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	first := true
 	hookRan := false
+	var hookDone chan error
+	runHook := func() error {
+		raw := []byte(os.Getenv("HX_CLAUDE_HOOK_INPUT"))
+		if len(raw) == 0 {
+			raw = []byte(`{"hook_event_name":"PreToolUse","tool_use_id":"call-1","tool_name":"Bash","tool_input":{"command":"true"}}`)
+		}
+		cmd := exec.Command("hxapprove")
+		cmd.Env = os.Environ()
+		cmd.Stdin = bytes.NewReader(raw)
+		var stdout, stderr bytes.Buffer
+		var hookFile *os.File
+		if path := os.Getenv("HX_CLAUDE_HOOK_OUT"); path != "" {
+			var err error
+			hookFile, err = os.Create(path)
+			if err != nil {
+				return fmt.Errorf("hook output: %w", err)
+			}
+			cmd.Stdout = hookFile
+		} else {
+			cmd.Stdout = &stdout
+		}
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if hookFile != nil {
+			_ = hookFile.Close()
+		}
+		if err != nil {
+			return fmt.Errorf("hook: %w: %s", err, stderr.String())
+		}
+		return nil
+	}
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if first && os.Getenv("HX_CLAUDE_SKIP_FIRST") == "1" {
@@ -54,6 +85,15 @@ func main() {
 		if _, err := os.Stdout.Write(append(append([]byte(nil), line...), '\n')); err != nil {
 			os.Exit(2)
 		}
+		var header struct {
+			Type string `json:"type"`
+		}
+		if path := os.Getenv("HX_CLAUDE_RESULT_READY"); path != "" && json.Unmarshal(line, &header) == nil && header.Type == "result" {
+			if err := os.WriteFile(path, []byte("ready\n"), 0o600); err != nil {
+				fmt.Fprintln(os.Stderr, "fakeclaude: result marker:", err)
+				os.Exit(2)
+			}
+		}
 		if first && os.Getenv("HX_CLAUDE_DUPLICATE_FIRST") == "1" {
 			if _, err := os.Stdout.Write(append(append([]byte(nil), line...), '\n')); err != nil {
 				os.Exit(2)
@@ -62,32 +102,20 @@ func main() {
 		first = false
 		if !hookRan && os.Getenv("HX_CLAUDE_RUN_HOOK") == "1" {
 			hookRan = true
-			raw := []byte(os.Getenv("HX_CLAUDE_HOOK_INPUT"))
-			if len(raw) == 0 {
-				raw = []byte(`{"hook_event_name":"PreToolUse","tool_use_id":"call-1","tool_name":"Bash","tool_input":{"command":"true"}}`)
-			}
-			cmd := exec.Command("hxapprove")
-			cmd.Env = os.Environ()
-			cmd.Stdin = bytes.NewReader(raw)
-			var stdout, stderr bytes.Buffer
-			var hookFile *os.File
-			if path := os.Getenv("HX_CLAUDE_HOOK_OUT"); path != "" {
-				hookFile, err = os.Create(path)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "fakeclaude: hook output:", err)
-					os.Exit(3)
-				}
-				cmd.Stdout = hookFile
-			} else {
-				cmd.Stdout = &stdout
-			}
-			cmd.Stderr = &stderr
-			if err := cmd.Run(); err != nil {
-				fmt.Fprintln(os.Stderr, "fakeclaude: hook:", err, stderr.String())
+			if os.Getenv("HX_CLAUDE_HOOK_ASYNC") == "1" {
+				hookDone = make(chan error, 1)
+				go func() { hookDone <- runHook() }()
+			} else if err := runHook(); err != nil {
+				fmt.Fprintln(os.Stderr, "fakeclaude:", err)
 				os.Exit(3)
 			}
-			if hookFile != nil {
-				hookFile.Close()
+			if path := os.Getenv("HX_CLAUDE_HOLD_AFTER_HOOK"); path != "" {
+				for {
+					if _, err := os.Stat(path); err == nil {
+						break
+					}
+					time.Sleep(time.Millisecond)
+				}
 			}
 		}
 	}
@@ -95,6 +123,12 @@ func main() {
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintln(os.Stderr, "fakeclaude:", err)
 		os.Exit(2)
+	}
+	if hookDone != nil {
+		if err := <-hookDone; err != nil {
+			fmt.Fprintln(os.Stderr, "fakeclaude:", err)
+			os.Exit(3)
+		}
 	}
 	if os.Getenv("HX_CLAUDE_HOLD") == "1" {
 		time.Sleep(30 * time.Second)
