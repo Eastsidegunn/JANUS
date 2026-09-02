@@ -417,7 +417,11 @@ func (b *processBroker) handleControl(conn net.Conn, decoder *processwire.Decode
 			if b.expectedStopControlGone(err) {
 				return
 			}
-			b.fail(fmt.Errorf("control read: %w", err))
+			// Include the active stream stage in the fatal diagnostic. Control EOF
+			// can be a consequence of an output-side backpressure failure; without
+			// this marker the integration gate cannot distinguish the initiating
+			// stage from the peer's final disconnect.
+			b.fail(fmt.Errorf("control read: %w (%s)", err, b.streamStageDiagnostic(true)))
 			return
 		}
 		if frame.Stream != processwire.StreamControl {

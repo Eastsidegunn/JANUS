@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -443,6 +444,7 @@ type approvalProcessRun struct {
 	hookRaw    []byte
 	hookOutput map[string]any
 	requestID  string
+	trace      []string
 }
 
 func runApprovalFixtureProcess(t *testing.T, bins adapterBinaries, decision gen.ApprovalResponsePayloadDecision, duplicate, stop bool) approvalProcessRun {
@@ -484,6 +486,8 @@ func runApprovalFixtureProcess(t *testing.T, bins adapterBinaries, decision gen.
 		t.Fatal(err)
 	}
 	var events []gen.Event
+	var trace []string
+	trace = append(trace, "task-sent")
 	var requestID string
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), MaxLineBytes)
@@ -497,6 +501,13 @@ func runApprovalFixtureProcess(t *testing.T, bins adapterBinaries, decision gen.
 			t.Fatal(err)
 		}
 		events = append(events, event)
+		trace = append(trace, "event:"+string(event.Kind))
+		if event.Kind == gen.EventKindSubagentDone {
+			var done gen.DonePayload
+			if err := json.Unmarshal(event.Payload, &done); err == nil {
+				trace = append(trace, fmt.Sprintf("done:%s:%q", done.Status, done.Result))
+			}
+		}
 		if event.Kind != gen.EventKindSubagentApprovalRequest {
 			continue
 		}
@@ -513,6 +524,7 @@ func runApprovalFixtureProcess(t *testing.T, bins adapterBinaries, decision gen.
 			if _, err := stdin.Write(stopCommandLine(t)); err != nil {
 				t.Fatal(err)
 			}
+			trace = append(trace, "stop-sent")
 			continue
 		}
 		response := approvalResponseLine(t, requestID, decision)
@@ -522,6 +534,7 @@ func runApprovalFixtureProcess(t *testing.T, bins adapterBinaries, decision gen.
 		if _, err := stdin.Write(response); err != nil {
 			t.Fatal(err)
 		}
+		trace = append(trace, "approval-response-sent:"+string(decision))
 	}
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
@@ -539,7 +552,7 @@ func runApprovalFixtureProcess(t *testing.T, bins adapterBinaries, decision gen.
 	}
 	return approvalProcessRun{
 		processRun: processRun{events: events, stderr: stderr.String(), err: waitErr},
-		hookRaw:    hookRaw, hookOutput: output, requestID: requestID,
+		hookRaw:    hookRaw, hookOutput: output, requestID: requestID, trace: trace,
 	}
 }
 
@@ -588,6 +601,7 @@ func TestApprovalResponseCorrelationViolations(t *testing.T) {
 func TestStopDeniesPendingHookBeforeNativeTermination(t *testing.T) {
 	bins := buildAdapterBinaries(t)
 	run := runApprovalFixtureProcess(t, bins, gen.ApprovalResponsePayloadDecisionDeny, false, true)
+	t.Logf("stop trace: %s", strings.Join(run.trace, " -> "))
 	if run.err != nil {
 		t.Fatalf("stop exit: %v\n%s", run.err, run.stderr)
 	}
