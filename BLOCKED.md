@@ -3,28 +3,23 @@
 구현을 우회하지 않고 멈춘 지점의 기록 (CLAUDE.md 작업 방식).
 해소되면 해당 항목을 지우고 태스크를 재개한다.
 
-## CI 간헐 실패 2건 (2026-09-02 — 진단 필요, T13-4 착수 전 선결)
+## CI 간헐 실패 2건 — 처분 완료 (2026-09-03)
 
-run `33542453242` (branch t13/extensions-provisioner, SHA b6aac49)가 동일
-SHA에서 attempt 1·2 실패, 3에서 성공했다. **2/3 실패율은 간헐이 아니라
-높은 확률의 경합이다.** 실패는 서로 다른 두 테스트다.
+run 33542453242 (동일 SHA 2/2 실패)의 두 실패를 다음과 같이 닫았다.
 
-1. **T9 stop 순서**: `TestStopDeniesPendingHookBeforeNativeTermination`
-   (`adapter_test.go:598`) — 마지막 이벤트가 기대와 달리 `subagent/done`.
-   fake claude 기반 단위 테스트에서도 발생 = 실 자격증명 무관한 순서 경합.
-2. **T10 broker 실물**: `TestWorldIntegration/surface-overlay-egress-approval-backpressure`
-   (`world_integration_test.go:196`) — `agent process broker: process broker
-   fatal`. fatal 사유의 단계 표식이 로그에 없음.
+1. **T9 stop 순서 — 해소.** 원인: stop 신호와 native 출력의 실제 경합에서
+   테스트가 한쪽 결과(missing_result)만 계약인 양 단정. T9 계약은
+   status=stopped 와 deny-선행만 요구한다. fake claude 에 재생 게이트를
+   넣어 경합 양방향을 각각 결정적으로 고정한 테스트 2개로 대체(약화가
+   아니라 비결정 1개 → 결정 2개). 동일 SHA 84dda940 에서 5회 연속 green
+   (run 33624178125 attempts 1–5).
+2. **T10 broker backpressure(control read: EOF) — 감시 상태.** 계측 후
+   8회 무재현. stage·lifecycle 표식이 main 에 상주하므로(PR #47) 재발 시
+   어느 브랜치에서든 원인 단계가 스스로 기록된다. **재발하면 즉시 선결로
+   승격하고, 재실행으로 덮지 않는다. stage 데이터 확보가 첫 행동이다.**
 
-T10 lifecycle-stop 선례가 그대로 적용된다: "간헐"로 보였던 것이 전부 실제
-순서 결함이었다(streamDone 순환 대기, ExitObserved ACK 추월 2건). stop/승인
-경로의 순서 경합이 이 프로젝트에서 결함이 가장 많았던 광맥이다.
-
-**T13-4보다 먼저 진단한다.** 신뢰 불가한 게이트 위에 새 게이트를 얹으면
-red가 새 코드 탓인지 기존 플레이크인지 구분할 수 없다.
-
-해소 조건: 두 실패의 재현·원인 특정(추측 금지 — 단계 표식·계측), 수정 후
-동일 SHA 5회 연속 green. 타임아웃 연장·게이트 약화·재실행-덮기 금지.
+T13-4 선결 근거였던 "red 원인 귀속 불가"는 계측 상주로 해소됐다.
+**T13-4 착수 가능.**
 
 ## T10 — 차단 해소 (2026-08-20)
 
