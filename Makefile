@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: lint test smoke fixtures codegen codegen-drift world-integration ci ci-linux
+.PHONY: lint test smoke fixtures codegen codegen-drift world-integration extensions-integration ci ci-linux
 
 codegen:
 	$(GO) run ./tools/schemagen -out contracts/gen contracts/events.schema.json:EventRecord contracts/wire.schema.json
@@ -63,7 +63,16 @@ world-integration:
 	@command -v podman >/dev/null || { echo "world-integration: podman 없음, skip 금지"; exit 1; }
 	$(GO) test -tags worldintegration -count=1 -timeout=9m ./surfaces/hx -run '^TestWorldIntegration$$'
 
+# T13 §7: real local artifact HTTP fetch + rootless Podman provisioning gate.
+# Linux/rootless/native-overlay/Podman prerequisites are failures, never skips.
+extensions-integration:
+	@if [ "$$($(GO) env GOOS)" != "linux" ]; then \
+		echo "extensions-integration은 Linux 실물 게이트다 — 현재 $$($(GO) env GOOS), skip 금지"; exit 1; \
+	fi
+	@command -v podman >/dev/null || { echo "extensions-integration: podman 없음, skip 금지"; exit 1; }
+	$(GO) test -tags extensionsintegration -count=1 -timeout=9m ./surfaces/hx -run '^TestExtensionsIntegration$$'
+
 ci: lint test smoke fixtures codegen-drift
 
 # GitHub ubuntu runner는 일반 CI와 T10 실물 게이트를 모두 통과해야 한다.
-ci-linux: ci world-integration
+ci-linux: ci world-integration extensions-integration
