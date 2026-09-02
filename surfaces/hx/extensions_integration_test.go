@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -79,7 +80,21 @@ func TestExtensionsIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(info), `"rootless":true`) || !strings.Contains(string(info), `"graphDriverName":"overlay"`) || !strings.Contains(string(info), `"Native Overlay Diff":"true"`) {
+	var pi struct {
+		Host struct {
+			Security struct {
+				Rootless bool `json:"rootless"`
+			} `json:"security"`
+		} `json:"host"`
+		Store struct {
+			GraphDriverName string            `json:"graphDriverName"`
+			GraphStatus     map[string]string `json:"graphStatus"`
+		} `json:"store"`
+	}
+	if err := json.Unmarshal(info, &pi); err != nil {
+		t.Fatalf("podman info JSON: %v", err)
+	}
+	if !pi.Host.Security.Rootless || pi.Store.GraphDriverName != "overlay" || pi.Store.GraphStatus["Native Overlay Diff"] != "true" {
 		t.Fatalf("rootless/native-overlay 전제 불충족: %s", info)
 	}
 
