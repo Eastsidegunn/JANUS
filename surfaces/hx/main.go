@@ -2,6 +2,7 @@
 //
 //	hx run    --session <db> --adapter <실행파일> [--workspace <경로>] <instruction>
 //	hx replay --session <db> [--to <seq>]
+//	hx dump-config --profile <file> [--overlay <file> ...]
 //
 // FR-CLI-06: 이벤트는 stdout NDJSON, 진단은 stderr, 파이프라인 전제.
 package main
@@ -28,7 +29,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "사용법: hx <run|replay> …")
+		fmt.Fprintln(os.Stderr, "사용법: hx <run|replay|audit|dump-config> …")
 		os.Exit(2)
 	}
 	var err error
@@ -39,6 +40,8 @@ func main() {
 		err = replayCmd(os.Args[2:])
 	case "audit":
 		err = auditCmd(os.Args[2:])
+	case "dump-config":
+		err = dumpConfigCmd(os.Args[2:])
 	default:
 		err = fmt.Errorf("미지의 하위 명령 %q", os.Args[1])
 	}
