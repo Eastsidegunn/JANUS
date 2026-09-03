@@ -1,0 +1,120 @@
+{
+  "fixture": "04-edit-file.ndjson",
+  "events": [
+    {
+      "kind": "subagent/ready",
+      "payload": {
+        "grade": "observable",
+        "native_session_id": "01a0137b-a7cb-7ae3-9b11-d358db871e14"
+      },
+      "raw_b64": "eyJ0eXBlIjoidGhyZWFkLnN0YXJ0ZWQiLCJ0aHJlYWRfaWQiOiIwMWEwMTM3Yi1hN2NiLTdhZTMtOWIxMS1kMzU4ZGI4NzFlMTQifQ=="
+    },
+    {
+      "kind": "subagent/message",
+      "payload": {
+        "text": "먼저 `hello.txt`의 현재 내용을 확인한 다음, `apply_patch`만 사용해 해당 파일을 수정하겠습니다."
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8wIiwidHlwZSI6ImFnZW50X21lc3NhZ2UiLCJ0ZXh0Ijoi66i87KCAIGBoZWxsby50eHRg7J2YIO2YhOyerCDrgrTsmqnsnYQg7ZmV7J247ZWcIOuLpOydjCwgYGFwcGx5X3BhdGNoYOunjCDsgqzsmqntlbQg7ZW064u5IO2MjOydvOydhCDsiJjsoJXtlZjqsqDsirXri4jri6QuIn19"
+    },
+    {
+      "kind": "subagent/tool_call",
+      "payload": {
+        "args": {
+          "command": "/bin/zsh -lc \"pwd \u0026\u0026 rg --files -g 'hello.txt' -g '\"'!**/.git/**'\"' \u0026\u0026 printf '%s\\\\n' 'CONTENT:' \u0026\u0026 command cat hello.txt\""
+        },
+        "call_id": "item_1",
+        "name": "command_execution"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5zdGFydGVkIiwiaXRlbSI6eyJpZCI6Iml0ZW1fMSIsInR5cGUiOiJjb21tYW5kX2V4ZWN1dGlvbiIsImNvbW1hbmQiOiIvYmluL3pzaCAtbGMgXCJwd2QgJiYgcmcgLS1maWxlcyAtZyAnaGVsbG8udHh0JyAtZyAnXCInISoqLy5naXQvKionXCInICYmIHByaW50ZiAnJXNcXFxcbicgJ0NPTlRFTlQ6JyAmJiBjb21tYW5kIGNhdCBoZWxsby50eHRcIiIsImFnZ3JlZ2F0ZWRfb3V0cHV0IjoiIiwiZXhpdF9jb2RlIjpudWxsLCJzdGF0dXMiOiJpbl9wcm9ncmVzcyJ9fQ=="
+    },
+    {
+      "kind": "subagent/tool_result",
+      "payload": {
+        "call_id": "item_1",
+        "output": {
+          "value": "/private/tmp/t8-x04.ROB7vr\nhello.txt\nCONTENT:\nhello\n"
+        },
+        "status": "ok"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8xIiwidHlwZSI6ImNvbW1hbmRfZXhlY3V0aW9uIiwiY29tbWFuZCI6Ii9iaW4venNoIC1sYyBcInB3ZCAmJiByZyAtLWZpbGVzIC1nICdoZWxsby50eHQnIC1nICdcIichKiovLmdpdC8qKidcIicgJiYgcHJpbnRmICclc1xcXFxuJyAnQ09OVEVOVDonICYmIGNvbW1hbmQgY2F0IGhlbGxvLnR4dFwiIiwiYWdncmVnYXRlZF9vdXRwdXQiOiIvcHJpdmF0ZS90bXAvdDgteDA0LlJPQjd2clxuaGVsbG8udHh0XG5DT05URU5UOlxuaGVsbG9cbiIsImV4aXRfY29kZSI6MCwic3RhdHVzIjoiY29tcGxldGVkIn19"
+    },
+    {
+      "kind": "subagent/tool_call",
+      "payload": {
+        "args": {
+          "changes": [
+            {
+              "path": "/tmp/t8-x04.ROB7vr/hello.txt",
+              "kind": "update"
+            }
+          ]
+        },
+        "call_id": "item_2",
+        "name": "file_change"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5zdGFydGVkIiwiaXRlbSI6eyJpZCI6Iml0ZW1fMiIsInR5cGUiOiJmaWxlX2NoYW5nZSIsImNoYW5nZXMiOlt7InBhdGgiOiIvdG1wL3Q4LXgwNC5ST0I3dnIvaGVsbG8udHh0Iiwia2luZCI6InVwZGF0ZSJ9XSwic3RhdHVzIjoiaW5fcHJvZ3Jlc3MifX0="
+    },
+    {
+      "kind": "subagent/tool_result",
+      "payload": {
+        "call_id": "item_2",
+        "output": {
+          "changes": [
+            {
+              "path": "/tmp/t8-x04.ROB7vr/hello.txt",
+              "kind": "update"
+            }
+          ]
+        },
+        "status": "ok"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8yIiwidHlwZSI6ImZpbGVfY2hhbmdlIiwiY2hhbmdlcyI6W3sicGF0aCI6Ii90bXAvdDgteDA0LlJPQjd2ci9oZWxsby50eHQiLCJraW5kIjoidXBkYXRlIn1dLCJzdGF0dXMiOiJjb21wbGV0ZWQifX0="
+    },
+    {
+      "kind": "subagent/tool_call",
+      "payload": {
+        "args": {
+          "command": "/bin/zsh -lc 'command cat hello.txt \u0026\u0026 git status --short -- hello.txt'"
+        },
+        "call_id": "item_3",
+        "name": "command_execution"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5zdGFydGVkIiwiaXRlbSI6eyJpZCI6Iml0ZW1fMyIsInR5cGUiOiJjb21tYW5kX2V4ZWN1dGlvbiIsImNvbW1hbmQiOiIvYmluL3pzaCAtbGMgJ2NvbW1hbmQgY2F0IGhlbGxvLnR4dCAmJiBnaXQgc3RhdHVzIC0tc2hvcnQgLS0gaGVsbG8udHh0JyIsImFnZ3JlZ2F0ZWRfb3V0cHV0IjoiIiwiZXhpdF9jb2RlIjpudWxsLCJzdGF0dXMiOiJpbl9wcm9ncmVzcyJ9fQ=="
+    },
+    {
+      "kind": "subagent/tool_result",
+      "payload": {
+        "call_id": "item_3",
+        "error": "world\nfatal: not a git repository (or any of the parent directories): .git\n",
+        "status": "error"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8zIiwidHlwZSI6ImNvbW1hbmRfZXhlY3V0aW9uIiwiY29tbWFuZCI6Ii9iaW4venNoIC1sYyAnY29tbWFuZCBjYXQgaGVsbG8udHh0ICYmIGdpdCBzdGF0dXMgLS1zaG9ydCAtLSBoZWxsby50eHQnIiwiYWdncmVnYXRlZF9vdXRwdXQiOiJ3b3JsZFxuZmF0YWw6IG5vdCBhIGdpdCByZXBvc2l0b3J5IChvciBhbnkgb2YgdGhlIHBhcmVudCBkaXJlY3Rvcmllcyk6IC5naXRcbiIsImV4aXRfY29kZSI6MTI4LCJzdGF0dXMiOiJmYWlsZWQifX0="
+    },
+    {
+      "kind": "subagent/message",
+      "payload": {
+        "text": "`hello.txt`의 내용을 `apply_patch`로 `world`로 변경했습니다. 다른 파일은 수정하지 않았습니다."
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV80IiwidHlwZSI6ImFnZW50X21lc3NhZ2UiLCJ0ZXh0IjoiYGhlbGxvLnR4dGDsnZgg64K07Jqp7J2EIGBhcHBseV9wYXRjaGDroZwgYHdvcmxkYOuhnCDrs4Dqsr3tlojsirXri4jri6QuIOuLpOuluCDtjIzsnbzsnYAg7IiY7KCV7ZWY7KeAIOyViuyVmOyKteuLiOuLpC4ifX0="
+    },
+    {
+      "kind": "subagent/usage",
+      "payload": {
+        "input_tokens": 54612,
+        "output_tokens": 317
+      },
+      "raw_b64": "eyJ0eXBlIjoidHVybi5jb21wbGV0ZWQiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjU0NjEyLCJjYWNoZWRfaW5wdXRfdG9rZW5zIjo0NjA4MCwiY2FjaGVfd3JpdGVfaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjozMTcsInJlYXNvbmluZ19vdXRwdXRfdG9rZW5zIjo0MX19"
+    },
+    {
+      "kind": "subagent/done",
+      "payload": {
+        "result": "`hello.txt`의 내용을 `apply_patch`로 `world`로 변경했습니다. 다른 파일은 수정하지 않았습니다.",
+        "status": "ok"
+      },
+      "raw_b64": "eyJ0eXBlIjoidHVybi5jb21wbGV0ZWQiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjU0NjEyLCJjYWNoZWRfaW5wdXRfdG9rZW5zIjo0NjA4MCwiY2FjaGVfd3JpdGVfaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjozMTcsInJlYXNvbmluZ19vdXRwdXRfdG9rZW5zIjo0MX19"
+    }
+  ],
+  "unmapped_native_lines": [
+    "turn.started → ignored:turn.started"
+  ]
+}

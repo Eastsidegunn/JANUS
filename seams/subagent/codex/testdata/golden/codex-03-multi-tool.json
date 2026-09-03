@@ -1,0 +1,90 @@
+{
+  "fixture": "03-multi-tool.ndjson",
+  "events": [
+    {
+      "kind": "subagent/ready",
+      "payload": {
+        "grade": "observable",
+        "native_session_id": "01a01379-a171-7413-b199-276e7fc35523"
+      },
+      "raw_b64": "eyJ0eXBlIjoidGhyZWFkLnN0YXJ0ZWQiLCJ0aHJlYWRfaWQiOiIwMWEwMTM3OS1hMTcxLTc0MTMtYjE5OS0yNzZlN2ZjMzU1MjMifQ=="
+    },
+    {
+      "kind": "subagent/message",
+      "payload": {
+        "text": "요청대로 두 개의 독립된 셸 호출로 실행하겠습니다. 먼저 파일을 만들고, 다음 호출에서 내용을 읽어 확인할게요."
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8wIiwidHlwZSI6ImFnZW50X21lc3NhZ2UiLCJ0ZXh0Ijoi7JqU7LKt64yA66GcIOuRkCDqsJzsnZgg64+F66a965CcIOyFuCDtmLjstpzroZwg7Iuk7ZaJ7ZWY6rKg7Iq164uI64ukLiDrqLzsoIAg7YyM7J287J2EIOunjOuTpOqzoCwg64uk7J2MIO2YuOy2nOyXkOyEnCDrgrTsmqnsnYQg7J297Ja0IO2ZleyduO2VoOqyjOyalC4ifX0="
+    },
+    {
+      "kind": "subagent/tool_call",
+      "payload": {
+        "args": {
+          "command": "/bin/zsh -lc \"printf '%s\n' hello \u003e hello.txt\""
+        },
+        "call_id": "item_1",
+        "name": "command_execution"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5zdGFydGVkIiwiaXRlbSI6eyJpZCI6Iml0ZW1fMSIsInR5cGUiOiJjb21tYW5kX2V4ZWN1dGlvbiIsImNvbW1hbmQiOiIvYmluL3pzaCAtbGMgXCJwcmludGYgJyVzXG4nIGhlbGxvID4gaGVsbG8udHh0XCIiLCJhZ2dyZWdhdGVkX291dHB1dCI6IiIsImV4aXRfY29kZSI6bnVsbCwic3RhdHVzIjoiaW5fcHJvZ3Jlc3MifX0="
+    },
+    {
+      "kind": "subagent/tool_result",
+      "payload": {
+        "call_id": "item_1",
+        "output": {
+          "value": ""
+        },
+        "status": "ok"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8xIiwidHlwZSI6ImNvbW1hbmRfZXhlY3V0aW9uIiwiY29tbWFuZCI6Ii9iaW4venNoIC1sYyBcInByaW50ZiAnJXNcbicgaGVsbG8gPiBoZWxsby50eHRcIiIsImFnZ3JlZ2F0ZWRfb3V0cHV0IjoiIiwiZXhpdF9jb2RlIjowLCJzdGF0dXMiOiJjb21wbGV0ZWQifX0="
+    },
+    {
+      "kind": "subagent/tool_call",
+      "payload": {
+        "args": {
+          "command": "/bin/zsh -lc 'cat hello.txt'"
+        },
+        "call_id": "item_2",
+        "name": "command_execution"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5zdGFydGVkIiwiaXRlbSI6eyJpZCI6Iml0ZW1fMiIsInR5cGUiOiJjb21tYW5kX2V4ZWN1dGlvbiIsImNvbW1hbmQiOiIvYmluL3pzaCAtbGMgJ2NhdCBoZWxsby50eHQnIiwiYWdncmVnYXRlZF9vdXRwdXQiOiIiLCJleGl0X2NvZGUiOm51bGwsInN0YXR1cyI6ImluX3Byb2dyZXNzIn19"
+    },
+    {
+      "kind": "subagent/tool_result",
+      "payload": {
+        "call_id": "item_2",
+        "output": {
+          "value": "hello\n"
+        },
+        "status": "ok"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8yIiwidHlwZSI6ImNvbW1hbmRfZXhlY3V0aW9uIiwiY29tbWFuZCI6Ii9iaW4venNoIC1sYyAnY2F0IGhlbGxvLnR4dCciLCJhZ2dyZWdhdGVkX291dHB1dCI6ImhlbGxvXG4iLCJleGl0X2NvZGUiOjAsInN0YXR1cyI6ImNvbXBsZXRlZCJ9fQ=="
+    },
+    {
+      "kind": "subagent/message",
+      "payload": {
+        "text": "두 번의 분리된 셸 명령을 실행했습니다. [hello.txt](/tmp/t8-x03.CwMJk3/hello.txt)의 내용은 `hello`로 확인됐습니다."
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8zIiwidHlwZSI6ImFnZW50X21lc3NhZ2UiLCJ0ZXh0Ijoi65GQIOuyiOydmCDrtoTrpqzrkJwg7IW4IOuqheugueydhCDsi6TtlontlojsirXri4jri6QuIFtoZWxsby50eHRdKC90bXAvdDgteDAzLkN3TUprMy9oZWxsby50eHQp7J2YIOuCtOyaqeydgCBgaGVsbG9g66GcIO2ZleyduOuQkOyKteuLiOuLpC4ifX0="
+    },
+    {
+      "kind": "subagent/usage",
+      "payload": {
+        "input_tokens": 40707,
+        "output_tokens": 208
+      },
+      "raw_b64": "eyJ0eXBlIjoidHVybi5jb21wbGV0ZWQiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjQwNzA3LCJjYWNoZWRfaW5wdXRfdG9rZW5zIjozMzAyNCwiY2FjaGVfd3JpdGVfaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjoyMDgsInJlYXNvbmluZ19vdXRwdXRfdG9rZW5zIjowfX0="
+    },
+    {
+      "kind": "subagent/done",
+      "payload": {
+        "result": "두 번의 분리된 셸 명령을 실행했습니다. [hello.txt](/tmp/t8-x03.CwMJk3/hello.txt)의 내용은 `hello`로 확인됐습니다.",
+        "status": "ok"
+      },
+      "raw_b64": "eyJ0eXBlIjoidHVybi5jb21wbGV0ZWQiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjQwNzA3LCJjYWNoZWRfaW5wdXRfdG9rZW5zIjozMzAyNCwiY2FjaGVfd3JpdGVfaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjoyMDgsInJlYXNvbmluZ19vdXRwdXRfdG9rZW5zIjowfX0="
+    }
+  ],
+  "unmapped_native_lines": [
+    "turn.started → ignored:turn.started"
+  ]
+}
