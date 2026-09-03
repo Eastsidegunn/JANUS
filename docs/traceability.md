@@ -9,6 +9,7 @@
 | §5.1 이벤트 스키마 — 유효 샘플 수용·위반 샘플 거부 | `contracts/validate/validate_test.go` (TestValidateRecordValid/Invalid) | T1 | green |
 | §5.2 와이어 프로토콜 — 방향별 검증(command/event), raw 필수, 합성 이벤트 `""` | `contracts/validate/validate_test.go` (TestValidateCommand, TestValidateEvent) | T1 | green |
 | FR-OBS-01 — OTel all-zero trace/span ID 거부 | `contracts/validate/validate_test.go` (TestValidateRecordInvalid: all-zero 케이스) | T1 | green |
+| FR-OBS-01/02 (부분) — 검증된 로그 snapshot을 원본 trace/span ID·부모 관계와 adapter/version/profile/usage/status 속성을 가진 결정적 OTel SpanData로 사영하고, noop 기본 및 export 실패를 append/replay와 격리 | `core/observe/observe_test.go` (TestProjectPreservesIDsParentAttributesAndIsDeterministic, TestProjectRejectsMissingVersionProfileAndUsageOverflow, TestExportFailureDoesNotBlockAppendOrReplayAndNilIsNoop) + `tools/boundarylint/rules_test.go` (OTel import를 core/observe로 한정) | T14-2 | green — Jaeger Linux 관통은 T14-5 잔여 |
 | codegen 산출 타입 ↔ 스키마 정합 (T1 완료 기준 a) | `contracts/validate/validate_test.go` (TestGenTypesRoundTrip) | T1 | green |
 | schemagen fail-closed·결정성·병합 규칙 | `tools/schemagen/gen_test.go` | T1 | green |
 | codegen drift 게이트 (미추적 신규 파일 포함) | `tools/schemagen/drift_test.go` + `make codegen-drift` (CI 편입) | T1 | green |

@@ -120,7 +120,9 @@ func TestCheckExternalRestrictions(t *testing.T) {
 		{ImportPath: mod + "/seams/store/sqlite/wal", Imports: []string{"modernc.org/sqlite"}},                   // 하위도 허용
 		{ImportPath: mod + "/contracts/validate", Imports: []string{"github.com/santhosh-tekuri/jsonschema/v6"}}, // 허용
 		{ImportPath: mod + "/core/policy", Imports: []string{"github.com/goccy/go-yaml"}},                        // 허용
+		{ImportPath: mod + "/core/observe", Imports: []string{"go.opentelemetry.io/otel/sdk/trace"}},             // 허용
 		{ImportPath: mod + "/core/logd", Imports: []string{"modernc.org/sqlite"}},                                // 위반
+		{ImportPath: mod + "/surfaces/hx", Imports: []string{"go.opentelemetry.io/otel/trace"}},                  // 위반
 		{ImportPath: mod + "/collector", TestImports: []string{"modernc.org/libc"}},                              // 테스트 import도 위반
 		{ImportPath: mod + "/collector", Imports: []string{"example.com/unlisted/module"}},                       // 목록 미등록 외부 모듈도 위반
 		{ImportPath: mod + "/core", Imports: []string{"github.com/santhosh-tekuri/jsonschema/v6"}},               // 위반
@@ -132,6 +134,7 @@ func TestCheckExternalRestrictions(t *testing.T) {
 		"core → github.com/santhosh-tekuri/jsonschema/v6 (외부 모듈 github.com/santhosh-tekuri/jsonschema*는 contracts/validate에서만 import 가능)",
 		"core/logd → modernc.org/sqlite (외부 모듈 modernc.org/*는 seams/store/sqlite에서만 import 가능)",
 		"surfaces/cli → github.com/goccy/go-yaml (외부 모듈 github.com/goccy/go-yaml*는 core/policy에서만 import 가능)",
+		"surfaces/hx → go.opentelemetry.io/otel/trace (외부 모듈 go.opentelemetry.io/*는 core/observe에서만 import 가능)",
 	})
 }
 
