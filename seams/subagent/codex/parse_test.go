@@ -66,6 +66,20 @@ func TestUnknownNativeEventFailsClosed(t *testing.T) {
 	}
 }
 
+func TestUnknownItemTypeFailsClosedInsideKnownEvent(t *testing.T) {
+	p := NewParser(policy.ApprovalAuto)
+	if _, err := p.ParseLine([]byte(`{"type":"thread.started","thread_id":"t1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := p.ParseLine([]byte(`{"type":"item.completed","item":{"id":"i1","type":"future_item_type","text":"must not disappear"}}`))
+	if err == nil {
+		t.Fatal("unknown item.type inside known event.type was silently accepted")
+	}
+	if !strings.Contains(err.Error(), "미지의 item type") {
+		t.Fatalf("error=%v, want explicit unknown item type diagnosis", err)
+	}
+}
+
 func TestCodexRequiresThreadStartedFirst(t *testing.T) {
 	p := NewParser(policy.ApprovalAuto)
 	if _, err := p.ParseLine([]byte(`{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"early"}}`)); err == nil {
