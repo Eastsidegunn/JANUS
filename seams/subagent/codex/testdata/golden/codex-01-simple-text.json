@@ -1,0 +1,39 @@
+{
+  "fixture": "01-simple-text.ndjson",
+  "events": [
+    {
+      "kind": "subagent/ready",
+      "payload": {
+        "grade": "observable",
+        "native_session_id": "01a01168-da53-7f00-b111-aaaa60d4fd6d"
+      },
+      "raw_b64": "eyJ0eXBlIjoidGhyZWFkLnN0YXJ0ZWQiLCJ0aHJlYWRfaWQiOiIwMWEwMTE2OC1kYTUzLTdmMDAtYjExMS1hYWFhNjBkNGZkNmQifQ=="
+    },
+    {
+      "kind": "subagent/message",
+      "payload": {
+        "text": "2"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8wIiwidHlwZSI6ImFnZW50X21lc3NhZ2UiLCJ0ZXh0IjoiMiJ9fQ=="
+    },
+    {
+      "kind": "subagent/usage",
+      "payload": {
+        "input_tokens": 13446,
+        "output_tokens": 5
+      },
+      "raw_b64": "eyJ0eXBlIjoidHVybi5jb21wbGV0ZWQiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjEzNDQ2LCJjYWNoZWRfaW5wdXRfdG9rZW5zIjo5OTg0LCJjYWNoZV93cml0ZV9pbnB1dF90b2tlbnMiOjAsIm91dHB1dF90b2tlbnMiOjUsInJlYXNvbmluZ19vdXRwdXRfdG9rZW5zIjowfX0="
+    },
+    {
+      "kind": "subagent/done",
+      "payload": {
+        "result": "2",
+        "status": "ok"
+      },
+      "raw_b64": "eyJ0eXBlIjoidHVybi5jb21wbGV0ZWQiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjEzNDQ2LCJjYWNoZWRfaW5wdXRfdG9rZW5zIjo5OTg0LCJjYWNoZV93cml0ZV9pbnB1dF90b2tlbnMiOjAsIm91dHB1dF90b2tlbnMiOjUsInJlYXNvbmluZ19vdXRwdXRfdG9rZW5zIjowfX0="
+    }
+  ],
+  "unmapped_native_lines": [
+    "turn.started → ignored:turn.started"
+  ]
+}

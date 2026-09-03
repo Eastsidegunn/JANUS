@@ -1,0 +1,42 @@
+{
+  "fixture": "08-interrupted.ndjson",
+  "events": [
+    {
+      "kind": "subagent/ready",
+      "payload": {
+        "grade": "observable",
+        "native_session_id": "01a01392-f397-7822-821b-353c930fdfeb"
+      },
+      "raw_b64": "eyJ0eXBlIjoidGhyZWFkLnN0YXJ0ZWQiLCJ0aHJlYWRfaWQiOiIwMWEwMTM5Mi1mMzk3LTc4MjItODIxYi0zNTNjOTMwZmRmZWIifQ=="
+    },
+    {
+      "kind": "subagent/message",
+      "payload": {
+        "text": "요청대로 해당 명령 하나만 포그라운드에서 실행하고 계속 기다리겠습니다."
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8wIiwidHlwZSI6ImFnZW50X21lc3NhZ2UiLCJ0ZXh0Ijoi7JqU7LKt64yA66GcIO2VtOuLuSDrqoXroLkg7ZWY64KY66eMIO2PrOq3uOudvOyatOuTnOyXkOyEnCDsi6TtlontlZjqs6Ag6rOE7IaNIOq4sOuLpOumrOqyoOyKteuLiOuLpC4ifX0="
+    },
+    {
+      "kind": "subagent/tool_call",
+      "payload": {
+        "args": {
+          "command": "/bin/zsh -lc 'tail -f /dev/null'"
+        },
+        "call_id": "item_1",
+        "name": "command_execution"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5zdGFydGVkIiwiaXRlbSI6eyJpZCI6Iml0ZW1fMSIsInR5cGUiOiJjb21tYW5kX2V4ZWN1dGlvbiIsImNvbW1hbmQiOiIvYmluL3pzaCAtbGMgJ3RhaWwgLWYgL2Rldi9udWxsJyIsImFnZ3JlZ2F0ZWRfb3V0cHV0IjoiIiwiZXhpdF9jb2RlIjpudWxsLCJzdGF0dXMiOiJpbl9wcm9ncmVzcyJ9fQ=="
+    },
+    {
+      "kind": "subagent/done",
+      "payload": {
+        "result": "(결과 없음: interrupted command_execution)",
+        "status": "stopped"
+      },
+      "raw_b64": ""
+    }
+  ],
+  "unmapped_native_lines": [
+    "turn.started → ignored:turn.started"
+  ]
+}
