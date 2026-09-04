@@ -350,6 +350,7 @@ func terminalCause(err error) string {
 		{errCommandInputClosed, "실행 중 stdin 종료"},
 		{errApprovalHandshake, "승인 handshake 실패"},
 		{errDuplicateApproval, "중복 approval_response"},
+		{errAuthenticationFailed, "Claude 인증 실패"},
 		{errTokenExpired, "token expired"},
 	} {
 		if errors.Is(err, item.target) {

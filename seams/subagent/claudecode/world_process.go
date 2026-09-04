@@ -2,11 +2,13 @@ package claudecode
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,6 +33,7 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 	defer stopExpiry()
 
 	stdoutR, stdoutW := io.Pipe()
+	var authDiagnostic bytes.Buffer
 	outputDone := make(chan error, 1)
 	go func() {
 		err := process.DrainOutput(func(frame processwire.Frame) error {
@@ -40,6 +43,13 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 				return err
 			case processwire.KindStderrData:
 				_, err := stderr.Write(frame.Payload)
+				if authDiagnostic.Len() < 64*1024 {
+					remaining := 64*1024 - authDiagnostic.Len()
+					if len(frame.Payload) > remaining {
+						frame.Payload = frame.Payload[:remaining]
+					}
+					_, _ = authDiagnostic.Write(frame.Payload)
+				}
 				return err
 			case processwire.KindStreamEnd:
 				return nil
@@ -171,6 +181,23 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 			terminalErr = fmt.Errorf("claudecode: %w: %v", errApprovalHandshake, approvalErr)
 		}
 	}
+	// Claude exits before stream-json/system-init when no credential is
+	// available. That is a recognized authentication gate, not an adapter
+	// protocol violation: publish the required terminal event without exposing
+	// stderr, response bodies, or any credential material. Other pre-ready
+	// failures retain the fail-closed no-output rule.
+	if terminalErr != nil && !readyEmitted && authenticationFailure(authDiagnostic.String()) {
+		terminalErr = errors.Join(errAuthenticationFailed, terminalErr)
+		payload, err := json.Marshal(gen.ReadyPayload{Grade: gen.ReadyPayloadGradeObservable})
+		if err != nil {
+			return err
+		}
+		if err := w.emit(gen.EventKindSubagentReady, payload, nil); err != nil {
+			return errors.Join(terminalErr, err)
+		}
+		readyEmitted = true
+		approvals.markReady()
+	}
 	if terminalErr != nil {
 		if readyEmitted {
 			if err := emitFailureDone(w, terminalErr, parser.StopRequested()); err != nil {
@@ -190,6 +217,15 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 		approvals.markReady()
 	}
 	return w.emit(doneEvent.Kind, doneEvent.Payload, doneEvent.Raw)
+}
+
+var errAuthenticationFailed = errors.New("Claude 인증 실패")
+
+func authenticationFailure(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	return strings.Contains(lower, "not logged in") ||
+		strings.Contains(lower, "please run /login") ||
+		strings.Contains(lower, "authentication failed")
 }
 
 // monitorTokenExpiry owns the runtime expiry transition without retaining the

@@ -29,6 +29,18 @@ type adapterBinaries struct {
 	approve string
 }
 
+func TestAuthenticationFailureDiagnosticIsNarrowAndCredentialFree(t *testing.T) {
+	if !authenticationFailure("Not logged in · Please run /login") {
+		t.Fatal("Claude auth gate was not recognized")
+	}
+	if authenticationFailure("network connection failed") {
+		t.Fatal("unrelated process failure was classified as auth")
+	}
+	if authenticationFailure("Bearer synthetic-token") {
+		t.Fatal("credential-bearing text must not be used as an auth diagnostic")
+	}
+}
+
 func buildAdapterBinaries(t *testing.T) adapterBinaries {
 	t.Helper()
 	dir := t.TempDir()
