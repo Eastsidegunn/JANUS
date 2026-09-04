@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: lint test smoke fixtures codegen codegen-drift world-integration extensions-integration ci ci-linux
+.PHONY: lint test smoke fixtures codegen codegen-drift world-integration extensions-integration otel-integration ci ci-linux
 
 codegen:
 	$(GO) run ./tools/schemagen -out contracts/gen contracts/events.schema.json:EventRecord contracts/wire.schema.json
@@ -72,7 +72,17 @@ extensions-integration:
 	@command -v podman >/dev/null || { echo "extensions-integration: podman 없음, skip 금지"; exit 1; }
 	$(GO) test -tags extensionsintegration -count=1 -timeout=9m ./surfaces/hx -run '^TestExtensionsIntegration$$'
 
+# T14 §8-7: real Jaeger OTLP/HTTP receiver and deterministic span assertions.
+# The image is pulled by the Linux runner and the test treats pull/readiness
+# failure as infrastructure failure, never as a skipped verification.
+otel-integration:
+	@if [ "$$($(GO) env GOOS)" != "linux" ]; then \
+		echo "otel-integration은 Linux Jaeger 실물 게이트다 — 현재 $$($(GO) env GOOS), skip 금지"; exit 1; \
+	fi
+	@command -v podman >/dev/null || { echo "otel-integration: podman 없음, skip 금지"; exit 1; }
+	$(GO) test -tags jaegerintegration -count=1 -timeout=8m ./surfaces/hx -run '^TestJaegerIntegration$$'
+
 ci: lint test smoke fixtures codegen-drift
 
 # GitHub ubuntu runner는 일반 CI와 T10 실물 게이트를 모두 통과해야 한다.
-ci-linux: ci world-integration extensions-integration
+ci-linux: ci world-integration extensions-integration otel-integration
