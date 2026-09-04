@@ -195,7 +195,11 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 	// stderr, response bodies, or any credential material. Other pre-ready
 	// failures retain the fail-closed no-output rule.
 	if terminalErr != nil && !readyEmitted && authenticationFailure(authDiagnostic.String()) {
-		terminalErr = errors.Join(errAuthenticationFailed, terminalErr)
+		// Claude's credential gate is plain text, not stream-json. The parser
+		// therefore reports a native-contract error while draining that line;
+		// authentication is the more specific observed cause and must win in the
+		// synthetic terminal event.
+		terminalErr = errAuthenticationFailed
 		payload, err := json.Marshal(gen.ReadyPayload{Grade: gen.ReadyPayloadGradeObservable})
 		if err != nil {
 			return err

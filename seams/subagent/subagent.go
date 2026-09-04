@@ -290,7 +290,15 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string) {
 	case done == nil:
 		s.doneCh <- waitResult{err: fmt.Errorf("subagent: 어댑터가 subagent/done 없이 종료함 (§5.2 위반, exit: %v)", drain.ExitErr)}
 	case drain.ExitErr != nil:
-		s.doneCh <- waitResult{err: fmt.Errorf("subagent: done 이후 비정상 종료: %w", drain.ExitErr)}
+		// A terminal error is already an explicit protocol result. An adapter
+		// may use its process exit status to mirror that failure, so do not turn
+		// a durable done{status:error} into a second protocol failure. Successful
+		// and stopped results still require a clean adapter exit.
+		if done.Status == gen.DonePayloadStatusError {
+			s.doneCh <- waitResult{done: *done}
+		} else {
+			s.doneCh <- waitResult{err: fmt.Errorf("subagent: done 이후 비정상 종료: %w", drain.ExitErr)}
+		}
 	default:
 		s.doneCh <- waitResult{done: *done}
 	}

@@ -666,6 +666,34 @@ exit 3`
 	}
 }
 
+// An adapter may report a terminal error and mirror it with a non-zero exit.
+// The durable done{error} is the protocol result; the exit status must not
+// erase it. A successful done remains covered by TestAbnormalExitAfterDonePreserved.
+func TestErrorDoneWithAbnormalExitReturnsDone(t *testing.T) {
+	script := `read line
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"error","result":"authentication failed"},"raw":""}'
+exit 1`
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1,
+		spawnSpec([]string{"/bin/sh", "-c", script}, "지시"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := sub.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("durable error done가 exit 상태로 가려짐: %v", err)
+	}
+	if done.Status != gen.DonePayloadStatusError || done.Result != "authentication failed" {
+		t.Fatalf("done=%+v", done)
+	}
+}
+
 // T7 재재리뷰 차단 1의 회귀 (1): 어댑터 본체가 정상 종료했는데 자손이
 // stdout을 쥐고 있어도 종료 관측은 EOF에 인질 잡히지 않는다 —
 // Wait는 deadline 안에 정상 결과를 반환한다.
