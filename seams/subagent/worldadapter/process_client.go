@@ -205,6 +205,12 @@ func (c *processClient) Start(ctx context.Context, taskLine []byte) error {
 	if err := c.request(ctx, processwire.KindStdinData, line); err != nil {
 		return err
 	}
+	// The world adapters use a one-shot task protocol. Closing the container's
+	// stdin after the task mirrors the legacy procgroup path and prevents a
+	// native CLI from waiting indefinitely for an irrelevant second prompt.
+	if err := c.request(ctx, processwire.KindStdinClose, nil); err != nil {
+		return err
+	}
 	return c.request(ctx, processwire.KindWait, nil)
 }
 
