@@ -122,6 +122,9 @@ func startProductionWorld(ctx context.Context, launch worldLaunch) (_ *activeWor
 	spec.Stderr = launch.AdapterStderr
 	spec.Instruction, spec.Workspace = launch.Instruction, launch.Workspace
 	spec.Budget, spec.Depth, spec.ProfileID = launch.Budget, launch.Depth, launch.ProfileID
+	if secret := launch.SpawnSpec.SecretCapability(); !secret.IsZero() {
+		spec.TokenExpiresAtUnixMs = secret.ExpiresAtUnixMs()
+	}
 	spec.Descriptor = descriptor
 	sub, spawnErr := subagent.SpawnPrepared(ctx, launch.Writer, launch.TraceID, launch.ParentSpan, childSpan, 1, spec)
 	if spawnErr != nil {

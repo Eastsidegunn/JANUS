@@ -18,6 +18,8 @@ import (
 	"github.com/Eastsidegunn/JANUS/core/policy"
 )
 
+const ClaudeOAuthTokenEnv = "CLAUDE_CODE_OAUTH_TOKEN"
+
 // Backend prepares one isolated execution world without creating or starting
 // its agent process. A future remote-microVM backend implements the same
 // contract; callers do not branch on the implementation.
@@ -278,6 +280,48 @@ type CredentialHandle struct {
 	ExpiresAtUnixMs int64
 }
 
+// SecretCapability is a host-only, non-serializable capability for one short-
+// lived credential injection. Its value may be read only by the world backend
+// at container creation; it is never part of SpawnMetadata or an event.
+type SecretCapability struct {
+	envName         string
+	value           string
+	expiresAtUnixMs int64
+}
+
+// NewSecretCapability accepts only the Claude OAuth environment name. Keeping
+// the name closed prevents callers from smuggling arbitrary host credentials
+// through the world boundary, while the value remains outside all wire types.
+func NewSecretCapability(envName, value string, expiresAtUnixMs int64) (SecretCapability, error) {
+	if envName != ClaudeOAuthTokenEnv {
+		return SecretCapability{}, fmt.Errorf("world: secret env가 허용된 Claude OAuth 이름이 아님")
+	}
+	if value == "" {
+		return SecretCapability{}, fmt.Errorf("world: secret 값이 비어 있음")
+	}
+	if expiresAtUnixMs <= 0 {
+		return SecretCapability{}, fmt.Errorf("world: secret 만료 시각이 유효하지 않음")
+	}
+	return SecretCapability{envName: envName, value: value, expiresAtUnixMs: expiresAtUnixMs}, nil
+}
+
+func (c SecretCapability) IsZero() bool {
+	return c.envName == "" && c.value == "" && c.expiresAtUnixMs == 0
+}
+func (c SecretCapability) EnvName() string        { return c.envName }
+func (c SecretCapability) ExpiresAtUnixMs() int64 { return c.expiresAtUnixMs }
+
+// Value is intentionally narrow: only a world backend may use it while
+// constructing the child environment. Callers must not persist or log it.
+func (c SecretCapability) Value() string { return c.value }
+
+func (c SecretCapability) String() string   { return "<redacted>" }
+func (c SecretCapability) GoString() string { return "<redacted>" }
+
+// MarshalJSON makes accidental serialization harmless. The capability is
+// represented by an empty object rather than by its environment name/value.
+func (c SecretCapability) MarshalJSON() ([]byte, error) { return []byte(`{}`), nil }
+
 // SpawnSpec is an immutable request to open an execution world. The policy is
 // already merged and narrowed before construction; world has no policy merge
 // API. AgentArgv and Credentials are defensively copied.
@@ -290,6 +334,7 @@ type SpawnSpec struct {
 	spanID      string
 	identity    AgentIdentity
 	credentials []CredentialHandle
+	secret      SecretCapability
 	bundle      ExtensionBundle
 }
 
@@ -321,6 +366,15 @@ func (s SpawnSpec) AgentIdentity() AgentIdentity { return s.identity }
 func (s SpawnSpec) Credentials() []CredentialHandle {
 	return append([]CredentialHandle(nil), s.credentials...)
 }
+
+// WithSecretCapability returns a copy carrying a validated host-only secret.
+// It does not alter any wire payload or durable metadata.
+func (s SpawnSpec) WithSecretCapability(capability SecretCapability) SpawnSpec {
+	s.secret = capability
+	return s
+}
+
+func (s SpawnSpec) SecretCapability() SecretCapability { return s.secret }
 
 // ExtensionBundle is a host-only, immutable handle to a verified provisioning
 // result. It is intentionally opaque: callers can pass it to a world backend

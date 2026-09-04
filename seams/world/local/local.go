@@ -33,6 +33,7 @@ const (
 	proxyExecutable      = "/hxegressproxy"
 	defaultAuditCapacity = 64
 	proxyReadyTimeout    = 30 * time.Second
+	credentialClockSkew  = 30 * time.Second
 )
 
 var (
@@ -46,6 +47,12 @@ type commandRunner interface {
 	Run(context.Context, ...string) ([]byte, error)
 }
 
+// envCommandRunner is the only path allowed to pass a secret to Podman. The
+// secret is placed in the child environment, never in Podman's argv.
+type envCommandRunner interface {
+	RunWithEnv(context.Context, []string, ...string) ([]byte, error)
+}
+
 type execPodman struct{}
 
 func (execPodman) Run(ctx context.Context, args ...string) ([]byte, error) {
@@ -55,6 +62,37 @@ func (execPodman) Run(ctx context.Context, args ...string) ([]byte, error) {
 		return out, fmt.Errorf("podman %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+func (execPodman) RunWithEnv(ctx context.Context, env []string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, podmanBinary, args...)
+	cmd.Env = mergeEnvironment(os.Environ(), env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// Do not include combined output: a child may echo an environment value
+		// and diagnostics must never become a credential exfiltration path.
+		return nil, fmt.Errorf("podman %s: %w", strings.Join(args, " "), err)
+	}
+	return out, nil
+}
+
+func mergeEnvironment(base, overrides []string) []string {
+	out := append([]string(nil), base...)
+	for _, override := range overrides {
+		key, _, ok := strings.Cut(override, "=")
+		if !ok || key == "" {
+			continue
+		}
+		prefix := key + "="
+		filtered := out[:0]
+		for _, item := range out {
+			if !strings.HasPrefix(item, prefix) {
+				filtered = append(filtered, item)
+			}
+		}
+		out = append(filtered, override)
+	}
+	return out
 }
 
 // Config fixes the trusted proxy helper image independently of the untrusted
@@ -184,6 +222,14 @@ func (b *Backend) Prepare(ctx context.Context, spec world.SpawnSpec) (prepared w
 	if err := b.preflight(ctx); err != nil {
 		return nil, err
 	}
+	if err := validateSecretCapability(spec, time.Now()); err != nil {
+		return nil, err
+	}
+	if cap := spec.SecretCapability(); !cap.IsZero() {
+		if _, ok := b.runner.(envCommandRunner); !ok {
+			return nil, fmt.Errorf("world/local: secret 주입을 지원하지 않는 Podman runner")
+		}
+	}
 	if err := validateImageReference(spec.Image()); err != nil {
 		return nil, fmt.Errorf("world/local: agent image: %w", err)
 	}
@@ -271,6 +317,14 @@ func (p *preparedLease) Activate(ctx context.Context, receipt world.SpawnReceipt
 
 func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened world.ActiveLease, err error) {
 	spec, layout := prepared.spec, prepared.layout
+	// Recheck immediately before any broker, network, or container side effect;
+	// a capability can expire between Prepare and Activate.
+	if err := validateSecretCapability(spec, time.Now()); err != nil {
+		_, cancel := cleanupContext(ctx)
+		cleanupErr := os.RemoveAll(layout.stateDir)
+		cancel()
+		return nil, errors.Join(err, cleanupErr)
+	}
 	broker, err := b.newEffectBroker(layout.stateDir, spec.SpanID(), b.auditCapacity)
 	if err != nil {
 		return nil, err
@@ -349,6 +403,13 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 		"--volume", volume,
 		prepared.agentRef.String(),
 	}
+	secretEnv := []string(nil)
+	if secret := spec.SecretCapability(); !secret.IsZero() {
+		// Podman resolves this name from its own environment. The value travels
+		// only in cmd.Env and is absent from args, logs, metadata, and frames.
+		args = append(args[:len(args)-1], "--env", secret.EnvName(), args[len(args)-1])
+		secretEnv = []string{secret.EnvName() + "=" + secret.Value()}
+	}
 	if bundle := spec.ExtensionBundle(); !bundle.IsZero() {
 		if err := validateBundleMount(prepared.backend.stateRoot, bundle); err != nil {
 			return nil, err
@@ -356,12 +417,21 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 		args = append(args[:len(args)-1], "--volume", bundle.Path()+":/opt/hx/extensions:ro", args[len(args)-1])
 	}
 	args = append(args, spec.AgentArgv()...)
-	containerID, err := b.createContainer(ctx, args, cidFile)
+	var containerID string
+	if len(secretEnv) > 0 {
+		containerID, err = b.createContainerWithEnv(ctx, args, cidFile, secretEnv)
+	} else {
+		containerID, err = b.createContainer(ctx, args, cidFile)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("world/local: agent container create: %w", err)
 	}
 	resources.agentID = containerID
-	process, err := startProcessBroker(ctx, spec.SpanID(), prepared.id.String(), containerID, b.runner)
+	secretValue := ""
+	if secret := spec.SecretCapability(); !secret.IsZero() {
+		secretValue = secret.Value()
+	}
+	process, err := startProcessBrokerWithRedaction(ctx, spec.SpanID(), prepared.id.String(), containerID, b.runner, secretValue)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +453,23 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 }
 
 func (b *Backend) createContainer(ctx context.Context, args []string, cidFile string) (string, error) {
-	out, createErr := b.runner.Run(ctx, args...)
+	return b.createContainerCall(ctx, args, cidFile, func() ([]byte, error) {
+		return b.runner.Run(ctx, args...)
+	})
+}
+
+func (b *Backend) createContainerWithEnv(ctx context.Context, args []string, cidFile string, env []string) (string, error) {
+	runner, ok := b.runner.(envCommandRunner)
+	if !ok {
+		return "", fmt.Errorf("world/local: secret 주입을 지원하지 않는 Podman runner")
+	}
+	return b.createContainerCall(ctx, args, cidFile, func() ([]byte, error) {
+		return runner.RunWithEnv(ctx, env, args...)
+	})
+}
+
+func (b *Backend) createContainerCall(ctx context.Context, args []string, cidFile string, run func() ([]byte, error)) (string, error) {
+	out, createErr := run()
 	containerID := firstContainerID(out)
 	if containerID == "" {
 		if cidBytes, readErr := os.ReadFile(cidFile); readErr == nil {
@@ -403,6 +489,34 @@ func (b *Backend) createContainer(ctx context.Context, args []string, cidFile st
 		return "", fmt.Errorf("container create가 유효한 ID를 반환하지 않음")
 	}
 	return containerID, nil
+}
+
+// validateSecretCapability enforces the spawn budget plus a clock-skew margin
+// before any runtime resource is created. A zero capability preserves the
+// existing credential-free world path; a non-zero capability is closed to the
+// one approved Claude OAuth environment name.
+func validateSecretCapability(spec world.SpawnSpec, now time.Time) error {
+	secret := spec.SecretCapability()
+	if secret.IsZero() {
+		return nil
+	}
+	if secret.EnvName() != world.ClaudeOAuthTokenEnv || secret.Value() == "" {
+		return fmt.Errorf("world/local: Claude OAuth secret capability가 유효하지 않음")
+	}
+	budgetMs := spec.Policy().Budget().TimeMs
+	if budgetMs < 0 {
+		return fmt.Errorf("world/local: secret 만료 전 시간 예산이 유효하지 않음")
+	}
+	marginMs := int64(credentialClockSkew / time.Millisecond)
+	needMs := budgetMs + marginMs
+	if needMs < budgetMs { // integer overflow, fail closed
+		return fmt.Errorf("world/local: secret 만료 전 시간 예산이 오버플로")
+	}
+	remaining := secret.ExpiresAtUnixMs() - now.UnixMilli()
+	if remaining < needMs {
+		return fmt.Errorf("world/local: Claude OAuth secret가 실행 예산 전에 만료됨")
+	}
+	return nil
 }
 
 func (b *Backend) proxyCreateArgs(

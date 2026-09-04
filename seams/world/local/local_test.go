@@ -30,12 +30,18 @@ const (
 type fakePodman struct {
 	mu        sync.Mutex
 	calls     [][]string
+	envCalls  []fakeEnvCall
 	notify    chan struct{}
 	failures  map[string]error
 	hook      func([]string) ([]byte, error, bool)
 	digest    string
 	imageUser string
 	proxyUser string
+}
+
+type fakeEnvCall struct {
+	env  []string
+	args []string
 }
 
 func newFakePodman(digest string) *fakePodman {
@@ -89,6 +95,23 @@ func (f *fakePodman) Run(ctx context.Context, args ...string) ([]byte, error) {
 	default:
 		return nil, nil
 	}
+}
+
+func (f *fakePodman) RunWithEnv(ctx context.Context, env []string, args ...string) ([]byte, error) {
+	f.mu.Lock()
+	f.envCalls = append(f.envCalls, fakeEnvCall{env: append([]string(nil), env...), args: append([]string(nil), args...)})
+	f.mu.Unlock()
+	return f.Run(ctx, args...)
+}
+
+func (f *fakePodman) envSnapshot() []fakeEnvCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]fakeEnvCall, len(f.envCalls))
+	for i := range f.envCalls {
+		out[i] = fakeEnvCall{env: append([]string(nil), f.envCalls[i].env...), args: append([]string(nil), f.envCalls[i].args...)}
+	}
+	return out
 }
 
 func (f *fakePodman) Start(context.Context, ...string) (startedCommand, error) {
@@ -231,6 +254,135 @@ func TestOpenBuildsRootlessOverlayAndMetadata(t *testing.T) {
 		if err != nil || info.Mode().Perm() != 0o700 {
 			t.Errorf("state dir %q mode/존재 이상: mode=%v err=%v", dir, infoMode(info), err)
 		}
+	}
+}
+
+func TestSecretCapabilityInjectedOnceViaEnvironmentNotArgv(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	lower, stateRoot := testDirs(t)
+	runner := newFakePodman(digest)
+	backend := mustBackend(t, stateRoot, runner, statDevice)
+	capability, err := world.NewSecretCapability(world.ClaudeOAuthTokenEnv, "synthetic-token-not-an-argv", time.Now().Add(10*time.Minute).UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := testSpec(lower, digest).WithSecretCapability(capability)
+	leaseValue, err := openTestLease(t, backend, context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer leaseValue.Close(context.Background())
+	calls := runner.snapshot()
+	for _, call := range calls {
+		if strings.Contains(strings.Join(call, " "), capability.Value()) {
+			t.Fatalf("secret이 Podman argv에 노출됨: %v", call)
+		}
+	}
+	envCalls := runner.envSnapshot()
+	if len(envCalls) != 1 {
+		t.Fatalf("secret 환경 주입 횟수=%d, want 1", len(envCalls))
+	}
+	if !containsArgValue(envCalls[0].args, "--env", world.ClaudeOAuthTokenEnv) {
+		t.Fatalf("agent create가 이름 기반 env 전달을 사용하지 않음: %v", envCalls[0].args)
+	}
+	if len(envCalls[0].env) != 1 || envCalls[0].env[0] != world.ClaudeOAuthTokenEnv+"="+capability.Value() {
+		t.Fatalf("환경 주입 값/횟수 이상: %+v", envCalls[0].env)
+	}
+	metadata, err := json.Marshal(leaseValue.(*lease).metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(metadata), capability.Value()) {
+		t.Fatalf("spawn metadata에 secret이 노출됨: %s", metadata)
+	}
+}
+
+func TestMergeEnvironmentReplacesAmbientCredential(t *testing.T) {
+	merged := mergeEnvironment([]string{"PATH=/bin", world.ClaudeOAuthTokenEnv + "=ambient"}, []string{world.ClaudeOAuthTokenEnv + "=synthetic"})
+	count := 0
+	for _, item := range merged {
+		if strings.HasPrefix(item, world.ClaudeOAuthTokenEnv+"=") {
+			count++
+			if item != world.ClaudeOAuthTokenEnv+"=synthetic" {
+				t.Fatalf("ambient credential가 유지됨: %v", merged)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("credential 환경 항목 수=%d: %v", count, merged)
+	}
+}
+
+func TestExpiredSecretFailsBeforeRuntimeSideEffects(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("b", 64)
+	lower, stateRoot := testDirs(t)
+	runner := newFakePodman(digest)
+	backend := mustBackend(t, stateRoot, runner, statDevice)
+	capability, err := world.NewSecretCapability(world.ClaudeOAuthTokenEnv, "synthetic-expired-token", time.Now().Add(time.Second).UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = openTestLease(t, backend, context.Background(), testSpec(lower, digest).WithSecretCapability(capability))
+	if err == nil {
+		t.Fatal("예산보다 빨리 만료되는 secret을 수락함")
+	}
+	if containsCall(runner.snapshot(), "network create") || containsAnyCreate(runner.snapshot()) {
+		t.Fatalf("secret 만료가 runtime side effect까지 도달함: %v", callKeys(runner.snapshot()))
+	}
+	if strings.Contains(err.Error(), capability.Value()) {
+		t.Fatalf("만료 오류에 secret 원문이 노출됨: %v", err)
+	}
+}
+
+func TestActivateExpiryRecheckCleansPreparedState(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("d", 64)
+	lower, stateRoot := testDirs(t)
+	runner := newFakePodman(digest)
+	backend := mustBackend(t, stateRoot, runner, statDevice)
+	good, err := world.NewSecretCapability(world.ClaudeOAuthTokenEnv, "synthetic-activate-token", time.Now().Add(10*time.Minute).UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedValue, err := backend.Prepare(context.Background(), testSpec(lower, digest).WithSecretCapability(good))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := preparedValue.(*preparedLease)
+	stateDir := prepared.layout.stateDir
+	receipt, writer, err := commitPreparedForTest(testSpec(lower, digest), prepared, &localMemoryStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	expired, err := world.NewSecretCapability(world.ClaudeOAuthTokenEnv, "synthetic-activate-token", time.Now().Add(time.Second).UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.spec = prepared.spec.WithSecretCapability(expired)
+	if _, err := prepared.Activate(context.Background(), receipt); err == nil {
+		t.Fatal("Activate가 만료된 secret 재검사를 통과시킴")
+	}
+	if _, err := os.Stat(stateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Activate 만료 오류 후 prepared state가 남음: %v", err)
+	}
+	if containsCall(runner.snapshot(), "network create") || containsAnyCreate(runner.snapshot()) {
+		t.Fatalf("Activate 만료가 runtime side effect까지 도달함: %v", callKeys(runner.snapshot()))
+	}
+}
+
+func TestSecretBudgetValidationFailsClosed(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("c", 64)
+	capability, err := world.NewSecretCapability(world.ClaudeOAuthTokenEnv, "synthetic-budget-token", 1_000_000+31_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := world.NewEffectivePolicy(policy.SandboxConfig{Budget: gen.Budget{TimeMs: 1000}})
+	spec := world.NewSpawnSpec(effective, world.NewImageReference(testAgentRepository, digest), []string{"agent"}, 0, strings.Repeat("1", 32), strings.Repeat("2", 16), world.AgentIdentity{UID: 1000, GID: 1001}, nil).WithSecretCapability(capability)
+	if err := validateSecretCapability(spec, time.UnixMilli(1_000_000)); err != nil {
+		t.Fatal("충분한 만료 여유를 거부함: ", err)
+	}
+	if err := validateSecretCapability(spec, time.UnixMilli(1_000_001)); err == nil {
+		t.Fatal("clock-skew를 포함한 만료 경계를 거부하지 않음")
 	}
 }
 

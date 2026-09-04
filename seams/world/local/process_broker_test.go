@@ -248,6 +248,47 @@ func TestProcessBrokerExitObservationIsIndependentOfOutputEOF(t *testing.T) {
 	}
 }
 
+func TestProcessBrokerRedactsSecretFromOutputFrames(t *testing.T) {
+	secret := []byte("synthetic-oauth-token")
+	input := []byte(`{"result":"synthetic-oauth-token", "stderr":"synthetic-oauth-token"}`)
+	got := redactPayload(input, secret)
+	if bytes.Contains(got, secret) || !bytes.Contains(got, []byte("<redacted>")) {
+		t.Fatalf("output frame secret redaction 실패: %q", got)
+	}
+	b := &processBroker{redaction: secret, redactionTail: make(map[processwire.Stream][]byte)}
+	part1 := b.redactChunk(processwire.StreamStdout, []byte(`{"result":"synthetic-oauth-`))
+	part2 := b.redactChunk(processwire.StreamStdout, []byte(`token"}`))
+	tail := b.redactionTail[processwire.StreamStdout]
+	joined := append(append(append([]byte(nil), part1...), part2...), tail...)
+	if bytes.Contains(joined, secret) || !bytes.Contains(joined, []byte("<redacted>")) {
+		t.Fatalf("분할 output frame secret redaction 실패: %q", joined)
+	}
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	b.outputMu = sync.Mutex{}
+	b.streamEnded = false
+	encoded := processwire.NewEncoder(server)
+	read := make(chan processwire.Frame, 1)
+	go func() {
+		frame, err := processwire.NewDecoder(client).Read()
+		if err == nil {
+			read <- frame
+		}
+	}()
+	if err := b.writeOutput(encoded, processwire.KindStdoutData, processwire.StreamStdout, input); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case frame := <-read:
+		if bytes.Contains(frame.Payload, secret) || !bytes.Contains(frame.Payload, []byte("<redacted>")) {
+			t.Fatalf("writeOutput 경로에서 secret이 노출됨: %q", frame.Payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("redacted output frame 대기 시간 초과")
+	}
+}
+
 func TestProcessBrokerStopIsIdempotentAndLateStopDoesNotSignalCompletedCID(t *testing.T) {
 	waiter, attach := newFakeStartedCommand(t), newFakeStartedCommand(t)
 	runtime := &fakeProcessRuntime{waiter: waiter, attach: attach}

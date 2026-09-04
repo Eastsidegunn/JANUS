@@ -182,6 +182,7 @@ func TestConfigFromEnvConsumesWorldCapabilityWithoutPassingItToAgent(t *testing.
 	t.Setenv(worldApprovalCapabilityEnv, "top-secret-capability")
 	t.Setenv(worldApprovalSpanEnv, "2222222222222222")
 	t.Setenv(approvalSocketEnv, "/host/real-approval.sock")
+	t.Setenv(world.ClaudeOAuthTokenEnv, "synthetic-oauth-token")
 	cfg := ConfigFromEnv()
 	if cfg.ApprovalEndpoint.Network() != "unix" || cfg.ApprovalEndpoint.Address() != "/host/adapter.sock" ||
 		cfg.ApprovalEndpoint.Capability() != "top-secret-capability" || cfg.WorldSpanID != "2222222222222222" {
@@ -190,7 +191,7 @@ func TestConfigFromEnvConsumesWorldCapabilityWithoutPassingItToAgent(t *testing.
 	}
 	for _, item := range cfg.Env {
 		if strings.Contains(item, "top-secret-capability") || strings.Contains(item, "/host/real-approval.sock") ||
-			strings.HasPrefix(item, worldApprovalNetworkEnv+"=") || strings.HasPrefix(item, worldApprovalSpanEnv+"=") {
+			strings.Contains(item, "synthetic-oauth-token") || strings.HasPrefix(item, worldApprovalNetworkEnv+"=") || strings.HasPrefix(item, worldApprovalSpanEnv+"=") {
 			t.Fatalf("host broker/approval capability가 native env에 남음: %q", item)
 		}
 	}
