@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: lint test smoke fixtures codegen codegen-drift world-integration extensions-integration otel-integration ci ci-linux
+.PHONY: lint test smoke fixtures codegen codegen-drift world-integration extensions-integration otel-integration t15-integration ci ci-linux
 
 codegen:
 	$(GO) run ./tools/schemagen -out contracts/gen contracts/events.schema.json:EventRecord contracts/wire.schema.json
@@ -81,6 +81,18 @@ otel-integration:
 	fi
 	@command -v podman >/dev/null || { echo "otel-integration: podman 없음, skip 금지"; exit 1; }
 	$(GO) test -tags jaegerintegration -count=1 -timeout=8m ./surfaces/hx -run '^TestJaegerIntegration$$'
+
+# T15 §Q4: credential-free real Claude container gate. This is deliberately a
+# separate target from smoke (which remains the CGO-free native Go path) and
+# from ci-linux's earlier world gates. Missing Linux/rootless/Podman conditions
+# are failures, never skips; the test labels image pull/build failures as
+# INFRASTRUCTURE and auth/sandbox assertions as VERIFICATION.
+t15-integration:
+	@if [ "$$($(GO) env GOOS)" != "linux" ]; then \
+		echo "t15-integration은 Linux 실물 게이트다 — 현재 $$($(GO) env GOOS), skip 금지"; exit 1; \
+	fi
+	@command -v podman >/dev/null || { echo "t15-integration: podman 없음, skip 금지"; exit 1; }
+	$(GO) test -tags t15integration -count=1 -timeout=15m ./surfaces/hx -run '^(TestWorldIntegration|TestClaudeWorldIntegration)$$'
 
 ci: lint test smoke fixtures codegen-drift
 

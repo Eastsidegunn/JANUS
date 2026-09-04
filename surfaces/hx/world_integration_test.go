@@ -1,4 +1,4 @@
-//go:build worldintegration || extensionsintegration
+//go:build worldintegration || extensionsintegration || t15integration
 
 package main
 
