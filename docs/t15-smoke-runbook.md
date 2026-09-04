@@ -36,11 +36,25 @@ access token 입력(read -s) → host-only SecretCapability 생성
 → adapter argv/frame/metadata/raw/stderr에는 없음
 ```
 
+복사해 실행할 수 있는 명령은 다음 한 줄뿐이다(셸 history에 token 값은 남지
+않는다):
+
+```sh
+read -r -s HX_T15_ACCESS_TOKEN </dev/tty; export HX_T15_ACCESS_TOKEN; go test -tags t15smoke -count=1 -v -timeout 15m ./surfaces/hx -run '^TestT15HumanSmoke$'; status=$?; unset HX_T15_ACCESS_TOKEN; exit $status
+```
+
 실행 명령은 token 값을 포함하지 않는 형태로만 기록한다. `podman inspect`
 출력 전체, `/proc/*/environ`, shell history, 화면 녹화에는 token을 남기지
 않는다. smoke가 실패해도 API key·refresh·host 실행 폴백으로 우회하지 않는다.
 
 ## 3. 확인점
+
+확인점을 다시 실행할 때의 명령은 다음과 같다. token을 매번 대화형으로 다시
+입력하며, 실행 결과만 화면에서 확인하고 값을 복사하지 않는다.
+
+```sh
+read -r -s HX_T15_ACCESS_TOKEN </dev/tty; export HX_T15_ACCESS_TOKEN; go test -tags t15smoke -count=1 -v -timeout 15m ./surfaces/hx -run '^TestT15HumanSmoke$'; status=$?; unset HX_T15_ACCESS_TOKEN; exit $status
+```
 
 | 확인점 | 기대 결과 |
 |---|---|
@@ -54,6 +68,13 @@ access token 입력(read -s) → host-only SecretCapability 생성
 로그에서 확인하되 payload 원문에 credential을 복사하지 않는다.
 
 ## 4. 만료 token 음성 대조
+
+전체 하네스에는 만료 전 예산 대조 음성 경로가 포함되어 있다. 이를 포함해
+다시 실행하는 정확한 명령은 다음과 같다.
+
+```sh
+read -r -s HX_T15_ACCESS_TOKEN </dev/tty; export HX_T15_ACCESS_TOKEN; go test -tags t15smoke -count=1 -v -timeout 15m ./surfaces/hx -run '^TestT15HumanSmoke$'; status=$?; unset HX_T15_ACCESS_TOKEN; exit $status
+```
 
 실행 예산보다 짧은 만료 시각의 access token으로 한 번 더 실행한다. spawn
 전에 `done`/container start가 발생하지 않고 명시적 deny가 나와야 하며, 실행

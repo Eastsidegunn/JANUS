@@ -1,4 +1,4 @@
-//go:build t15integration
+//go:build t15integration || t15smoke
 
 package main
 
