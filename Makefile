@@ -26,6 +26,8 @@ lint:
 	# smoke 하네스는 빌드 태그로 CI에서 격리되지만(실 자격증명 필요),
 	# 컴파일은 확인해 코드 부패를 막는다. 실행은 사람 몫이다([H]).
 	$(GO) vet -tags smoke ./seams/subagent/claudecode/
+	# T15 사람 smoke도 컴파일·vet만 수행한다. 실제 Podman/토큰 실행은 [H]만 한다.
+	$(GO) vet -tags t15smoke ./surfaces/hx ./seams/world/local
 	$(GO) mod tidy -diff
 	@unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \
