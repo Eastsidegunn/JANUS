@@ -19,6 +19,7 @@ import (
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/contracts/validate"
+	"github.com/Eastsidegunn/JANUS/core/world"
 	"github.com/Eastsidegunn/JANUS/seams/subagent/internal/procgroup"
 )
 
@@ -248,6 +249,21 @@ func TestClaudeCommandUsesApprovedIsolationFlags(t *testing.T) {
 	}
 	if !json.Valid([]byte(claudeApprovalHookSettings)) {
 		t.Fatal("inline hook settings is not JSON")
+	}
+}
+
+func TestLocalPodmanConfigSelectsProcessEndpointBeforeHostProcgroup(t *testing.T) {
+	var out, stderr bytes.Buffer
+	line := taskCommandLine(t, t.TempDir())
+	err := Run(context.Background(), io.NopCloser(bytes.NewReader(line)), &out, &stderr, Config{
+		ClaudeBin:       "/does/not/execute",
+		ProcessEndpoint: world.NewProcessEndpoint("tcp", "invalid", "lease", "control", "output"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "process endpoint") {
+		t.Fatalf("world endpoint branch error=%v", err)
+	}
+	if strings.Contains(err.Error(), "Claude 실행") {
+		t.Fatalf("world branch fell back to host procgroup: %v", err)
 	}
 }
 
