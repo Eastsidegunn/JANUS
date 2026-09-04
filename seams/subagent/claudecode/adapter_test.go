@@ -773,3 +773,60 @@ func assertLastDone(t *testing.T, events []gen.Event, status gen.DonePayloadStat
 		t.Fatalf("done=%+v want status=%s result=%q", payload, status, result)
 	}
 }
+
+func TestTokenExpiryEmitsDeterministicErrorDone(t *testing.T) {
+	vals, err := validate.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	w := &wireWriter{out: &out, vals: vals}
+	if err := emitFailureDone(w, errTokenExpired, false); err != nil {
+		t.Fatal(err)
+	}
+	var event gen.Event
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &event); err != nil {
+		t.Fatal(err)
+	}
+	var done gen.DonePayload
+	if err := json.Unmarshal(event.Payload, &done); err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != gen.DonePayloadStatusError || done.Result != "token expired" {
+		t.Fatalf("token expiry done=%+v", done)
+	}
+}
+
+func TestTokenExpiryMonitorStopsOnlyAtDeadline(t *testing.T) {
+	processDone := make(chan struct{})
+	stopped := make(chan struct{})
+	expired, cleanup := monitorTokenExpiry(time.Now().Add(20*time.Millisecond).UnixMilli(), processDone, func() { close(stopped) })
+	defer cleanup()
+	select {
+	case <-expired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("token expiry monitor가 deadline에서 종료되지 않음")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("token expiry가 process stop을 호출하지 않음")
+	}
+	close(processDone)
+
+	processDone2 := make(chan struct{})
+	stopped2 := make(chan struct{})
+	expired2, cleanup2 := monitorTokenExpiry(time.Now().Add(time.Second).UnixMilli(), processDone2, func() { close(stopped2) })
+	close(processDone2)
+	defer cleanup2()
+	select {
+	case <-expired2:
+		t.Fatal("process가 먼저 끝났는데 token expiry로 재분류함")
+	case <-time.After(30 * time.Millisecond):
+	}
+	select {
+	case <-stopped2:
+		t.Fatal("process 종료 전에 stop callback이 호출됨")
+	default:
+	}
+}

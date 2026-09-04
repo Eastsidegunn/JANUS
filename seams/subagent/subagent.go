@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
@@ -39,6 +40,9 @@ type Spec struct {
 	Approval    policy.ApprovalMode
 	Decider     policy.ApprovalDecider
 	Descriptor  world.AgentDescriptor // world path only; agent container에는 직렬화하지 않음
+	// TokenExpiresAtUnixMs is non-secret timing metadata for the Claude adapter.
+	// The token value itself is never held by the adapter or this spec.
+	TokenExpiresAtUnixMs int64
 }
 
 // Subagent는 실행 중인 어댑터 프로세스 핸들이다.
@@ -120,7 +124,11 @@ func spawnPrepared(ctx context.Context, w *logd.Writer, traceID, parentSpan, chi
 	// 프로세스·파이프·단일 reap·그룹 kill·EOF drain은 같은 seam의
 	// procgroup이 소유한다. exec.CommandContext를 쓰지 않아 watchCtx
 	// goroutine이 누적되지 않으며 취소는 항상 프로세스 그룹 전체에 간다.
-	proc, err := procgroup.Start(ctx, procgroup.Options{Command: spec.Command, Env: spec.Env, Stderr: spec.Stderr})
+	adapterEnv := append([]string(nil), spec.Env...)
+	if spec.TokenExpiresAtUnixMs > 0 {
+		adapterEnv = replaceEnv(adapterEnv, "HX_CLAUDE_TOKEN_EXPIRES_AT_MS", fmt.Sprintf("%d", spec.TokenExpiresAtUnixMs))
+	}
+	proc, err := procgroup.Start(ctx, procgroup.Options{Command: spec.Command, Env: adapterEnv, Stderr: spec.Stderr})
 	if err != nil {
 		return nil, fmt.Errorf("subagent: 어댑터 실행: %w", err)
 	}
@@ -142,6 +150,17 @@ func spawnPrepared(ctx context.Context, w *logd.Writer, traceID, parentSpan, chi
 	}
 	go s.pump(w, traceID, parentSpan)
 	return s, nil
+}
+
+func replaceEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if !strings.HasPrefix(item, prefix) {
+			out = append(out, item)
+		}
+	}
+	return append(out, prefix+value)
 }
 
 // Send는 추가 입력을 어댑터에 전달한다 (§5.2 message).

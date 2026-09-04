@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
@@ -26,6 +27,8 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 		return fmt.Errorf("claudecode: process endpoint: %w", err)
 	}
 	defer process.Close()
+	tokenExpired, stopExpiry := monitorTokenExpiry(cfg.TokenExpiresAtUnixMs, process.Done(), func() { stopWorldProcess(process) })
+	defer stopExpiry()
 
 	stdoutR, stdoutW := io.Pipe()
 	outputDone := make(chan error, 1)
@@ -152,6 +155,14 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 	drain := procgroup.DrainResult{HandlerErr: handlerErr, ScanErr: scanErr, ExitErr: exitErr}
 	doneEvent, finishErr := finishNative(drain, pendingDone, parser.StopRequested())
 	terminalErr := finishErr
+	select {
+	case <-tokenExpired:
+		// Expiry is a credential failure, not a normal stopped completion. The
+		// deterministic done result intentionally contains no token or response
+		// body and is emitted below once the ready gate permits a terminal event.
+		terminalErr = errTokenExpired
+	default:
+	}
 	if terminalErr == nil {
 		terminalErr = cmdErr
 	}
@@ -179,6 +190,45 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 		approvals.markReady()
 	}
 	return w.emit(doneEvent.Kind, doneEvent.Payload, doneEvent.Raw)
+}
+
+// monitorTokenExpiry owns the runtime expiry transition without retaining the
+// secret value. A process that exits first is not reclassified as credential
+// expiry; only the expiry deadline invokes the stop callback and closes the
+// returned marker. The returned cleanup function is idempotent in practice
+// because it is called once by runWorldProcess.
+func monitorTokenExpiry(expiresAtUnixMs int64, processDone <-chan struct{}, stop func()) (<-chan struct{}, func()) {
+	expired := make(chan struct{})
+	stopWatch := make(chan struct{})
+	var wg sync.WaitGroup
+	if expiresAtUnixMs <= 0 {
+		return expired, func() {}
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d := time.Until(time.UnixMilli(expiresAtUnixMs))
+		if d < 0 {
+			d = 0
+		}
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			stop()
+			close(expired)
+		case <-processDone:
+		case <-stopWatch:
+		}
+	}()
+	return expired, func() {
+		select {
+		case <-stopWatch:
+		default:
+			close(stopWatch)
+		}
+		wg.Wait()
+	}
 }
 
 func monitorWorldCommands(scanner *bufio.Scanner, parser *Parser, process *worldadapter.ProcessClient, approvals approvalTransport, adapterDone <-chan struct{}, result chan<- error) {

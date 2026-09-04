@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -50,6 +51,7 @@ var (
 	errCommandInputClosed = errors.New("실행 중 stdin 종료")
 	errApprovalHandshake  = errors.New("승인 handshake 실패")
 	errDuplicateApproval  = errors.New("중복 approval_response")
+	errTokenExpired       = errors.New("token expired")
 )
 
 // Config contains host-controlled process settings. ClaudeBin is a single
@@ -59,9 +61,10 @@ type Config struct {
 	Env       []string
 	// ProcessEndpoint is non-zero only for local-podman. A zero endpoint keeps
 	// the legacy host procgroup path used by world_backend:none.
-	ProcessEndpoint  world.ProcessEndpoint
-	ApprovalEndpoint world.ApprovalEndpoint
-	WorldSpanID      string
+	ProcessEndpoint      world.ProcessEndpoint
+	ApprovalEndpoint     world.ApprovalEndpoint
+	WorldSpanID          string
+	TokenExpiresAtUnixMs int64
 }
 
 type approvalTransport interface {
@@ -93,6 +96,15 @@ func ConfigFromEnv() Config {
 		os.Getenv(worldProcessNetworkEnv), os.Getenv(worldProcessAddressEnv), os.Getenv(worldProcessLeaseEnv),
 		os.Getenv(worldProcessControlEnv), os.Getenv(worldProcessOutputEnv),
 	)
+	tokenExpiry := int64(0)
+	if raw := os.Getenv("HX_CLAUDE_TOKEN_EXPIRES_AT_MS"); raw != "" {
+		parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil {
+			tokenExpiry = -1
+		} else {
+			tokenExpiry = parsed
+		}
+	}
 	// Broker capability and the host's real approval socket are host-adapter
 	// inputs, never native-agent environment. Direct mode adds its fresh local
 	// approval socket back below; world mode relies on the container's relay.
@@ -101,6 +113,7 @@ func ConfigFromEnv() Config {
 		worldApprovalSpanEnv, approvalSocketEnv,
 		worldProcessNetworkEnv, worldProcessAddressEnv, worldProcessLeaseEnv,
 		worldProcessControlEnv, worldProcessOutputEnv,
+		world.ClaudeOAuthTokenEnv,
 	} {
 		env = removeEnv(env, key)
 	}
@@ -110,7 +123,7 @@ func ConfigFromEnv() Config {
 		dir := filepath.Dir(executable)
 		env = replaceEnv(env, "PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
-	return Config{ClaudeBin: bin, Env: env, ProcessEndpoint: processEndpoint, ApprovalEndpoint: endpoint, WorldSpanID: spanID}
+	return Config{ClaudeBin: bin, Env: env, ProcessEndpoint: processEndpoint, ApprovalEndpoint: endpoint, WorldSpanID: spanID, TokenExpiresAtUnixMs: tokenExpiry}
 }
 
 func replaceEnv(env []string, key, value string) []string {
@@ -174,6 +187,9 @@ func (w *wireWriter) emit(kind gen.EventKind, payload json.RawMessage, raw []byt
 func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Config) error {
 	if cfg.ClaudeBin == "" {
 		return fmt.Errorf("claudecode: Claude 실행 파일이 비어 있음")
+	}
+	if cfg.TokenExpiresAtUnixMs < 0 {
+		return fmt.Errorf("claudecode: token expiry metadata is invalid")
 	}
 	vals, err := validate.New()
 	if err != nil {
@@ -305,9 +321,13 @@ func emitFailureDone(w *wireWriter, cause error, stopRequested bool) error {
 	if stopRequested {
 		status = gen.DonePayloadStatusStopped
 	}
+	result := "(어댑터 오류: " + terminalCause(cause) + ")"
+	if errors.Is(cause, errTokenExpired) {
+		result = "token expired"
+	}
 	payload, err := json.Marshal(gen.DonePayload{
 		Status: status,
-		Result: "(어댑터 오류: " + terminalCause(cause) + ")",
+		Result: result,
 	})
 	if err != nil {
 		return err
@@ -330,6 +350,7 @@ func terminalCause(err error) string {
 		{errCommandInputClosed, "실행 중 stdin 종료"},
 		{errApprovalHandshake, "승인 handshake 실패"},
 		{errDuplicateApproval, "중복 approval_response"},
+		{errTokenExpired, "token expired"},
 	} {
 		if errors.Is(err, item.target) {
 			return item.text

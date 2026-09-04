@@ -59,6 +59,32 @@ func TestEffectivePolicyAndSpawnSpecAreSnapshots(t *testing.T) {
 	}
 }
 
+func TestSecretCapabilityIsHostOnlyAndRedacted(t *testing.T) {
+	const value = "synthetic-oauth-token-never-log"
+	capability, err := world.NewSecretCapability(world.ClaudeOAuthTokenEnv, value, 1234567890)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capability.Value() != value || capability.EnvName() != world.ClaudeOAuthTokenEnv {
+		t.Fatal("secret capability accessor가 원래 capability를 보존하지 않음")
+	}
+	for _, rendered := range []string{capability.String(), capability.GoString()} {
+		if rendered != "<redacted>" || strings.Contains(rendered, value) {
+			t.Fatalf("secret capability redaction 실패: %q", rendered)
+		}
+	}
+	encoded, err := json.Marshal(capability)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), value) || string(encoded) != "{}" {
+		t.Fatalf("secret capability가 JSON에 노출됨: %s", encoded)
+	}
+	if _, err := world.NewSecretCapability("OTHER_SECRET", value, 123); err == nil {
+		t.Fatal("허용되지 않은 secret env 이름을 수락함")
+	}
+}
+
 func TestExtensionBundleIsHostOnlyAndDefensivelyCopied(t *testing.T) {
 	meta := []gen.SubagentSpawnExtension{{Name: "demo", Version: "1.0.0", Integrity: "sha256:" + strings.Repeat("a", 64), Source: "registry.example", ArtifactDigest: "sha256:" + strings.Repeat("b", 64)}}
 	bundle := world.NewExtensionBundle("/state/bundle", "sha256:"+strings.Repeat("c", 64), meta)

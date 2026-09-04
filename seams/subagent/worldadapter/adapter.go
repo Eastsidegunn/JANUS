@@ -63,6 +63,7 @@ func Environment(base []string, descriptor world.AgentDescriptor) []string {
 	keys := []string{
 		processNetworkEnv, processAddressEnv, processLeaseEnv, processControlEnv, processOutputEnv,
 		approvalNetworkEnv, approvalAddressEnv, approvalCapabilityEnv, worldSpanEnv,
+		world.ClaudeOAuthTokenEnv,
 	}
 	out := append([]string(nil), base...)
 	for _, key := range keys {

@@ -1,6 +1,7 @@
 package local
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -68,6 +69,8 @@ type processBroker struct {
 	attach                              startedCommand
 	waiter                              startedCommand
 	firstErr                            error
+	redaction                           []byte
+	redactionTail                       map[processwire.Stream][]byte
 	closing                             bool
 	outputPeerGone                      bool
 	stageMu                             sync.Mutex
@@ -86,6 +89,10 @@ type processBroker struct {
 }
 
 func startProcessBroker(parent context.Context, spanID, leaseID, containerID string, runner commandRunner) (*processBroker, error) {
+	return startProcessBrokerWithRedaction(parent, spanID, leaseID, containerID, runner, "")
+}
+
+func startProcessBrokerWithRedaction(parent context.Context, spanID, leaseID, containerID string, runner commandRunner, secret string) (*processBroker, error) {
 	starter, ok := runner.(commandStarter)
 	if !ok {
 		return nil, fmt.Errorf("world/local: Podman runner가 streaming process를 지원하지 않음")
@@ -121,8 +128,10 @@ func startProcessBroker(parent context.Context, spanID, leaseID, containerID str
 	b := &processBroker{
 		ctx: ctx, cancel: cancel, spanID: spanID, leaseID: leaseID, containerID: containerID,
 		runner: runner, starter: starter, rootDir: root, socketPath: path, listener: listener,
-		endpoint:    world.NewProcessEndpoint("unix", path, leaseID, controlCap, outputCap),
-		outputReady: make(chan struct{}), bothReady: make(chan struct{}), containerDone: make(chan struct{}), streamDone: make(chan struct{}), done: make(chan struct{}), activeStages: make(map[streamStage]time.Time),
+		endpoint:      world.NewProcessEndpoint("unix", path, leaseID, controlCap, outputCap),
+		redaction:     []byte(secret),
+		redactionTail: make(map[processwire.Stream][]byte),
+		outputReady:   make(chan struct{}), bothReady: make(chan struct{}), containerDone: make(chan struct{}), streamDone: make(chan struct{}), done: make(chan struct{}), activeStages: make(map[streamStage]time.Time),
 	}
 	b.wg.Add(2)
 	go b.accept()
@@ -848,10 +857,56 @@ func (b *processBroker) writeOutput(encoder *processwire.Encoder, kind processwi
 	if ended {
 		return nil
 	}
+	payload = b.redactChunk(stream, payload)
+	if len(payload) == 0 {
+		return nil
+	}
 	leave := b.enterStreamStage(streamStageOutputWrite)
 	_, err := encoder.Write(kind, stream, 0, payload)
 	leave()
 	return err
+}
+
+func redactPayload(payload, secret []byte) []byte {
+	if len(secret) == 0 {
+		return payload
+	}
+	return bytes.ReplaceAll(payload, secret, []byte("<redacted>"))
+}
+
+// redactChunk keeps a short per-stream suffix so a credential split across
+// kernel read boundaries is never exposed in two individually safe frames.
+func (b *processBroker) redactChunk(stream processwire.Stream, payload []byte) []byte {
+	if len(b.redaction) == 0 {
+		return payload
+	}
+	secret := b.redaction
+	combined := append(append([]byte(nil), b.redactionTail[stream]...), payload...)
+	if len(combined) < len(secret) {
+		b.redactionTail[stream] = combined
+		return nil
+	}
+	safeEnd := len(combined) - len(secret) + 1
+	var out []byte
+	i := 0
+	for i < safeEnd {
+		rel := bytes.Index(combined[i:], secret)
+		if rel < 0 || i+rel >= safeEnd {
+			out = append(out, combined[i:safeEnd]...)
+			b.redactionTail[stream] = append([]byte(nil), combined[safeEnd:]...)
+			return out
+		}
+		out = append(out, combined[i:i+rel]...)
+		out = append(out, []byte("<redacted>")...)
+		i += rel + len(secret)
+	}
+	if i < safeEnd {
+		out = append(out, combined[i:safeEnd]...)
+		b.redactionTail[stream] = append([]byte(nil), combined[safeEnd:]...)
+	} else {
+		b.redactionTail[stream] = nil
+	}
+	return out
 }
 
 func (b *processBroker) sendStreamEnd(encoder *processwire.Encoder, end processwire.StreamEnd) error {
@@ -863,6 +918,21 @@ func (b *processBroker) sendStreamEnd(encoder *processwire.Encoder, end processw
 		return nil
 	}
 	b.mu.Unlock()
+	if end.AttachError != "" && len(b.redaction) > 0 {
+		end.AttachError = string(bytes.ReplaceAll([]byte(end.AttachError), b.redaction, []byte("<redacted>")))
+	}
+	for _, stream := range []processwire.Stream{processwire.StreamStdout, processwire.StreamStderr} {
+		if tail := b.redactionTail[stream]; len(tail) > 0 {
+			kind := processwire.KindStdoutData
+			if stream == processwire.StreamStderr {
+				kind = processwire.KindStderrData
+			}
+			if _, err := encoder.Write(kind, stream, 0, tail); err != nil {
+				return err
+			}
+			b.redactionTail[stream] = nil
+		}
+	}
 	payload, _ := processwire.Marshal(end)
 	leave := b.enterStreamStage(streamStageStreamEndWrite)
 	_, err := encoder.Write(processwire.KindStreamEnd, processwire.StreamControl, 0, payload)
