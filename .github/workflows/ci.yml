@@ -18,3 +18,30 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make ci-linux
+
+  # T15-5 is intentionally a separate five-attempt matrix. Each job builds
+  # the pinned Claude image afresh without credentials, so a green result is
+  # attributable to the exact SHA rather than to a reused local image. The
+  # test itself distinguishes INFRASTRUCTURE (pull/build) from VERIFICATION
+  # (auth/broker/sandbox) failures and never skips missing Linux prerequisites.
+  t15-linux-gate:
+    name: t15-linux-gate / attempt ${{ matrix.attempt }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: run credential-free Claude gate
+        shell: bash
+        env:
+          T15_ATTEMPT: ${{ matrix.attempt }}
+        run: |
+          set -euo pipefail
+          echo "T15 attempt=${T15_ATTEMPT} run=${GITHUB_RUN_ID} job=${GITHUB_JOB} sha=${GITHUB_SHA}"
+          make t15-integration
