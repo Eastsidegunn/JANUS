@@ -27,6 +27,7 @@ const (
 	worldApprovalAddressEnv    = "HX_WORLD_APPROVAL_ADDRESS"
 	worldApprovalCapabilityEnv = "HX_WORLD_APPROVAL_CAPABILITY"
 	worldApprovalSpanEnv       = "HX_WORLD_APPROVAL_SPAN_ID"
+	worldAdapterSpanEnv        = "HX_WORLD_SPAN_ID"
 	worldProcessNetworkEnv     = "HX_WORLD_PROCESS_NETWORK"
 	worldProcessAddressEnv     = "HX_WORLD_PROCESS_ADDRESS"
 	worldProcessLeaseEnv       = "HX_WORLD_PROCESS_LEASE_ID"
@@ -92,6 +93,13 @@ func ConfigFromEnv() Config {
 		os.Getenv(worldApprovalCapabilityEnv),
 	)
 	spanID := os.Getenv(worldApprovalSpanEnv)
+	// worldadapter is the shared host-side endpoint serializer and publishes
+	// the lease span as HX_WORLD_SPAN_ID. Keep the older approval-specific name
+	// as a compatibility input for direct adapter tests and existing callers,
+	// but use the shared name when it is the only one present.
+	if spanID == "" {
+		spanID = os.Getenv(worldAdapterSpanEnv)
+	}
 	processEndpoint := world.NewProcessEndpoint(
 		os.Getenv(worldProcessNetworkEnv), os.Getenv(worldProcessAddressEnv), os.Getenv(worldProcessLeaseEnv),
 		os.Getenv(worldProcessControlEnv), os.Getenv(worldProcessOutputEnv),
@@ -110,7 +118,7 @@ func ConfigFromEnv() Config {
 	// approval socket back below; world mode relies on the container's relay.
 	for _, key := range []string{
 		worldApprovalNetworkEnv, worldApprovalAddressEnv, worldApprovalCapabilityEnv,
-		worldApprovalSpanEnv, approvalSocketEnv,
+		worldApprovalSpanEnv, worldAdapterSpanEnv, approvalSocketEnv,
 		worldProcessNetworkEnv, worldProcessAddressEnv, worldProcessLeaseEnv,
 		worldProcessControlEnv, worldProcessOutputEnv,
 		world.ClaudeOAuthTokenEnv,
