@@ -103,7 +103,7 @@ func TestClaudeWorldIntegration(t *testing.T) {
 	result := strings.ToLower(done.Result)
 	if !strings.Contains(result, "auth") && !strings.Contains(result, "login") &&
 		!strings.Contains(result, "logged") && !strings.Contains(result, "credential") &&
-		!strings.Contains(result, "token") {
+		!strings.Contains(result, "token") && !strings.Contains(result, "인증") {
 		t.Fatalf("VERIFICATION: done error does not identify authentication failure: %q", done.Result)
 	}
 	recordBytes, err := json.Marshal(store.snapshot())
