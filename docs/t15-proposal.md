@@ -1,7 +1,9 @@
 # T15 제안서 — Claude Code 에이전트의 sandbox 실행
 
-상태: 구현 전 제안. 이 문서는 `contracts/`·`fixtures/`·코드·CI 자격증명을
-변경하지 않는다. 대상은 FR-ADP-10, FR-SBX-01(Claude Code 경로), FR-SBX-04이며,
+상태: 구현 전 제안. 결정 2026-09-04: 스코프 미축소는 문서화된 부분 충족으로
+수용하고, 실 세션은 macOS Podman VM에서 인증·adapter 범위로 수행한다. 이 문서는
+`contracts/`·`fixtures/`·코드·CI 자격증명을 변경하지 않는다. 대상은
+FR-ADP-10, FR-SBX-01(Claude Code 경로), FR-SBX-04이며,
 Claude Code 샌드박스 실행만 다룬다. T10의 컨테이너 test subagent가 이미 증명한
 world 기판, T10 process broker·approval relay·overlay·egress·spawn receipt를
 재사용하고 새 lifecycle 구현을 만들지 않는다.
@@ -168,11 +170,11 @@ Linux/rootless/native-overlay 조건과 Podman이 없으면 skip이 아니라
 
 | 실행 위치 | 장점 | 한계/결정 |
 |---|---|---|
-| macOS Podman VM | 로컬 access token과 Claude 계정으로 빠른 인증·hook 확인 가능 | Linux kernel/overlay/network 배포 대상을 대표하지 않는다. T10 world gate의 증거로 재사용하지 않고, Claude 인증/adapter smoke에 한정한다. [H]가 선택해야 한다. |
-| Linux box/Ubuntu runner의 일회성 수동 세션 | 실제 rootless Podman·overlay·proxy·relay와 Claude를 같은 커널에서 검증 | token은 저장소·CI secret에 넣지 않고 사람 세션에서만 주입한다. 접근 권한·보존 정책을 [H]가 정한다. **권장** |
+| macOS Podman VM | 로컬 access token과 Claude 계정으로 빠른 인증·hook 확인 가능 | Linux kernel/overlay/network 배포 대상을 대표하지 않는다. T10 world gate의 증거로 재사용하지 않고, Claude 인증/adapter smoke에 한정한다. **선택** |
+| Linux box/Ubuntu runner의 일회성 수동 세션 | 실제 rootless Podman·overlay·proxy·relay와 Claude를 같은 커널에서 검증 | token을 원격 머신으로 반출하는 비용이 있고, 커널 기제는 이미 무자격증명 CI에서 검증한다. 선택하지 않는다. |
 | 실 세션 미실행 | 자격증명 반출 위험 없음 | §8-2의 실 tool call/child span, FR-SBX-01 Claude 경로, FR-SBX-04 전체를 검증할 수 없다. 검증 공백으로 남긴다. |
 
-사람 smoke는 (a) token이 실제로 짧은 access token인지, (b) refresh token/API
+사람 smoke는 macOS Podman VM에서 (a) token이 실제로 짧은 access token인지, (b) refresh token/API
 key가 없는 격리 환경인지, (c) tool allow/deny가 relay를 통과하는지, (d) marker와
 upper diff 및 egress audit이 함께 남는지를 확인한다. 커맨드·결과 전문·token
 값은 분리하며 token 자체는 PR/로그에 기록하지 않는다. 만료 테스트는 변조·만료
@@ -221,8 +223,8 @@ T14 OTel 관통은 이 제안의 입력이지만, Claude의 실제 tool call/chi
 | 항목 | 승인 주체 | 승인 범위/판단 |
 |---|---|---|
 | access token을 spawn env로 주입하는 구현 | [H] | OAuth access token만, refresh token·API key·Keychain mount 없음. 만료는 `done/error`, fallback 없음. |
-| **스코프 축소 미충족의 수용 또는 FR-SBX-04 개정** | **명세 소유자 [H]** | access token이 계정 전체 권한이라는 잔여를 수용할지 결정. 구현자가 완료로 표시할 수 없음. |
+| **스코프 축소 미충족의 수용 또는 FR-SBX-04 개정** | **명세 소유자 [H]** | access token이 계정 전체 권한이라는 잔여를 **문서화된 부분 충족으로 수용**한다. FR-SBX-04를 하향 개정하지 않으며, 스코프 토큰이 발급되는 날 후속 작업으로 남긴다. |
 | pinned Node 22 + Claude 2.1.252 image | [H]/CI 운영 | base digest·npm exact version·최종 image digest/실측 크기 고정. 외부 pull 실패는 인프라 오류. |
 | ProcessEndpoint adapter split + existing approval relay | T10/T9 계약 소유자 | `none` host procgroup 보존, `local-podman`만 container Claude, relay 프로토콜 변경 없음. |
-| 실 세션 위치와 증거 보존 | [H] | Linux box 권장; macOS VM은 인증/adapter 보조 검증만. token 값은 기록하지 않음. |
+| 실 세션 위치와 증거 보존 | [H] | **macOS Podman VM 선택**; 인증/adapter 보조 검증만 수행하고 Linux world 게이트 증거와 결합하지 않는다. token 값은 기록하지 않음. |
 | T15 완료 판정 | [H] | CI 무자격증명 기판 게이트와 [H] 실 세션 child-span 증거가 모두 있어야 FR-SBX-01 Claude 행을 닫음. |
