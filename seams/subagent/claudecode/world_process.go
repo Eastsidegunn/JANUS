@@ -40,6 +40,14 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 			switch frame.Kind {
 			case processwire.KindStdoutData:
 				_, err := stdoutW.Write(frame.Payload)
+				if authDiagnostic.Len() < 64*1024 {
+					remaining := 64*1024 - authDiagnostic.Len()
+					capture := frame.Payload
+					if len(capture) > remaining {
+						capture = capture[:remaining]
+					}
+					_, _ = authDiagnostic.Write(capture)
+				}
 				return err
 			case processwire.KindStderrData:
 				_, err := stderr.Write(frame.Payload)

@@ -86,6 +86,7 @@ func TestClaudeWorldIntegration(t *testing.T) {
 	closeCancel()
 	finalized = true
 	if waitErr != nil {
+		t.Logf("tokenless Claude diagnostic stderr=%q records=%d", adapterStderr.String(), len(store.snapshot()))
 		t.Fatalf("VERIFICATION: tokenless Claude did not produce terminal done/error: %v", waitErr)
 	}
 	if closeErr != nil {
