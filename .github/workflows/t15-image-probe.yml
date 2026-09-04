@@ -1,0 +1,66 @@
+# T15 step 2 one-shot probe. This branch is not merged: it measures the exact
+# Node/Claude image without adding product code or credentials.
+name: t15-image-probe
+
+on:
+  push:
+    branches: [t15/image-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: build pinned Claude image and measure it
+        shell: bash
+        run: |
+          set -euo pipefail
+          base='docker.io/library/node@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5'
+          image='localhost/hx-claude:2.1.252-probe'
+          if ! podman pull --quiet "$base" >/dev/null; then
+            echo "INFRASTRUCTURE: pinned Node base pull failed: $base" >&2
+            exit 86
+          fi
+          base_size=$(podman image inspect --format '{{.Size}}' "$base")
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o hxapprove ./seams/subagent/claudecode/hxapprove
+          mkdir image
+          mv hxapprove image/hxapprove
+          cat >image/Containerfile <<EOF
+          FROM $base
+          RUN npm install --global @anthropic-ai/claude-code@2.1.252 \
+              && npm cache clean --force
+          COPY --chown=1000:1000 hxapprove /usr/local/bin/hxapprove
+          USER 1000:1000
+          WORKDIR /workspace
+          EOF
+          if ! podman build --pull=never --no-cache -t "$image" image; then
+            echo "INFRASTRUCTURE: pinned Claude image build failed" >&2
+            exit 87
+          fi
+          digest=$(podman image inspect --format '{{.Digest}}' "$image")
+          size=$(podman image inspect --format '{{.Size}}' "$image")
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "VERIFICATION: invalid image digest: $digest" >&2
+            exit 1
+          fi
+          podman save --format oci-archive -o claude-image.oci "$image"
+          archive_size=$(stat --format '%s' claude-image.oci)
+          version=$(podman run --rm --pull=never "$image" claude --version)
+          if [[ "$version" != *"2.1.252"* ]]; then
+            echo "VERIFICATION: Claude version mismatch: $version" >&2
+            exit 1
+          fi
+          printf 'PROBE base=%s\n' "$base"
+          printf 'PROBE base_size_bytes=%s\n' "$base_size"
+          printf 'PROBE image_repository=%s\n' "${image%:*}"
+          printf 'PROBE image_digest=%s\n' "$digest"
+          printf 'PROBE image_size_bytes=%s\n' "$size"
+          printf 'PROBE oci_archive_size_bytes=%s\n' "$archive_size"
+          printf 'PROBE claude_version=%s\n' "$version"
