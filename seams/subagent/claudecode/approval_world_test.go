@@ -196,6 +196,27 @@ func TestConfigFromEnvConsumesWorldCapabilityWithoutPassingItToAgent(t *testing.
 	}
 }
 
+func TestConfigFromEnvReadsProcessEndpointWithoutPassingBrokerInputsToAgent(t *testing.T) {
+	t.Setenv(worldProcessNetworkEnv, "unix")
+	t.Setenv(worldProcessAddressEnv, "/host/process.sock")
+	t.Setenv(worldProcessLeaseEnv, "lease-1")
+	t.Setenv(worldProcessControlEnv, "control-capability")
+	t.Setenv(worldProcessOutputEnv, "output-capability")
+	cfg := ConfigFromEnv()
+	if cfg.ProcessEndpoint.Network() != "unix" || cfg.ProcessEndpoint.Address() != "/host/process.sock" ||
+		cfg.ProcessEndpoint.LeaseID() != "lease-1" || cfg.ProcessEndpoint.ControlCapability() != "control-capability" ||
+		cfg.ProcessEndpoint.OutputCapability() != "output-capability" {
+		t.Fatalf("process endpoint env 조립 실패: %#v", cfg.ProcessEndpoint)
+	}
+	for _, item := range cfg.Env {
+		for _, key := range []string{worldProcessNetworkEnv, worldProcessAddressEnv, worldProcessLeaseEnv, worldProcessControlEnv, worldProcessOutputEnv} {
+			if strings.HasPrefix(item, key+"=") {
+				t.Fatalf("host process endpoint가 native env에 남음: %q", item)
+			}
+		}
+	}
+}
+
 func TestAdapterExecutableRegistersRealFixtureToolIntentWithWorldBroker(t *testing.T) {
 	broker := newFakeWorldApprovalBroker(t)
 	defer broker.Close()

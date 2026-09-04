@@ -28,6 +28,18 @@ type processClient struct {
 	once         sync.Once
 }
 
+// ProcessClient is the host-side ProcessEndpoint client shared by adapters in
+// this seam. It exposes only the framed process operations; the broker socket,
+// capabilities, and lifecycle remain owned by the world lease.
+type ProcessClient = processClient
+
+// ConnectProcess opens the control and output roles of a host-only process
+// endpoint. It never enters the container and does not provide a procgroup
+// fallback.
+func ConnectProcess(ctx context.Context, endpoint world.ProcessEndpoint, spanID string) (*ProcessClient, error) {
+	return connectProcess(ctx, endpoint, spanID)
+}
+
 func connectProcess(ctx context.Context, endpoint world.ProcessEndpoint, spanID string) (*processClient, error) {
 	if endpoint.Network() != "unix" || endpoint.Address() == "" || endpoint.LeaseID() == "" ||
 		endpoint.ControlCapability() == "" || endpoint.OutputCapability() == "" || spanID == "" {
@@ -228,6 +240,11 @@ func (c *processClient) Wait(ctx context.Context) (processwire.ExitObserved, err
 		return processwire.ExitObserved{}, ctx.Err()
 	}
 }
+
+// Done closes exactly once when the broker observes the container exit (or a
+// terminal broker failure). Adapters use it to terminate approval waiters
+// without coupling approval lifecycle to output EOF.
+func (c *processClient) Done() <-chan struct{} { return c.done }
 
 func (c *processClient) DrainOutput(handler func(processwire.Frame) error) error {
 	for {

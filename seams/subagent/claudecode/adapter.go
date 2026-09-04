@@ -26,6 +26,11 @@ const (
 	worldApprovalAddressEnv    = "HX_WORLD_APPROVAL_ADDRESS"
 	worldApprovalCapabilityEnv = "HX_WORLD_APPROVAL_CAPABILITY"
 	worldApprovalSpanEnv       = "HX_WORLD_APPROVAL_SPAN_ID"
+	worldProcessNetworkEnv     = "HX_WORLD_PROCESS_NETWORK"
+	worldProcessAddressEnv     = "HX_WORLD_PROCESS_ADDRESS"
+	worldProcessLeaseEnv       = "HX_WORLD_PROCESS_LEASE_ID"
+	worldProcessControlEnv     = "HX_WORLD_PROCESS_CONTROL_CAPABILITY"
+	worldProcessOutputEnv      = "HX_WORLD_PROCESS_OUTPUT_CAPABILITY"
 
 	// C안(제안서 §7.2): user settings를 제외하고, 이 인라인 PreToolUse
 	// hook만 명시적으로 주입한다. --bare는 OAuth/keychain을 읽지 않으므로
@@ -50,8 +55,11 @@ var (
 // Config contains host-controlled process settings. ClaudeBin is a single
 // executable path, never a shell command.
 type Config struct {
-	ClaudeBin        string
-	Env              []string
+	ClaudeBin string
+	Env       []string
+	// ProcessEndpoint is non-zero only for local-podman. A zero endpoint keeps
+	// the legacy host procgroup path used by world_backend:none.
+	ProcessEndpoint  world.ProcessEndpoint
 	ApprovalEndpoint world.ApprovalEndpoint
 	WorldSpanID      string
 }
@@ -81,12 +89,18 @@ func ConfigFromEnv() Config {
 		os.Getenv(worldApprovalCapabilityEnv),
 	)
 	spanID := os.Getenv(worldApprovalSpanEnv)
+	processEndpoint := world.NewProcessEndpoint(
+		os.Getenv(worldProcessNetworkEnv), os.Getenv(worldProcessAddressEnv), os.Getenv(worldProcessLeaseEnv),
+		os.Getenv(worldProcessControlEnv), os.Getenv(worldProcessOutputEnv),
+	)
 	// Broker capability and the host's real approval socket are host-adapter
 	// inputs, never native-agent environment. Direct mode adds its fresh local
 	// approval socket back below; world mode relies on the container's relay.
 	for _, key := range []string{
 		worldApprovalNetworkEnv, worldApprovalAddressEnv, worldApprovalCapabilityEnv,
 		worldApprovalSpanEnv, approvalSocketEnv,
+		worldProcessNetworkEnv, worldProcessAddressEnv, worldProcessLeaseEnv,
+		worldProcessControlEnv, worldProcessOutputEnv,
 	} {
 		env = removeEnv(env, key)
 	}
@@ -96,7 +110,7 @@ func ConfigFromEnv() Config {
 		dir := filepath.Dir(executable)
 		env = replaceEnv(env, "PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
-	return Config{ClaudeBin: bin, Env: env, ApprovalEndpoint: endpoint, WorldSpanID: spanID}
+	return Config{ClaudeBin: bin, Env: env, ProcessEndpoint: processEndpoint, ApprovalEndpoint: endpoint, WorldSpanID: spanID}
 }
 
 func replaceEnv(env []string, key, value string) []string {
@@ -186,6 +200,13 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 		return fmt.Errorf("claudecode: approval socket: %w", err)
 	}
 	defer approvals.Close()
+	if cfg.ProcessEndpoint != (world.ProcessEndpoint{}) {
+		taskLine, marshalErr := json.Marshal(cmd)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		return runWorldProcess(ctx, in, stderr, cfg, vals, w, approvals, scanner, append(taskLine, '\n'))
+	}
 
 	// task.Workspace는 policy/T10이 준비한 pristine 작업공간이다. Claude의
 	// cwd를 이 경로로 고정하고 user settings는 flag로 제외한다.
