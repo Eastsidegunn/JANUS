@@ -37,6 +37,7 @@ func TestClaudeWorldIntegration(t *testing.T) {
 	requirePodmanPreconditions(t, ctx)
 	artifacts := buildIntegrationArtifacts(t, ctx)
 	claudeRepo, claudeDigest := buildClaudeImage(t, ctx, artifacts.root)
+	claudeAdapter := buildT15ClaudeAdapter(t, ctx, artifacts.root)
 
 	lower, stateRoot := integrationPaths(t)
 	store := newIntegrationStore(t, filepath.Join(t.TempDir(), "events.ndjson"), false)
@@ -53,6 +54,7 @@ func TestClaudeWorldIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := newIntegrationBackend(t, stateRoot, artifacts)
+	adapterHashBefore := fileSHA256(t, claudeAdapter)
 	budget := gen.Budget{Tokens: 100_000, TimeMs: 180_000, MaxDepth: 2}
 	effective := world.NewEffectivePolicy(policy.SandboxConfig{
 		ProfileID: "t15-claude-auth", Workspace: lower, FSScope: []string{lower},
@@ -62,7 +64,7 @@ func TestClaudeWorldIntegration(t *testing.T) {
 	var adapterStderr bytes.Buffer
 	active, err := startProductionWorld(ctx, worldLaunch{
 		Backend: backend, SpawnSpec: spawnSpec, Writer: writer, TraceID: traceID, ParentSpan: parentSpan,
-		AdapterCommand: []string{artifacts.adapter}, AdapterName: "claudecode", AdapterStderr: &adapterStderr,
+		AdapterCommand: []string{claudeAdapter}, AdapterName: "claudecode", AdapterStderr: &adapterStderr,
 		Instruction: "Respond with exactly OK.", Workspace: "/workspace", Budget: budget, Depth: 0,
 		ProfileID: "t15-claude-auth", Approval: subagent.Spec{Approval: policy.ApprovalManual, Decider: policy.DenyAll{}},
 		// Keep the host adapter environment minimal. In particular, a runner
@@ -92,6 +94,9 @@ func TestClaudeWorldIntegration(t *testing.T) {
 	if closeErr != nil {
 		t.Fatal(closeErr)
 	}
+	if got := fileSHA256(t, claudeAdapter); got != adapterHashBefore {
+		t.Fatalf("VERIFICATION: host Claude adapter binary was modified: before=%s after=%s", adapterHashBefore, got)
+	}
 	if done.Status != gen.DonePayloadStatusError {
 		t.Fatalf("VERIFICATION: tokenless Claude status=%s, want error (result=%q)", done.Status, done.Result)
 	}
@@ -114,6 +119,18 @@ func TestClaudeWorldIntegration(t *testing.T) {
 		}
 	}
 	assertNoRuntimeArtifacts(t, ctx, claudeRepo+"@"+claudeDigest, childSpan)
+}
+
+func buildT15ClaudeAdapter(t *testing.T, ctx context.Context, root string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "claudecode")
+	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", path, "./seams/subagent/claudecode/cmd/claudecode")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("VERIFICATION: claudecode adapter build failed: %v\n%s", err, out)
+	}
+	return path
 }
 
 func buildClaudeImage(t *testing.T, ctx context.Context, root string) (string, string) {
