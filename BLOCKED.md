@@ -21,6 +21,31 @@ run 33542453242 (동일 SHA 2/2 실패)의 두 실패를 다음과 같이 닫았
 T13-4 선결 근거였던 "red 원인 귀속 불가"는 계측 상주로 해소됐다.
 **T13-4 착수 가능.**
 
+## T15 [H] smoke — macOS VM 경로 공유 (2026-09-06, INFRASTRUCTURE)
+
+[H] smoke 실행이 프록시 컨테이너 생성에서 멈췄다:
+`statfs /tmp/hxe-…: no such file or directory`. 원인은 감사 소켓
+디렉터리를 `/tmp`에 만드는데(`seams/world/local/audit.go:71`,
+`os.MkdirTemp("/tmp","hxe-")`) macOS podman machine이 `/tmp`를 VM에
+공유하지 않아 VM 안 podman이 바인드 마운트 소스를 못 보는 것이다.
+
+**이것은 VERIFICATION 실패가 아니다.**
+- 하네스의 INFRASTRUCTURE/VERIFICATION 구분상 인프라 배관 실패다.
+  인증·승인·egress 확인점엔 도달하지 못했다.
+- 이 프록시/overlay 스택은 T15 Linux 게이트가 무자격증명으로 5/5 통과했다
+  (run 33895768631). 리눅스에서 이미 증명됐다.
+- 제안서 §Q4 VM row가 예고한 대표성 한계의 구체화다.
+
+부수 관찰: 하네스가 VM 스코프보다 넓다. VM smoke가 증명해야 할 것은
+"실 토큰 → 컨테이너 Claude 인증 → 승인 relay 게이트 → 토큰 미유출"인데
+egress 프록시 사이드카까지 돌린다 — 그 부분이 정확히 막힌 곳이고 리눅스
+CI가 이미 덮었다.
+
+해소: 하네스의 바인드 마운트 소스를 VM 공유 경로로 옮긴다(검증 약화 아님,
+리눅스 CI 무영향). VM이 공유하는 경로(`podman machine inspect`)에 따라
+소켓 디렉터리 위치를 정한다. Unix 소켓 경로 길이 제한(~104자) 유지.
+API key·refresh·host 폴백으로 우회하지 않는다.
+
 ## T10 — 차단 해소 (2026-08-20)
 
 **해소**: C안 승인 — 통합 테스트는 Linux CI에서 실행하고 로컬은 Fake 백엔드
