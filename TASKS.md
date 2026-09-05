@@ -87,6 +87,7 @@
 - **착수 조건([H])**: 컨테이너 안에서 단기·스코프 한정 자격증명으로 `claude`가 동작하는지 실측. 근거는 docs/t10-scope-determination.md §6.
 - 2026-08-31: Bedrock·Vertex 접근 없음 확인 — 3P STS 경로는 이 환경에서 불가. 남은 실측 후보는 OAuth access token 단독 주입(동 문서 §6의 (i)/(ii) 분해).
 - 2026-09-02: (i)·(ii) 모두 성립 — **착수 조건 충족**. 잔여 판단(스코프 축소 미충족)은 동 문서 §6 참조.
+- 2026-09-06: 구현·CI 게이트 완료. 실 토큰 컨테이너 세션은 문서화된 잔여(B결정) — docs/v0.1-release-acceptance.md §2 잔여, docs/traceability.md.
 - 완료 기준: Claude Code spawn에서 에이전트 프로세스가 컨테이너 내부에 존재하고, 워크스페이스 변경이 overlay upper에 잡히며, egress가 프록시를 경유함을 통합 테스트로 확인.
 
 ## 이후 (T16+, 착수 전 사람 판단 필요)
