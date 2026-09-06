@@ -123,6 +123,27 @@ Codex는 다음을 모두 충족해야 §8-2의 Codex 행을 닫는다.
 - 실 세션의 인증·sandbox flag·이벤트 차이와 사용 커맨드·결과 전문(비밀 제거)이
   [H] 기록으로 남는다.
 
+### [H] 조건부 승인 (2026-09-06) — 강등을 숨기지 않고 보상한다
+
+FR-POL-05 Codex 강등을 수용하되 두 조건을 종결 기준에 추가한다.
+
+1. **통제 강도를 로그에 명시한다.** Codex 세션은 툴별 동기 승인이 아니라
+   spawn-time 정책으로 통제된다는 사실이 이벤트에 남아야 한다. `hx audit`이
+   "이 command execution은 부모가 개별 승인한 것이 아니다"를 Claude 세션과
+   구분할 수 있어야 한다. 강등이 로그에 안 보이면 감사가 Codex 세션을 Claude
+   세션과 똑같은 통제로 오독한다 — "안 잡힘"이 "안 함"으로 읽히는 것과 같은
+   실패다. (contracts 변경이 필요하면 SCP로 제안만, 기존 필드로 표현 가능하면
+   그 방식을 적시)
+2. **효과 평면 관측 완전성을 Claude보다 엄격히 요구한다.** Claude는 승인이
+   툴 실행을 사전에 막지만 Codex는 못 막으므로, 사후 효과 관측(fsdiff·egress)이
+   유일한 안전망이다. Codex 세션에서 effect_observation이 incomplete이면
+   Claude보다 위험하다(사전 게이트 부재). §8-2 Codex 종결은 실 세션에서 effect
+   평면 관측이 완전함을 함께 단정한다.
+
+이 둘은 강등의 대가다: 약함을 인정하는 데서 멈추지 않고, 그 약함을 관측
+가능하게 만들고(1) 다른 층으로 보상한다(2). T12의 `effect_observation` 명시와
+같은 정신이다.
+
 Claude 경로가 무자격증명 Linux 게이트 후 [H] 실 세션으로 넘어간 것과 같은
 순서를 적용한다. T10/T11/T12의 컨테이너·egress·relay·audit 기판을 Codex의
 실 세션 증거로 재사용할 수 있지만, Codex 자체의 native 이벤트와 승인 수준은
@@ -135,7 +156,7 @@ Claude 경로가 무자격증명 Linux 게이트 후 [H] 실 세션으로 넘어
 |---|---|---|
 | Codex `exec --json` 독립 어댑터와 T8 골든 범위 | T16 구현자/리뷰어 | parser의 7개 유효 시나리오와 ready/done/stop 경계를 cmd 실행파일에 연결 |
 | Codex spawn-time sandbox/approval flag의 정확한 버전·문법 | [H] | 설치본 `codex --version/--help` 실측 후 고정. 확인 전 지원 주장 금지 |
-| **FR-POL-05 Codex 부분 충족 방식** | **[H]** | native 동기 승인 부재를 인정하고 (a) spawn-time 정책+컨테이너 격리 강등을 수용할지 결정. 완전 충족으로 표기하지 않음 |
+| **FR-POL-05 Codex 부분 충족 방식** | **[H] — 조건부 수용 (2026-09-06)** | (a) spawn-time 강등 수용. 단 두 조건: 강등을 로그에 명시(감사 구분 가능), 효과 평면 관측 완전성을 Claude보다 엄격히 요구. 완전 충족으로 표기하지 않음. §Q5 참조 |
 | Codex 인증·자격증명 경계 | [H] | 장기 API key/refresh 반입 금지, 실제 인증 방식·수명·redaction smoke 범위 승인 |
 | §8-2 Codex 실 세션 종결 | [H] | child span tool call 기록, 정책 강등 동작, 컨테이너 격리 및 픽스처 밖 이벤트 기록이 모두 있어야 닫음 |
 
