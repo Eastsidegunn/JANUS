@@ -2,7 +2,13 @@
 
 ## Status
 
-Proposed; implementation blocked pending contract approval.
+**형태 승인됨 [H] (2026-09-07)** — `subagent/spawn` base required에
+`control_mode` 판별 enum을 추가하는 스키마 형태는 명세 소유자가 승인했다
+(T10 world_backend·T11 egress decision 판별 패턴의 세 번째 적용).
+
+**값은 구현자 실측 대기** — enum 값(`container_only` vs `spawn_time` 등)은
+codex 실측으로 확정한다. 값이 바뀌면 enum이 바뀌므로 확정 시 [H] 재확인.
+아래 §값 선택의 의도 참조.
 
 ## Problem
 
