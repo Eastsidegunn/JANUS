@@ -1,5 +1,14 @@
 # BLOCKED
 
+## T16-1 — Codex control-mode marker (2026-09-06)
+
+**Blocked pending SCP-T16-001.** The required durable distinction between
+Codex spawn-time policy and Claude tool-level approval cannot be represented by
+current closed contracts: `subagent/spawn`, `subagent/ready`, tool, and
+approval payloads have no such field and use `additionalProperties:false`.
+No adapter, contracts, or fixtures were changed. See
+`docs/scp-t16-codex-control-mode.md`; after contract approval, resume T16-1.
+
 구현을 우회하지 않고 멈춘 지점의 기록 (CLAUDE.md 작업 방식).
 해소되면 해당 항목을 지우고 태스크를 재개한다.
 
