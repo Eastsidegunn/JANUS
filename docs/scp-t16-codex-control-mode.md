@@ -36,6 +36,28 @@ meanings and are closed by `additionalProperties:false`.
 - Existing payloads remain valid; the change is additive only where the
   discriminator requires it and must preserve the none/Claude branches.
 
+## 값 확정 — `container_only` [H] (2026-09-07)
+
+codex 0.153.4 실측이 초기 전제를 뒤집었다. codex는 "정책 없음"이 아니라
+자체 샌드박스를 가진다: `--sandbox read-only|workspace-write|danger-full-access`,
+`--ask-for-approval on-request|never`. 실행 증명은 관리형 환경의 중첩 샌드박스
+차단(`sandbox_apply: Operation not permitted`)으로 못 했으나 — 이는 환경
+문제지 codex 한계가 아니다.
+
+그럼에도 값은 **`container_only`로 확정**한다. 근거가 바뀌었을 뿐 값은 같다:
+
+- `control_mode`는 "codex가 무엇을 할 수 있나"가 아니라 **"HX가 이 세션의
+  통제를 무엇에 의존하나"**를 뜻한다.
+- HX가 의존하는 통제 중 **증명된 것은 HX 자기 컨테이너 격리(overlay·egress,
+  Linux 게이트 5/5)뿐**이다. codex `--sandbox`가 HX 컨테이너 안에서 실제
+  실행을 좁히는지는 미증명이므로, HX는 그것을 통제 계층으로 의존하지 않는다.
+- 벤더 샌드박스를 증명 전까지 신뢰하지 않는다(T15 자격증명과 같은 잣대).
+  codex `--sandbox` **채택은 "증명 후 채택"** 순서 — HX 컨테이너 안에서
+  효과가 실측되면 값 세분(`spawn_time_policy` 등)을 후속 SCP로 낸다.
+
+이 재구성의 이점: 값이 "codex 능력"이 아니라 "HX 의존"을 반영하므로
+codex `--sandbox` 증명을 기다리지 않고 확정할 수 있다.
+
 ## 값 선택의 의도 — `container_only` (리뷰어, 이견 환영)
 
 초안은 `spawn_time`이었으나 `container_only`로 바꿔 제안한다. **의도를
