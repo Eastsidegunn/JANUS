@@ -90,6 +90,12 @@
 - 2026-09-06: 구현·CI 게이트 완료. 실 토큰 컨테이너 세션은 문서화된 잔여(B결정) — docs/v0.1-release-acceptance.md §2 잔여, docs/traceability.md.
 - 완료 기준: Claude Code spawn에서 에이전트 프로세스가 컨테이너 내부에 존재하고, 워크스페이스 변경이 overlay upper에 잡히며, egress가 프록시를 경유함을 통합 테스트로 확인.
 
+## T16. Codex 어댑터 완성 (§8-2 Codex 실 세션)
+- 내용: Codex 독립 실행파일(cmd/), 비대화형 승인 경로 설계, [H] 실 codex 세션 smoke.
+- 대상: FR-ADP-09, §8-2 (Codex 부분)
+- 완료 기준: 실 codex 세션에서 자식 툴 콜이 child span으로 기록되고 승인 게이트가 동작. 픽스처 밖 동작을 [H] 실측(T9 교훈).
+- 근거: docs/v0.1-release-acceptance.md "Codex 실 세션 — 후속 종결 조건".
+
 ## 이후 (T16+, 착수 전 사람 판단 필요)
 - pi / OpenClaw / 사내 에이전트 어댑터 (contracts 안정성의 성적표)
 - exec 감사(eBPF), Postgres store, 규칙 엔진 — 전부 명세 부록 A의 미결 확정 후.
