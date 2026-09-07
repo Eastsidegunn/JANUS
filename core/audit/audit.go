@@ -82,6 +82,11 @@ type Report struct {
 	Rows            []Row
 	EffectComplete  bool
 	NetChangesKnown bool
+	// ControlModeBySpan은 각 child span의 통제 방식이다 (SCP-T16-001, §Q5).
+	// tool_approval=툴별 부모 승인 게이트(Claude), container_only=컨테이너
+	// 격리에만 의존(Codex, 동기 승인 훅 부재). 감사가 command execution을
+	// "부모가 개별 승인한 것"과 "그렇지 않은 것"으로 구분하게 한다.
+	ControlModeBySpan map[string]gen.SubagentSpawnPayloadControlMode
 }
 
 // CanonicalPath converts an adapter/tool path into a relative POSIX workspace
@@ -124,7 +129,7 @@ func CanonicalPath(raw, workspaceTarget string) (string, error) {
 func DecodeEvents(events []gen.EventRecord, workspaceTarget string) ([]IntentAction, []EffectAction, Report, error) {
 	var intents []IntentAction
 	var effects []EffectAction
-	report := Report{NetChangesKnown: true}
+	report := Report{NetChangesKnown: true, ControlModeBySpan: map[string]gen.SubagentSpawnPayloadControlMode{}}
 	var traceID string
 	for _, event := range events {
 		if event.TraceID == "" {
@@ -136,6 +141,18 @@ func DecodeEvents(events []gen.EventRecord, workspaceTarget string) ([]IntentAct
 			return nil, nil, Report{}, fmt.Errorf("audit: 복수 trace_id (%s, %s)", traceID, event.TraceID)
 		}
 		switch event.Kind {
+		case gen.KindSubagentSpawn:
+			var payload gen.SubagentSpawnPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return nil, nil, Report{}, fmt.Errorf("audit: subagent spawn seq %d: %w", event.Seq, err)
+			}
+			if event.SpanID == "" {
+				return nil, nil, Report{}, fmt.Errorf("audit: subagent spawn span_id가 비어 있음 (seq %d)", event.Seq)
+			}
+			if prior, ok := report.ControlModeBySpan[event.SpanID]; ok && prior != payload.ControlMode {
+				return nil, nil, Report{}, fmt.Errorf("audit: span %s의 control_mode 충돌 (seq %d)", event.SpanID, event.Seq)
+			}
+			report.ControlModeBySpan[event.SpanID] = payload.ControlMode
 		case gen.KindSubagentToolCall:
 			var payload gen.SubagentToolCallPayload
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {

@@ -249,7 +249,7 @@ func TestCommitSpawnMintsLeaseBoundReceiptOnlyAfterDurableAck(t *testing.T) {
 	defer writer.Close()
 	payload, _ := json.Marshal(gen.SubagentSpawnPayload{
 		Adapter: "world", Instruction: "test", Depth: 0, Budget: gen.SpawnBudget{Tokens: 1, TimeMs: 1, MaxDepth: 1},
-		WorldBackend: metadata.Backend, ProfileID: &metadata.ProfileID, ImageDigest: &metadata.ImageDigest, Mounts: metadata.Mounts,
+		WorldBackend: metadata.Backend, ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, ProfileID: &metadata.ProfileID, ImageDigest: &metadata.ImageDigest, Mounts: metadata.Mounts,
 	})
 	parent := "1111111111111111"
 	record := world.SpawnRecord(gen.EventRecord{
@@ -286,7 +286,7 @@ func TestCommitSpawnRejectsMismatchBeforeWriter(t *testing.T) {
 	defer writer.Close()
 	wrong := "sha256:" + strings.Repeat("b", 64)
 	p := "p"
-	payload, _ := json.Marshal(gen.SubagentSpawnPayload{Adapter: "world", Instruction: "x", Budget: gen.SpawnBudget{}, WorldBackend: metadata.Backend, ProfileID: &p, ImageDigest: &wrong})
+	payload, _ := json.Marshal(gen.SubagentSpawnPayload{Adapter: "world", Instruction: "x", Budget: gen.SpawnBudget{}, WorldBackend: metadata.Backend, ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, ProfileID: &p, ImageDigest: &wrong})
 	parent := "1111111111111111"
 	_, err = world.CommitSpawn(context.Background(), writer, prepared, world.SpawnRecord(gen.EventRecord{TraceID: strings.Repeat("1", 32), SpanID: strings.Repeat("2", 16), ParentSpanID: &parent, Ts: 1, Kind: gen.KindSubagentSpawn, Actor: "parent", Payload: payload}))
 	if err == nil || len(store.records()) != 0 {
@@ -321,7 +321,7 @@ func TestCommitSpawnRejectsExtensionMountAndBasicMetadataMismatchBeforeWriter(t 
 			}
 			defer writer.Close()
 			profile, image := metadata.ProfileID, metadata.ImageDigest
-			payload := gen.SubagentSpawnPayload{Adapter: "world", Instruction: "test", Depth: 0, Budget: gen.SpawnBudget{Tokens: 1, TimeMs: 1, MaxDepth: 1}, WorldBackend: metadata.Backend, ProfileID: &profile, ImageDigest: &image, Mounts: metadata.Mounts, Extensions: metadata.Extensions}
+			payload := gen.SubagentSpawnPayload{Adapter: "world", Instruction: "test", Depth: 0, Budget: gen.SpawnBudget{Tokens: 1, TimeMs: 1, MaxDepth: 1}, WorldBackend: metadata.Backend, ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, ProfileID: &profile, ImageDigest: &image, Mounts: metadata.Mounts, Extensions: metadata.Extensions}
 			tc.mutate(&payload)
 			bytes, err := json.Marshal(payload)
 			if err != nil {

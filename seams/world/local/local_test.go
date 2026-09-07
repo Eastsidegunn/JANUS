@@ -1283,7 +1283,7 @@ func commitPreparedForTest(spec world.SpawnSpec, prepared *preparedLease, store 
 	payload, err := json.Marshal(gen.SubagentSpawnPayload{
 		Adapter: "world", Instruction: "test", Depth: spec.Depth(),
 		Budget:       gen.SpawnBudget{Tokens: budget.Tokens, TimeMs: budget.TimeMs, MaxDepth: budget.MaxDepth},
-		WorldBackend: metadata.Backend, ProfileID: &profileID, ImageDigest: &digest, Mounts: metadata.Mounts,
+		WorldBackend: metadata.Backend, ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, ProfileID: &profileID, ImageDigest: &digest, Mounts: metadata.Mounts,
 	})
 	if err != nil {
 		_ = writer.Close()

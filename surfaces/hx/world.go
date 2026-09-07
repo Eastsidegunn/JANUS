@@ -28,6 +28,7 @@ type worldLaunch struct {
 	AdapterBaseEnv []string
 	AdapterStderr  io.Writer
 	AdapterName    string
+	ControlMode    gen.SubagentSpawnPayloadControlMode
 	Instruction    string
 	Workspace      string
 	Budget         gen.Budget
@@ -82,8 +83,16 @@ func startProductionWorld(ctx context.Context, launch worldLaunch) (_ *activeWor
 		return nil, fmt.Errorf("hx: collector lower baseline: %w", err)
 	}
 	profileID, imageDigest := metadata.ProfileID, metadata.ImageDigest
+	if launch.ControlMode != gen.SubagentSpawnPayloadControlModeToolApproval &&
+		launch.ControlMode != gen.SubagentSpawnPayloadControlModeContainerOnly {
+		// control_mode를 추측하지 않는다 — 어댑터의 승인 능력을 아는 호출자가
+		// 명시해야 한다(SCP-T16-001). tool_approval=툴별 부모 승인(Claude),
+		// container_only=컨테이너 격리만(Codex, 동기 승인 훅 부재).
+		return nil, fmt.Errorf("hx: world spawn에 control_mode 미지정")
+	}
 	payload, err := json.Marshal(gen.SubagentSpawnPayload{
-		Adapter: launch.AdapterName, Instruction: launch.Instruction, Depth: launch.Depth,
+		ControlMode: launch.ControlMode,
+		Adapter:     launch.AdapterName, Instruction: launch.Instruction, Depth: launch.Depth,
 		Budget: gen.SpawnBudget{
 			Tokens: launch.Budget.Tokens, TimeMs: launch.Budget.TimeMs, MaxDepth: launch.Budget.MaxDepth,
 		},

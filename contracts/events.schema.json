@@ -844,6 +844,13 @@
           "items": {
             "$ref": "#/$defs/subagentSpawnMount"
           }
+        },
+        "control_mode": {
+          "enum": [
+            "tool_approval",
+            "container_only"
+          ],
+          "$comment": "이 세션의 통제 방식 (SCP-T16-001). tool_approval=툴별 부모 승인 게이트(Claude), container_only=HX 컨테이너 격리에만 의존(Codex). codex는 툴별 동기 승인 훅이 없어 강등되며, 값은 codex 능력이 아니라 HX가 의존하는 통제를 뜻한다"
         }
       },
       "required": [
@@ -851,7 +858,8 @@
         "instruction",
         "depth",
         "budget",
-        "world_backend"
+        "world_backend",
+        "control_mode"
       ],
       "oneOf": [
         {
@@ -871,6 +879,11 @@
             },
             "world_backend": {
               "const": "none"
+            },
+            "control_mode": {
+              "enum": [
+                "tool_approval"
+              ]
             }
           },
           "additionalProperties": false
@@ -908,6 +921,12 @@
               "items": {
                 "$ref": "#/$defs/subagentSpawnMount"
               }
+            },
+            "control_mode": {
+              "enum": [
+                "tool_approval",
+                "container_only"
+              ]
             }
           },
           "required": [
@@ -958,6 +977,12 @@
                 "$ref": "#/$defs/subagentSpawnExtension"
               },
               "$comment": "배열은 name/version/source 기준 결정적 순서이며 중복 항목을 허용하지 않는다."
+            },
+            "control_mode": {
+              "enum": [
+                "tool_approval",
+                "container_only"
+              ]
             }
           },
           "required": [
