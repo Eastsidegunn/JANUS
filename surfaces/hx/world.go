@@ -90,6 +90,9 @@ func startProductionWorld(ctx context.Context, launch worldLaunch) (_ *activeWor
 		// container_only=컨테이너 격리만(Codex, 동기 승인 훅 부재).
 		return nil, fmt.Errorf("hx: world spawn에 control_mode 미지정")
 	}
+	if launch.AdapterName == "codex" && launch.ControlMode != gen.SubagentSpawnPayloadControlModeContainerOnly {
+		return nil, fmt.Errorf("hx: codex world spawn은 container_only control_mode가 필요함")
+	}
 	payload, err := json.Marshal(gen.SubagentSpawnPayload{
 		ControlMode: launch.ControlMode,
 		Adapter:     launch.AdapterName, Instruction: launch.Instruction, Depth: launch.Depth,

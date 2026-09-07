@@ -84,3 +84,32 @@ func TestProductionWorldActivationFailureIsNotMisreportedAsAbortFailure(t *testi
 			prepared.FakeActivationCount(), prepared.FakeAborted())
 	}
 }
+
+func TestProductionWorldCodexRequiresContainerOnly(t *testing.T) {
+	ctx := context.Background()
+	lower := t.TempDir()
+	log, err := sqlite.Open(ctx, t.TempDir()+"/events.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	digest := "sha256:" + strings.Repeat("b", 64)
+	prepared := worldtest.NewFakePreparedLease(world.SpawnMetadata{
+		Backend: gen.SubagentSpawnPayloadWorldBackendLocalPodman, ProfileID: "p", ImageDigest: digest,
+		Mounts: []gen.SubagentSpawnMount{{SourcePath: lower, TargetPath: gen.SubagentSpawnMountTargetPathWorkspace, Mode: gen.SubagentSpawnMountModeOverlay, UpperRef: "upper"}},
+	}, "/host/upper", nil)
+	backend := worldtest.NewFakeBackend(prepared)
+	effective := world.NewEffectivePolicy(policy.SandboxConfig{ProfileID: "p", Workspace: "/workspace", FSScope: []string{"/workspace"}, Budget: gen.Budget{Tokens: 1, TimeMs: 1, MaxDepth: 1}, Approval: policy.ApprovalManual})
+	base := world.NewSpawnSpec(effective, world.NewImageReference("repo", digest), []string{"codex"}, 0, strings.Repeat("1", 32), strings.Repeat("2", 16), world.AgentIdentity{UID: 1000, GID: 1000}, nil)
+	launch := worldLaunch{Backend: backend, Writer: log.Writer, TraceID: strings.Repeat("1", 32), ParentSpan: strings.Repeat("2", 16), SpawnSpec: base, AdapterCommand: []string{"unused"}, AdapterName: "codex", ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, Instruction: "x", Workspace: lower, Budget: effective.Budget(), ProfileID: "p"}
+	if _, err := startProductionWorld(ctx, launch); err == nil || !strings.Contains(err.Error(), "codex") {
+		t.Fatalf("codex tool_approval not rejected: %v", err)
+	}
+	if prepared.FakeActivationCount() != 0 || !prepared.FakeAborted() {
+		t.Fatalf("rejected launch had side effects: activations=%d aborted=%v", prepared.FakeActivationCount(), prepared.FakeAborted())
+	}
+	launch.ControlMode = gen.SubagentSpawnPayloadControlModeContainerOnly
+	if _, err := startProductionWorld(ctx, launch); err == nil || strings.Contains(err.Error(), "container_only") {
+		t.Fatalf("container_only hit control guard: %v", err)
+	}
+}
