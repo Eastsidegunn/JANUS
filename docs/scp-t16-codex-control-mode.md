@@ -36,6 +36,31 @@ meanings and are closed by `additionalProperties:false`.
 - Existing payloads remain valid; the change is additive only where the
   discriminator requires it and must preserve the none/Claude branches.
 
+## codex 샌드박스 실측 — 후속 근거 (2026-09-07, [H] 로컬)
+
+값 확정 후, codex 0.153.4의 `--sandbox`가 실제로 실행을 좁히는지 사용자
+실제 macOS 터미널(관리형 환경 아님)에서 인증·API 없이 실측했다.
+
+```
+codex sandbox -c 'sandbox_mode="read-only"'      → sh: Operation not permitted, exit 1 (쓰기 막힘)
+codex sandbox -c 'sandbox_mode="workspace-write"' → exit 0, 파일 생성        (쓰기 허용)
+```
+
+양성·음성 대조가 깨끗하다. 초기 05 meta의 "정책이 있어도 뚫림"은 정정된다 —
+그것은 `/tmp`가 workspace-write 허용 영역이라 뚫린 것이고, read-only에서는
+실제로 막힌다. **codex `--sandbox`는 spawn-time에 실행을 진짜로 제한한다.**
+
+그럼에도 `container_only` 값은 유지한다. 이 실측이 증명한 것과 아닌 것:
+- 증명됨: codex 샌드박스가 **macOS Seatbelt로** 실행을 좁힌다.
+- 미증명: 그것이 **HX 리눅스 rootless 컨테이너 안(Landlock)에서** 좁히는가.
+  컨테이너 안의 codex 샌드박스는 중첩 샌드박스이며 작동 보장이 다르다.
+
+control_mode는 "HX가 의존하는 증명된 통제"를 뜻하므로, HX 컨테이너 안에서
+codex 샌드박스 작동이 증명되기 전까지 `container_only`가 정확하다. 이 실측은
+후속 SCP(`spawn_time_policy` 세분)의 **근거 절반**이다 — 나머지 절반은
+리눅스 CI 프로브에서 "HX 컨테이너 안 codex 샌드박스가 read-only 쓰기를
+막는가"를 확인하는 것이다.
+
 ## 값 확정 — `container_only` [H] (2026-09-07)
 
 codex 0.153.4 실측이 초기 전제를 뒤집었다. codex는 "정책 없음"이 아니라
