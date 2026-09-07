@@ -339,7 +339,7 @@ func runNormalIntegration(t *testing.T, parent context.Context, artifacts integr
 	adapterHashBefore := fileSHA256(t, artifacts.adapter)
 	active, err := startProductionWorld(ctx, worldLaunch{
 		Backend: backend, SpawnSpec: spawnSpec, Writer: writer, TraceID: traceID, ParentSpan: parentSpan,
-		AdapterCommand: []string{artifacts.adapter}, AdapterName: "world-testagent",
+		AdapterCommand: []string{artifacts.adapter}, AdapterName: "world-testagent", ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval,
 		AdapterStderr: os.Stderr,
 		Instruction:   string(scenarioBytes), Workspace: "/workspace", Budget: budget, Depth: 0,
 		ProfileID: "world-integration", Approval: subagent.Spec{Approval: policy.ApprovalManual, Decider: decider},
@@ -509,7 +509,7 @@ func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts int
 		SpawnSpec: world.NewSpawnSpec(effective, world.NewImageReference(artifacts.agentRepository, artifacts.agentDigest), []string{"integration"}, 0, traceID, childSpan, world.AgentIdentity{UID: 1000, GID: 1000}, nil),
 		Writer:    writer, TraceID: traceID, ParentSpan: parentSpan, AdapterCommand: []string{artifacts.adapter},
 		AdapterStderr: os.Stderr,
-		AdapterName:   "world-testagent", Instruction: string(instruction), Workspace: "/workspace",
+		AdapterName:   "world-testagent", ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, Instruction: string(instruction), Workspace: "/workspace",
 		Budget: budget, ProfileID: "lifecycle-" + mode, Approval: subagent.Spec{Approval: policy.ApprovalManual, Decider: policy.DenyAll{}},
 	})
 	if err != nil {

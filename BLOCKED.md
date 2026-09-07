@@ -1,5 +1,31 @@
 # BLOCKED
 
+## T16 SCP-T16-001 — control_mode 값 실측 차단 (2026-09-07)
+
+기준 HEAD: `45eb2c091f75f17e25da7f967117a3865bf1d13b` (main).
+스키마 형태 승인은 유지한다. 값 미확정으로 schema/codegen/emitter/audit
+구현에는 착수하지 않았다.
+
+- 로컬 설치: `/Users/eastsidegunn/.local/bin/codex`, `codex-cli 0.153.4`.
+- `codex --help`: `-a, --ask-for-approval`은 `on-request`, `never`를
+  열거한다. `untrusted`가 도움말에 없다는 사실만으로 제거됐다고 단정하지 않는다.
+- `codex exec --help`: `-s, --sandbox`는 `read-only`, `workspace-write`,
+  `danger-full-access`. 모델 생성 shell command의 sandbox 선택이라고 설명한다.
+  exec 자체에는 `-a`가 없으며 글로벌 옵션 위치가 필요하다.
+- `codex sandbox -c 'sandbox_mode="read-only"' /usr/bin/true`는
+  `sandbox-exec: sandbox_apply: Operation not permitted`로 실패했다.
+- `codex -a never exec --ephemeral --json -s read-only`로 임시 파일 생성만
+  요청한 프로브는 exit 1, `failed to initialize in-process app-server client:
+  Operation not permitted`였다. native command 실행 전에 실패했으므로
+  파일 미생성을 정책 enforcement 증거로 사용하지 않는다.
+
+현재 관리형 실행 환경에서는 정책의 양성/음성 대조를 완료하지 못했다.
+05 meta의 untrusted 동작 유지 여부도 미확인이다. `container_only`와
+`spawn_time_policy` 어느 값도 확정하지 않는다. [H]의 일반 로컬 터미널에서
+격리된 임시 디렉터리로 동일 동작의 허용/거부 대조와 untrusted 실 세션을
+측정해야 한다. 자격증명은 CI/원격에 보내지 않는다. 좁힘이 확인되면
+제안 값을 보고하고 [H] 재확인 전 구현하지 않는다.
+
 ## T16-1 — Codex control-mode marker (2026-09-06)
 
 **Blocked pending SCP-T16-001.** The required durable distinction between

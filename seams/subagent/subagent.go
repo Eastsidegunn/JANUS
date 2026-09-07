@@ -85,6 +85,7 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 			MaxDepth: spec.Budget.MaxDepth,
 		},
 		WorldBackend: gen.SubagentSpawnPayloadWorldBackendNone,
+		ControlMode:  gen.SubagentSpawnPayloadControlModeToolApproval,
 	})
 	if err != nil {
 		return nil, err

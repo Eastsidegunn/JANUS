@@ -25,7 +25,7 @@ func fixtureSnapshot() []gen.EventRecord {
 	parent, profile, image, raw := testRoot, "sandbox", "sha256:"+strings.Repeat("a", 64), ""
 	spawn, _ := json.Marshal(gen.SubagentSpawnPayload{
 		Adapter: "codex", Instruction: "test", Budget: gen.SpawnBudget{Tokens: 10, TimeMs: 20, MaxDepth: 2},
-		WorldBackend: gen.SubagentSpawnPayloadWorldBackendLocalPodman, ProfileID: &profile, ImageDigest: &image,
+		WorldBackend: gen.SubagentSpawnPayloadWorldBackendLocalPodman, ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, ProfileID: &profile, ImageDigest: &image,
 		Mounts: []gen.SubagentSpawnMount{{SourcePath: "/tmp/work", TargetPath: gen.SubagentSpawnMountTargetPathWorkspace, Mode: gen.SubagentSpawnMountModeOverlay, UpperRef: "u"}},
 	})
 	done, _ := json.Marshal(gen.SubagentDonePayload{Status: gen.SubagentDonePayloadStatusOk, Result: "done"})

@@ -93,7 +93,7 @@ func TestT15HumanSmoke(t *testing.T) {
 	}
 	_, err = startProductionWorld(ctx, worldLaunch{
 		Backend: backend, SpawnSpec: spawn, Writer: writer, TraceID: traceID, ParentSpan: parentSpan,
-		AdapterCommand: []string{adapter}, AdapterName: "claudecode", AdapterStderr: ioDiscard{},
+		AdapterCommand: []string{adapter}, AdapterName: "claudecode", ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, AdapterStderr: ioDiscard{},
 		AdapterBaseEnv: []string{"PATH=" + os.Getenv("PATH")},
 		Instruction:    "이 실행은 시작되면 안 된다.", Workspace: "/workspace", Budget: budget, Depth: 0, ProfileID: "t15-human-expired",
 		Approval: subagent.Spec{Approval: policy.ApprovalManual, Decider: policy.DenyAll{}},
@@ -179,7 +179,7 @@ func runT15SmokeCase(t *testing.T, parent context.Context, backend world.Backend
 	var stderr bytes.Buffer
 	active, err := startProductionWorld(ctx, worldLaunch{
 		Backend: backend, SpawnSpec: spawn, Writer: writer, TraceID: traceID, ParentSpan: parentSpan,
-		AdapterCommand: []string{adapter}, AdapterName: "claudecode", AdapterStderr: &stderr,
+		AdapterCommand: []string{adapter}, AdapterName: "claudecode", ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, AdapterStderr: &stderr,
 		AdapterBaseEnv: []string{"PATH=" + os.Getenv("PATH")},
 		Instruction:    "Use the Write tool to create /workspace/t15-smoke-marker.txt containing exactly T15-SMOKE. Then use the Bash tool to run `curl -fsS --max-time 5 https://example.com/ >/dev/null || true` and `curl --max-time 2 http://1.1.1.1/ >/dev/null || true`. Then respond exactly T15_SMOKE_DONE.",
 		Workspace:      "/workspace", Budget: budget, Depth: 0, ProfileID: "t15-human-smoke",
@@ -285,7 +285,7 @@ func runT15ExpiryCase(t *testing.T, parent context.Context, backend world.Backen
 	var stderr bytes.Buffer
 	active, err := startProductionWorld(ctx, worldLaunch{
 		Backend: backend, SpawnSpec: spawn, Writer: writer, TraceID: traceID, ParentSpan: parentSpan,
-		AdapterCommand: []string{adapter}, AdapterName: "claudecode", AdapterStderr: &stderr,
+		AdapterCommand: []string{adapter}, AdapterName: "claudecode", ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, AdapterStderr: &stderr,
 		AdapterBaseEnv: []string{"PATH=" + os.Getenv("PATH")},
 		Instruction:    "Use the Bash tool to run `sleep 120`, then respond exactly T15_EXPIRY_DONE. Do not use any other tool.",
 		Workspace:      "/workspace", Budget: budget, Depth: 0, ProfileID: "t15-human-expiry",

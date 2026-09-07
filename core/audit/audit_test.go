@@ -279,3 +279,40 @@ func mustJSON(t *testing.T, value any) json.RawMessage {
 	}
 	return b
 }
+
+// TestControlModeBySpanDistinguishesCodexFromClaude는 SCP-T16-001 §Q5 조건 1을
+// 지킨다: 감사가 spawn payload의 control_mode를 읽어 Codex(container_only,
+// 툴별 부모 승인 없음)를 Claude(tool_approval)와 구분한다. 이 구분이 없으면
+// 감사가 Codex 세션을 Claude와 같은 통제로 오독한다.
+func TestControlModeBySpanDistinguishesCodexFromClaude(t *testing.T) {
+	fs, _ := json.Marshal(gen.FsChangedPayload{Changes: []gen.FsChangedPayloadChangesItem{
+		{Path: "x.txt", Hash: "sha256:" + strings.Repeat("a", 64), ChangeType: gen.FsChangedPayloadChangesItemChangeTypeAdded},
+	}})
+	claudeSpawn, _ := json.Marshal(gen.SubagentSpawnPayload{
+		Adapter: "claude-code", Instruction: "x", Depth: 1,
+		Budget:       gen.SpawnBudget{Tokens: 1, TimeMs: 1, MaxDepth: 1},
+		WorldBackend: gen.SubagentSpawnPayloadWorldBackendLocalPodman,
+		ControlMode:  gen.SubagentSpawnPayloadControlModeToolApproval,
+	})
+	codexSpawn, _ := json.Marshal(gen.SubagentSpawnPayload{
+		Adapter: "codex", Instruction: "x", Depth: 1,
+		Budget:       gen.SpawnBudget{Tokens: 1, TimeMs: 1, MaxDepth: 1},
+		WorldBackend: gen.SubagentSpawnPayloadWorldBackendLocalPodman,
+		ControlMode:  gen.SubagentSpawnPayloadControlModeContainerOnly,
+	})
+	events := []gen.EventRecord{
+		{Seq: 1, TraceID: "t", SpanID: "claude-span", Kind: gen.KindSubagentSpawn, Actor: "parent", Payload: claudeSpawn},
+		{Seq: 2, TraceID: "t", SpanID: "codex-span", Kind: gen.KindSubagentSpawn, Actor: "parent", Payload: codexSpawn},
+		{Seq: 3, TraceID: "t", SpanID: "codex-span", Kind: gen.KindCollectorFsChanged, Actor: "collector", Payload: fs},
+	}
+	_, _, report, err := DecodeEvents(events, "/workspace")
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if report.ControlModeBySpan["claude-span"] != gen.SubagentSpawnPayloadControlModeToolApproval {
+		t.Fatalf("claude span control_mode=%q, want tool_approval", report.ControlModeBySpan["claude-span"])
+	}
+	if report.ControlModeBySpan["codex-span"] != gen.SubagentSpawnPayloadControlModeContainerOnly {
+		t.Fatalf("codex span control_mode=%q, want container_only", report.ControlModeBySpan["codex-span"])
+	}
+}

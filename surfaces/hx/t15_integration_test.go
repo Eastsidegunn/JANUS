@@ -64,7 +64,7 @@ func TestClaudeWorldIntegration(t *testing.T) {
 	var adapterStderr bytes.Buffer
 	active, err := startProductionWorld(ctx, worldLaunch{
 		Backend: backend, SpawnSpec: spawnSpec, Writer: writer, TraceID: traceID, ParentSpan: parentSpan,
-		AdapterCommand: []string{claudeAdapter}, AdapterName: "claudecode", AdapterStderr: &adapterStderr,
+		AdapterCommand: []string{claudeAdapter}, AdapterName: "claudecode", ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, AdapterStderr: &adapterStderr,
 		Instruction: "Respond with exactly OK.", Workspace: "/workspace", Budget: budget, Depth: 0,
 		ProfileID: "t15-claude-auth", Approval: subagent.Spec{Approval: policy.ApprovalManual, Decider: policy.DenyAll{}},
 		// Keep the host adapter environment minimal. In particular, a runner

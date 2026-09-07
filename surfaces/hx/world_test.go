@@ -32,7 +32,7 @@ func TestProductionWorldRejectsNoneWithoutActivation(t *testing.T) {
 	_, err = startProductionWorld(ctx, worldLaunch{
 		Backend: backend, Writer: log.Writer, TraceID: strings.Repeat("1", 32), ParentSpan: strings.Repeat("2", 16),
 		SpawnSpec:      world.NewSpawnSpec(effective, world.NewImageReference("repo", "sha256:"+strings.Repeat("a", 64)), []string{"agent"}, 0, strings.Repeat("1", 32), strings.Repeat("2", 16), world.AgentIdentity{UID: 1000, GID: 1000}, nil),
-		AdapterCommand: []string{"unused"}, AdapterName: "world", Instruction: "x", Workspace: "/workspace",
+		AdapterCommand: []string{"unused"}, AdapterName: "world", ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, Instruction: "x", Workspace: "/workspace",
 		Budget: gen.Budget{Tokens: 1, TimeMs: 1, MaxDepth: 1}, ProfileID: "p",
 	})
 	if err == nil || !strings.Contains(err.Error(), "world_backend") {
@@ -73,7 +73,7 @@ func TestProductionWorldActivationFailureIsNotMisreportedAsAbortFailure(t *testi
 		Backend: backend, Writer: log.Writer, TraceID: strings.Repeat("1", 32), ParentSpan: strings.Repeat("3", 16),
 		SpawnSpec: world.NewSpawnSpec(effective, world.NewImageReference("repo", digest), []string{"agent"}, 0,
 			strings.Repeat("1", 32), strings.Repeat("2", 16), world.AgentIdentity{UID: 1000, GID: 1000}, nil),
-		AdapterCommand: []string{"unused"}, AdapterName: "world", Instruction: "x", Workspace: lower,
+		AdapterCommand: []string{"unused"}, AdapterName: "world", ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, Instruction: "x", Workspace: lower,
 		Budget: gen.Budget{Tokens: 1, TimeMs: 1, MaxDepth: 1}, ProfileID: profileID,
 	})
 	if !errors.Is(err, activationErr) || strings.Contains(err.Error(), "Abort") {

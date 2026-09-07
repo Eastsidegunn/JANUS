@@ -186,6 +186,13 @@ type SubagentSpawnMount struct {
 	UpperRef   string                       `json:"upper_ref"`
 }
 
+type SubagentSpawnPayloadControlMode string
+
+const (
+	SubagentSpawnPayloadControlModeToolApproval  SubagentSpawnPayloadControlMode = "tool_approval"
+	SubagentSpawnPayloadControlModeContainerOnly SubagentSpawnPayloadControlMode = "container_only"
+)
+
 type SubagentSpawnPayloadWorldBackend string
 
 const (
@@ -196,6 +203,7 @@ const (
 type SubagentSpawnPayload struct {
 	Adapter      string                           `json:"adapter"`
 	Budget       SpawnBudget                      `json:"budget"`
+	ControlMode  SubagentSpawnPayloadControlMode  `json:"control_mode"`
 	Depth        int64                            `json:"depth"`
 	Extensions   []SubagentSpawnExtension         `json:"extensions,omitempty"`
 	ImageDigest  *string                          `json:"image_digest,omitempty"`
