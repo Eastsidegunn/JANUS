@@ -3,7 +3,7 @@
 실행은 인증된 로컬 환경에서만 한다. 토큰 값은 출력·로그·저장소에 기록하지 않는다.
 
 1. Codex 설치와 인증을 준비하고 `codex --version`을 확인한다.
-2. 플래그 실측: `codex exec --help`에서 `--json`, `--ephemeral`, `--skip-git-repo-check`, `--ignore-user-config`, `-s`, `-a`가 존재하는지 확인한다.
+2. 플래그 실측: `codex exec --help`에서 `--json`, `--ephemeral`, `--skip-git-repo-check`, `--ignore-user-config`, `-s`가 존재하는지 (codex exec는 -a 미지원 — 승인은 sandbox 모드로 통제) 확인한다.
 3. 실행 명령:
 
 ```sh
