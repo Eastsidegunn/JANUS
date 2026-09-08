@@ -37,9 +37,16 @@ func TestCodexSmoke(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "-s", "workspace-write", "-C", workspace, "현재 디렉토리에 codex-smoke.txt 파일을 만들고 내용은 ok로 해라")
-	native, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("codex execution failed: %v\n%s", err, tail(native))
+	// stdout(§5.2 JSON)과 stderr(진단)를 분리한다. CombinedOutput은 stderr의
+	// 비-JSON 진단 줄을 JSON 스트림에 섞어 파서를 깬다 — 골든은 stdout만 녹화됐다.
+	var stdout, stderrBuf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderrBuf
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("codex execution failed: %v\nstderr:\n%s", err, tail(stderrBuf.Bytes()))
+	}
+	native := stdout.Bytes()
+	if s := stderrBuf.Bytes(); len(s) > 0 {
+		t.Logf("codex stderr tail:\n%s", tail(s))
 	}
 	input := append([]byte(`{"v":1,"cmd":"task","payload":{}}`+"\n"), native...)
 	var normalized, diag bytes.Buffer
