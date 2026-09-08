@@ -28,6 +28,7 @@ lint:
 	$(GO) vet -tags smoke ./seams/subagent/claudecode/
 	# T15 사람 smoke도 컴파일·vet만 수행한다. 실제 Podman/토큰 실행은 [H]만 한다.
 	$(GO) vet -tags t15smoke ./surfaces/hx ./seams/world/local
+	$(GO) vet -tags codexsmoke ./seams/subagent/codex
 	$(GO) mod tidy -diff
 	@unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \
