@@ -36,7 +36,7 @@ func TestCodexSmoke(t *testing.T) {
 	workspace := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "-s", "workspace-write", "-a", "never", "-C", workspace, "현재 디렉토리에 codex-smoke.txt 파일을 만들고 내용은 ok로 해라")
+	cmd := exec.CommandContext(ctx, path, "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "-s", "workspace-write", "-C", workspace, "현재 디렉토리에 codex-smoke.txt 파일을 만들고 내용은 ok로 해라")
 	native, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("codex execution failed: %v\n%s", err, tail(native))
