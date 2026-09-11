@@ -102,6 +102,13 @@
 - 근거: ../Rhizome/docs/scp-rhz032-decision-sheet.md 결정 2·3번([H] 2026-09-10, T16+ 착수 판단 겸함), ../Rhizome/docs/janus-execution-contract.md §3·§8-①. 물리 형식(claim/tombstone 저장)은 JANUS 결정 사항.
 - 완료 기준: (a) 같은 key+fingerprint 재요청이 새 spawn 없이 동일 세션을 반환하고, 같은 key+다른 fingerprint가 `KEY_CONFLICT`로 거부되는 테스트, (b) 동시 두 요청에서 launch가 정확히 하나인 테스트, (c) 삭제된 세션 key 재사용이 tombstone으로 거부되는 테스트, (d) 정책 파일 변조 시 `POLICY_CHANGED` 거부 테스트 — macOS `make ci` green. world 실행 게이트는 Linux CI(push) green 필수, 실 토큰 smoke는 [H] 직접 수행(결정 10번).
 - 주의: 공개 프로토콜 스키마는 Rhizome 임시 소유(결정 1번) — JANUS에 새 계약 파일을 만들지 않고, 스키마 필요 사항은 Rhizome 쪽 제안으로 회신한다. contracts/ 수정 금지 유지.
+- 2026-09-11: 구현 완료(PR #75), Rhizome 계약 정합 리뷰 **통과**. 개정 제안 8건은 계약 v1.1로 [H] 비준(docs/rhizome-contract-reply-t17.md §4). v1 상태 조회는 동일 요청 재제출로 갈음, 독립 Lookup은 계약 v2 예약. 병합은 [H] 몫.
+
+## T17-1. accept 레지스트리 ↔ 세션 로그 audit 대조 표면
+- 내용: 레지스트리 불변식 예외의 [H] 비준 조건 이행 — `hx audit` 또는 동급 표면이 accept 레지스트리의 claim·마커(db-initialized/launch)와 세션 로그의 `execution_binding`·session/start를 대조해 일치/불일치를 보고한다. 형식은 기존 hx audit 문화를 따른다. 레지스트리는 불변(수정·삭제 경로 금지) 유지, 예외는 accept 레지스트리 하나로 한정.
+- 대상: FR-AUD-01/02(대조 표면의 연장), FR-CLI-04
+- 근거: Rhizome 리뷰 결과(2026-09-11) — 레지스트리 불변식 예외 조건부 수용의 이행 조건. **T18 완료 전까지** 끝나야 한다.
+- 완료 기준: (a) 정상 경로에서 claim↔binding 일치 보고, (b) 인위적 불일치(claim은 있으나 binding 없는 세션, fingerprint/policy_hash가 claim과 다른 binding, 세션 파일 부재) 검출 테스트 green — `make ci`.
 
 ## T18. 원격 ApprovalDecider — 로컬 Unix 소켓 NDJSON relay
 - 내용: `policy.ApprovalDecider` 구현체 추가(DenyAll 외 최초의 운영 decider). 기존 approvalCoordinator의 durable request→Decide()→durable response 순서·deny 규칙(mismatch/timeout/lease 종료 = durable deny)을 그대로 보존한다. 소켓 소유권/권한·peer 검증, 요청 범위 상관(trace_id·span_id·request_id), deadline/lease, 같은 response_id 중복 응답 거부(다른 내용은 conflict), deny reason 필수. 원문 tool args는 relay로 내보내지 않는다 — digest와 안전 요약만(계약 §6.1). 결정 전 crash 후 재조회(전달 이력 없는 durable deny 관측) 지원. `hx run`에서 decider 선택 가능(기본은 여전히 DenyAll — 명시 opt-in). 자동 allow를 표현할 수 있는 어떤 경로도 만들지 않는다. 신원 미검증 기간에는 승인 기록에 `unverified-local-operator` 표시.
