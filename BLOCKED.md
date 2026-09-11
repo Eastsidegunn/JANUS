@@ -1,27 +1,5 @@
 # BLOCKED
 
-## T18 SCP-T18-001 — 승인 감사 필드의 이벤트 스키마 부재 (2026-09-12)
-
-기준: t18/approval-relay 브랜치 a01d932. relay listener 설계 검토 중
-[H] 비준 조건(로그 밖 원본 기록 예외는 accept 레지스트리 하나로 한정)에
-따라 durable 상태의 원본을 세션 이벤트 로그로 정했으나, 스키마 확인 결과:
-
-- durable 승인 판정 이벤트는 `policy/decision`이며 payload는
-  `{decision, profile_id, reason}` + `additionalProperties: false`
-  (contracts/events.schema.json policyDecisionPayload). **request_id 상관
-  필드조차 없다** — 현재는 span·순서로만 요청과 판정이 묶인다.
-- `subagent/approval_response`라는 이벤트 kind는 존재하지 않는다
-  (`ApprovalResponsePayload`는 wire.schema.json의 parent→adapter 명령).
-- 계약 §6.1이 요구하는 감사 필드(operation_id, response_id, actor_ref,
-  human_intent_id, correlation_id)와 재조회 응답의 response_seq 원천을
-  로그에 보존할 자리가 없다.
-
-contracts/ 수정 금지 조건에 따라 구현하지 않고 멈춘다. 스키마 변경 제안은
-docs/scp-t18-approval-audit-schema.md — events.schema.json은 JANUS 소유이나
-[H] 스키마 리뷰 필수(T1 주의 조항). [H] 승인 → 스키마·codegen 반영 후 T18
-재개. 그 전에는 "재시작 후 로그만으로 decided/expired 완전 재조회" 경로를
-구현·주장할 수 없다. dial 모델 위에 durable 로직을 쌓지 않는 방침 유지.
-
 ## T16 SCP-T16-001 — control_mode 값 실측 차단 (2026-09-07)
 
 기준 HEAD: `45eb2c091f75f17e25da7f967117a3865bf1d13b` (main).
