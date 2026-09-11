@@ -233,15 +233,32 @@ func contextSummary(role logd.Role, payload json.RawMessage) string {
 	return strings.TrimSpace(string(role))
 }
 
-// runCmd는 새 세션을 시작한다 (FR-CLI-01):
-// session/start → 어댑터 spawn → NDJSON 정규화·기록(child span) → session/end.
+// runCmd는 새 세션을 시작한다 (FR-CLI-01). 두 경로가 있다:
+//
+//   - 생산 경로(--request): T17 접수 계약 — request.json 검증, 정책 pin
+//     재검증, scoped key claim, production world 조립. 샌드박스 없는 시작
+//     경로가 아니다.
+//   - 스켈레톤 경로(T7, --request 부재): null 어댑터 워킹 스켈레톤.
+//     session/start → 어댑터 spawn → NDJSON 정규화·기록 → session/end.
 func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	session := fs.String("session", "", "세션 로그 파일 경로 (필수)")
-	adapter := fs.String("adapter", "", "어댑터 실행 파일 경로 (필수)")
-	workspace := fs.String("workspace", "/workspace", "어댑터에 전달할 워크스페이스 경로")
+	session := fs.String("session", "", "세션 로그 파일 경로")
+	adapter := fs.String("adapter", "", "어댑터 실행 파일 경로 (스켈레톤 경로 필수)")
+	workspace := fs.String("workspace", "/workspace", "어댑터에 전달할 워크스페이스 경로 (스켈레톤 경로)")
+	request := fs.String("request", "", "실행 요청 request.json 경로 (생산 경로)")
+	profilePath := fs.String("profile", "", "정책 프로파일 YAML (생산 경로 필수)")
+	overlays := stringListFlag{}
+	fs.Var(&overlays, "overlay", "추가 정책 프로파일 YAML (반복 가능)")
+	acceptRoot := fs.String("accept-root", "", "scoped key 접수 레지스트리 root (생산 경로 필수)")
+	worldConfigPath := fs.String("world-config", "", "world 조립 설정 JSON (생산 경로 필수)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *request != "" {
+		if *profilePath == "" || *acceptRoot == "" || *worldConfigPath == "" || fs.NArg() != 0 || *adapter != "" {
+			return fmt.Errorf("사용법: hx run --request <request.json> --profile <yaml> [--overlay <yaml> ...] --accept-root <dir> --world-config <json> [--session <db>]")
+		}
+		return runProductionCmd(*request, *profilePath, overlays, *acceptRoot, *worldConfigPath, *session)
 	}
 	if *session == "" || *adapter == "" || fs.NArg() != 1 {
 		return fmt.Errorf("사용법: hx run --session <db> --adapter <실행파일> [--workspace <경로>] <instruction>")

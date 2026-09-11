@@ -27,7 +27,9 @@ jobs:
   t15-linux-gate:
     name: t15-linux-gate / attempt ${{ matrix.attempt }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # T17 production-run gate joined this matrix; each attempt now builds the
+    # pinned Claude image for two tests, so the ceiling moved from 20 to 30.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
