@@ -40,6 +40,8 @@ func main() {
 		err = replayCmd(os.Args[2:])
 	case "audit":
 		err = auditCmd(os.Args[2:])
+	case "audit-accept":
+		err = auditAcceptCmd(os.Args[2:])
 	case "dump-config":
 		err = dumpConfigCmd(os.Args[2:])
 	default:
@@ -49,6 +51,25 @@ func main() {
 		fmt.Fprintln(os.Stderr, "hx:", err)
 		os.Exit(1)
 	}
+}
+
+func auditAcceptCmd(args []string) error {
+	fs := flag.NewFlagSet("audit-accept", flag.ContinueOnError)
+	root := fs.String("accept-root", "", "접수 레지스트리 root (필수)")
+	scope := fs.String("scope", "", "scoped key namespace (필수)")
+	key := fs.String("key", "", "idempotency key (필수)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *root == "" || *scope == "" || *key == "" || fs.NArg() != 0 {
+		return fmt.Errorf("사용법: hx audit-accept --accept-root <dir> --scope <scope> --key <key>")
+	}
+	var out bytes.Buffer
+	if err := auditAcceptance(context.Background(), *root, *scope, *key, &out); err != nil {
+		return err
+	}
+	_, err := os.Stdout.Write(out.Bytes())
+	return err
 }
 
 type auditQuery struct {

@@ -109,6 +109,7 @@
 - 대상: FR-AUD-01/02(대조 표면의 연장), FR-CLI-04
 - 근거: Rhizome 리뷰 결과(2026-09-11) — 레지스트리 불변식 예외 조건부 수용의 이행 조건. **T18 완료 전까지** 끝나야 한다.
 - 완료 기준: (a) 정상 경로에서 claim↔binding 일치 보고, (b) 인위적 불일치(claim은 있으나 binding 없는 세션, fingerprint/policy_hash가 claim과 다른 binding, 세션 파일 부재) 검출 테스트 green — `make ci`.
+- 2026-09-11: 구현 완료 — `hx audit-accept` (surfaces/hx/accept_audit.go), 완료 기준 (a)/(b) 테스트 green. docs/traceability.md 참조.
 
 ## T18. 원격 ApprovalDecider — 로컬 Unix 소켓 NDJSON relay
 - 내용: `policy.ApprovalDecider` 구현체 추가(DenyAll 외 최초의 운영 decider). 기존 approvalCoordinator의 durable request→Decide()→durable response 순서·deny 규칙(mismatch/timeout/lease 종료 = durable deny)을 그대로 보존한다. 소켓 소유권/권한·peer 검증, 요청 범위 상관(trace_id·span_id·request_id), deadline/lease, 같은 response_id 중복 응답 거부(다른 내용은 conflict), deny reason 필수. 원문 tool args는 relay로 내보내지 않는다 — digest와 안전 요약만(계약 §6.1). 결정 전 crash 후 재조회(전달 이력 없는 durable deny 관측) 지원. `hx run`에서 decider 선택 가능(기본은 여전히 DenyAll — 명시 opt-in). 자동 allow를 표현할 수 있는 어떤 경로도 만들지 않는다. 신원 미검증 기간에는 승인 기록에 `unverified-local-operator` 표시.
