@@ -1,8 +1,11 @@
 # SCP-T18-001 — 승인 감사 필드의 이벤트 스키마 변경 제안
 
-작성 2026-09-12, T18 작업 세션. **제안이며, [H] 스키마 리뷰·승인 전에는
-contracts/ 를 수정하지 않는다** (T1 주의 조항, CLAUDE.md 금지 행동).
-차단 기록: BLOCKED.md "T18 SCP-T18-001".
+작성 2026-09-12, T18 작업 세션. 차단 기록: BLOCKED.md "T18 SCP-T18-001".
+
+> **결정: 3안 승인** (2026-09-12, [H]) — policyDecisionPayload optional
+> 확장 + relay 경로의 필드 기록 테스트 의무화. `decision_source`는 enum
+> `local|relay|forced` 유지. 스키마 수정 커밋은 T1 조항대로 [H] 리뷰 후
+> 머지하며, 필드명 확정본은 Rhizome 리뷰어에게 사본 통지한다.
 
 ## 1. 왜 필요한가
 
