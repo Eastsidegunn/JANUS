@@ -154,6 +154,9 @@ func TestProductionAcceptThenLaunch(t *testing.T) {
 	if launched.Sandbox.Budget != (gen.Budget{Tokens: 500, TimeMs: 30000, MaxDepth: 1}) {
 		t.Fatalf("실효 budget이 요청 값으로 좁혀져야 함: %+v", launched.Sandbox.Budget)
 	}
+	if launched.Sandbox.Workspace != f.request.WorkspaceRef {
+		t.Fatalf("정책 sandbox workspace가 요청 workspace와 달라짐: %q != %q", launched.Sandbox.Workspace, f.request.WorkspaceRef)
+	}
 	if string(launched.Sandbox.Approval) != "manual" {
 		t.Fatalf("승인 모드가 manual이어야 함: %q", launched.Sandbox.Approval)
 	}

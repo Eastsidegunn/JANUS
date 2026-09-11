@@ -354,12 +354,18 @@ func parseWorldConfig(data []byte) (worldConfig, error) {
 	if cfg.StateRoot == "" {
 		return worldConfig{}, fmt.Errorf("world config: state_root 필수")
 	}
+	if err := local.ValidateImageReferenceConfig(cfg.ProxyImage.Repository, cfg.ProxyImage.Digest, cfg.ProxyImage.UID, cfg.ProxyImage.GID); err != nil {
+		return worldConfig{}, fmt.Errorf("world config: proxy image: %w", err)
+	}
 	for name, adapter := range cfg.Adapters {
 		if !approvedAdapters[name] {
 			return worldConfig{}, fmt.Errorf("world config: 승인 목록 밖 어댑터 %q", name)
 		}
 		if adapter.Bin == "" || len(adapter.AgentArgv) == 0 {
 			return worldConfig{}, fmt.Errorf("world config: 어댑터 %q에 bin/agent_argv 필수", name)
+		}
+		if err := local.ValidateImageReferenceConfig(adapter.Image.Repository, adapter.Image.Digest, adapter.Image.UID, adapter.Image.GID); err != nil {
+			return worldConfig{}, fmt.Errorf("world config: 어댑터 %q image: %w", name, err)
 		}
 		if adapter.ControlMode != "tool_approval" && adapter.ControlMode != "container_only" {
 			return worldConfig{}, fmt.Errorf("world config: 어댑터 %q control_mode %q — tool_approval|container_only만 허용", name, adapter.ControlMode)
@@ -410,7 +416,9 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 		TraceID: in.TraceID, ParentSpan: in.RootSpan,
 		AdapterCommand: []string{adapter.Bin}, AdapterName: in.Request.AdapterID,
 		ControlMode: controlMode, AdapterStderr: os.Stderr,
-		Instruction: in.Request.TaskRef.Instruction, Workspace: "/workspace",
+		// FR-SBX-02: in.Sandbox.Workspace는 host mount 원본이며, 어댑터는
+		// local backend가 그 overlay를 노출하는 container 내부 경로를 받는다.
+		Instruction: in.Request.TaskRef.Instruction, Workspace: local.ContainerWorkspacePath,
 		Budget: in.Sandbox.Budget, Depth: 0, ProfileID: in.Sandbox.ProfileID,
 		// T18 전까지 승인 decider는 DenyAll 고정 — 자동 allow 경로 없음.
 		Approval: subagent.Spec{Approval: in.Sandbox.Approval, Decider: policy.DenyAll{}},

@@ -95,7 +95,7 @@ func TestT15HumanSmoke(t *testing.T) {
 		Backend: backend, SpawnSpec: spawn, Writer: writer, TraceID: traceID, ParentSpan: parentSpan,
 		AdapterCommand: []string{adapter}, AdapterName: "claudecode", ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, AdapterStderr: ioDiscard{},
 		AdapterBaseEnv: []string{"PATH=" + os.Getenv("PATH")},
-		Instruction:    "이 실행은 시작되면 안 된다.", Workspace: "/workspace", Budget: budget, Depth: 0, ProfileID: "t15-human-expired",
+		Instruction:    "이 실행은 시작되면 안 된다.", Workspace: localworld.ContainerWorkspacePath, Budget: budget, Depth: 0, ProfileID: "t15-human-expired",
 		Approval: subagent.Spec{Approval: policy.ApprovalManual, Decider: policy.DenyAll{}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "만료") {

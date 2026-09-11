@@ -20,6 +20,7 @@ import (
 	"github.com/Eastsidegunn/JANUS/core/policy"
 	"github.com/Eastsidegunn/JANUS/core/world"
 	"github.com/Eastsidegunn/JANUS/seams/subagent"
+	localworld "github.com/Eastsidegunn/JANUS/seams/world/local"
 )
 
 const t15ClaudeBase = "docker.io/library/node@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5"
@@ -65,7 +66,7 @@ func TestClaudeWorldIntegration(t *testing.T) {
 	active, err := startProductionWorld(ctx, worldLaunch{
 		Backend: backend, SpawnSpec: spawnSpec, Writer: writer, TraceID: traceID, ParentSpan: parentSpan,
 		AdapterCommand: []string{claudeAdapter}, AdapterName: "claudecode", ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, AdapterStderr: &adapterStderr,
-		Instruction: "Respond with exactly OK.", Workspace: "/workspace", Budget: budget, Depth: 0,
+		Instruction: "Respond with exactly OK.", Workspace: localworld.ContainerWorkspacePath, Budget: budget, Depth: 0,
 		ProfileID: "t15-claude-auth", Approval: subagent.Spec{Approval: policy.ApprovalManual, Decider: policy.DenyAll{}},
 		// Keep the host adapter environment minimal. In particular, a runner
 		// credential can never accidentally become a container credential.
