@@ -42,7 +42,12 @@ type relayRequest struct {
 	DisplaySummary string `json:"display_summary"`
 	ExpiresAt      int64  `json:"expires_at"`
 }
-type relayResponse struct{ RequestID, ResponseID, Decision, Reason string }
+type relayResponse struct {
+	RequestID  string `json:"request_id"`
+	ResponseID string `json:"response_id"`
+	Decision   string `json:"decision"`
+	Reason     string `json:"reason"`
+}
 
 func NewUnixApprovalRelay(cfg RelayConfig) (*UnixApprovalRelay, error) {
 	if cfg.Endpoint == "" || !filepath.IsAbs(cfg.Endpoint) {
