@@ -72,6 +72,7 @@ func (r *UnixApprovalRelay) Decide(ctx context.Context, req policy.ApprovalReque
 	cctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 	var d policy.ApprovalDecision
+	verified := false
 	conn, err := (&net.Dialer{}).DialContext(cctx, "unix", r.cfg.Endpoint)
 	if err == nil {
 		if err = json.NewEncoder(conn).Encode(wire); err == nil {
@@ -82,6 +83,9 @@ func (r *UnixApprovalRelay) Decide(ctx context.Context, req policy.ApprovalReque
 					err = fmt.Errorf("approval relay request scope mismatch")
 				} else if resp.Decision == "allow" {
 					d.Allow = true
+				}
+				if err == nil {
+					verified = true
 				}
 				if resp.Reason != "" {
 					d.Reason = resp.Reason
@@ -97,6 +101,13 @@ func (r *UnixApprovalRelay) Decide(ctx context.Context, req policy.ApprovalReque
 		} else {
 			d.Reason = "remote denial reason required"
 		}
+	}
+	if verified {
+		d.DecisionSource = "relay"
+		d.ActorRef = "unverified-local-operator"
+	} else {
+		d.DecisionSource = "forced"
+		d.ActorRef = ""
 	}
 	if !d.Allow && d.Reason == "" {
 		d.Reason = "relay denied"

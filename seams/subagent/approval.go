@@ -95,16 +95,7 @@ func (a *approvalCoordinator) resolve(req policy.ApprovalRequest, forcedReason s
 		decision, fatal = a.decide(req)
 	}
 	reason := decision.Reason
-	payload := gen.PolicyDecisionPayload{
-		Decision:  gen.PolicyDecisionPayloadDecisionDeny,
-		ProfileID: a.profileID,
-	}
-	if decision.Allow {
-		payload.Decision = gen.PolicyDecisionPayloadDecisionAllow
-	}
-	if reason != "" {
-		payload.Reason = &reason
-	}
+	payload := decisionAuditPayload(req, decision, forcedReason, a.profileID)
 	encoded, err := json.Marshal(payload)
 	if err == nil {
 		_, err = a.writer.Submit(context.Background(), gen.EventRecord{
@@ -156,6 +147,42 @@ func (a *approvalCoordinator) decide(req policy.ApprovalRequest) (policy.Approva
 		return policy.ApprovalDecision{Reason: reason}, errors.New(reason)
 	}
 	return decision, nil
+}
+
+func decisionAuditPayload(req policy.ApprovalRequest, decision policy.ApprovalDecision, forcedReason, profile string) gen.PolicyDecisionPayload {
+	p := gen.PolicyDecisionPayload{ProfileID: profile, Decision: gen.PolicyDecisionPayloadDecisionDeny}
+	if decision.Allow {
+		p.Decision = gen.PolicyDecisionPayloadDecisionAllow
+	}
+	p.RequestID = &req.RequestID
+	source := gen.PolicyDecisionPayloadDecisionSourceLocal
+	if forcedReason != "" {
+		source = gen.PolicyDecisionPayloadDecisionSourceForced
+	} else if decision.DecisionSource == "relay" {
+		source = gen.PolicyDecisionPayloadDecisionSourceRelay
+	} else if decision.DecisionSource == "forced" {
+		source = gen.PolicyDecisionPayloadDecisionSourceForced
+	}
+	p.DecisionSource = &source
+	if decision.ActorRef != "" {
+		p.ActorRef = &decision.ActorRef
+	}
+	if decision.ResponseID != "" {
+		p.ResponseID = &decision.ResponseID
+	}
+	if decision.OperationID != "" {
+		p.OperationID = &decision.OperationID
+	}
+	if decision.HumanIntentID != "" {
+		p.HumanIntentID = &decision.HumanIntentID
+	}
+	if decision.CorrelationID != "" {
+		p.CorrelationID = &decision.CorrelationID
+	}
+	if decision.Reason != "" {
+		p.Reason = &decision.Reason
+	}
+	return p
 }
 
 // send removes the request from the pending set and delegates all fd

@@ -19,6 +19,14 @@ type ApprovalRequest struct {
 type ApprovalDecision struct {
 	Allow  bool
 	Reason string
+	// Audit metadata is optional at the policy boundary and becomes required
+	// when a decision is emitted by an operational relay.
+	DecisionSource string
+	ActorRef       string
+	ResponseID     string
+	OperationID    string
+	HumanIntentID  string
+	CorrelationID  string
 }
 
 // ApprovalDecider supplies a parent-side policy decision for a manual profile.
