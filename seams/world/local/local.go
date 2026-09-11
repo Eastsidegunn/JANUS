@@ -26,6 +26,10 @@ import (
 
 const podmanBinary = "podman"
 
+// ContainerWorkspacePath is the fixed path where the host workspace overlay
+// is mounted inside agent containers.
+const ContainerWorkspacePath = "/workspace"
+
 const (
 	proxyListenPort      = "3128"
 	proxySocketMount     = "/run/hx-audit"
@@ -384,14 +388,14 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 	identity := spec.AgentIdentity()
 	uid := strconv.FormatUint(uint64(identity.UID), 10)
 	gid := strconv.FormatUint(uint64(identity.GID), 10)
-	volume := layout.lower + ":/workspace:O,upperdir=" + layout.upper + ",workdir=" + layout.work
+	volume := layout.lower + ":" + ContainerWorkspacePath + ":O,upperdir=" + layout.upper + ",workdir=" + layout.work
 	args := []string{
 		"create", "--cidfile", cidFile,
 		"--interactive",
 		"--pull=never", "--network", internalNetwork,
 		"--userns=keep-id:uid=" + uid + ",gid=" + gid,
 		"--user", uid + ":" + gid,
-		"--workdir", "/workspace",
+		"--workdir", ContainerWorkspacePath,
 		"--env", "HTTP_PROXY=http://" + proxyName + ":" + proxyListenPort,
 		"--env", "HTTPS_PROXY=http://" + proxyName + ":" + proxyListenPort,
 		"--env", "NO_PROXY=",
@@ -632,6 +636,18 @@ func validateImageReference(ref world.ImageReference) error {
 	}
 	if !digestPattern.MatchString(ref.Digest()) {
 		return fmt.Errorf("digest는 sha256 형식이어야 함(tag 금지): %q", ref.Digest())
+	}
+	return nil
+}
+
+// ValidateImageReferenceConfig validates operator supplied image metadata
+// before a production request claims its idempotency key.
+func ValidateImageReferenceConfig(repository, digest string, uid, gid uint32) error {
+	if err := validateImageReference(world.NewImageReference(repository, digest)); err != nil {
+		return err
+	}
+	if uid == 0 || gid == 0 {
+		return fmt.Errorf("image는 숫자 non-root UID/GID여야 함")
 	}
 	return nil
 }

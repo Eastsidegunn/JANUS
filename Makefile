@@ -95,7 +95,7 @@ t15-integration:
 		echo "t15-integration은 Linux 실물 게이트다 — 현재 $$($(GO) env GOOS), skip 금지"; exit 1; \
 	fi
 	@command -v podman >/dev/null || { echo "t15-integration: podman 없음, skip 금지"; exit 1; }
-	$(GO) test -tags t15integration -count=1 -timeout=15m ./surfaces/hx -run '^(TestWorldIntegration|TestClaudeWorldIntegration)$$'
+	$(GO) test -tags t15integration -count=1 -timeout=25m ./surfaces/hx -run '^(TestWorldIntegration|TestClaudeWorldIntegration|TestProductionRunClaudeIntegration)$$'
 
 ci: lint test smoke fixtures codegen-drift
 
