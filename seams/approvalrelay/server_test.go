@@ -83,6 +83,23 @@ func TestServerApprovalRelayWaitsForSubmit(t *testing.T) {
 	}
 }
 
+func TestRelayRecorderAttachesSequence(t *testing.T) {
+	s := testServer(t)
+	r, err := NewServerApprovalRelay(s, RelayConfig{Endpoint: filepath.Join(t.TempDir(), "unused"), TraceID: "t", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go r.Decide(ctx, policy.ApprovalRequest{RequestID: "r", SpanID: "s", Args: []byte(`{"x":1}`)})
+	time.Sleep(10 * time.Millisecond)
+	r.RecordApprovalResult(policy.ApprovalRequest{RequestID: "r", SpanID: "s"}, policy.ApprovalDecision{Allow: true, DecisionSource: "relay"}, 42)
+	got := roundTrip(t, s, Message{Op: "query", TraceID: "t", SpanID: "s", RequestID: "r"})
+	if got.ResponseSeq != 42 {
+		t.Fatalf("response_seq=%d", got.ResponseSeq)
+	}
+}
+
 func testServer(t *testing.T) *Server {
 	s, err := NewServer(filepath.Join(t.TempDir(), "approval.sock"), time.Second)
 	if err != nil {

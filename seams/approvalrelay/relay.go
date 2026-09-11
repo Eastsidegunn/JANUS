@@ -19,6 +19,14 @@ type UnixApprovalRelay struct {
 	server *Server
 }
 
+// RecordApprovalResult forwards the coordinator's durable event sequence to
+// the server-owned derived index.
+func (r *UnixApprovalRelay) RecordApprovalResult(req policy.ApprovalRequest, d policy.ApprovalDecision, seq int64) {
+	if r.server != nil {
+		r.server.RecordApprovalResult(req, d, seq)
+	}
+}
+
 func NewServerApprovalRelay(server *Server, cfg RelayConfig) (*UnixApprovalRelay, error) {
 	if server == nil {
 		return nil, fmt.Errorf("approval relay server is nil")
