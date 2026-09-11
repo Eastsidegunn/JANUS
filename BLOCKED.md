@@ -1,42 +1,12 @@
 # BLOCKED
 
-## T16 SCP-T16-001 — control_mode 값 실측 차단 (2026-09-07)
+## T16 — 해소 기록 (2026-09-12, [H] 지시로 축소)
 
-기준 HEAD: `45eb2c091f75f17e25da7f967117a3865bf1d13b` (main).
-스키마 형태 승인은 유지한다. 값 미확정으로 schema/codegen/emitter/audit
-구현에는 착수하지 않았다.
-
-- 로컬 설치: `/Users/eastsidegunn/.local/bin/codex`, `codex-cli 0.153.4`.
-- `codex --help`: `-a, --ask-for-approval`은 `on-request`, `never`를
-  열거한다. `untrusted`가 도움말에 없다는 사실만으로 제거됐다고 단정하지 않는다.
-- `codex exec --help`: `-s, --sandbox`는 `read-only`, `workspace-write`,
-  `danger-full-access`. 모델 생성 shell command의 sandbox 선택이라고 설명한다.
-  exec 자체에는 `-a`가 없으며 글로벌 옵션 위치가 필요하다.
-- `codex sandbox -c 'sandbox_mode="read-only"' /usr/bin/true`는
-  `sandbox-exec: sandbox_apply: Operation not permitted`로 실패했다.
-- `codex -a never exec --ephemeral --json -s read-only`로 임시 파일 생성만
-  요청한 프로브는 exit 1, `failed to initialize in-process app-server client:
-  Operation not permitted`였다. native command 실행 전에 실패했으므로
-  파일 미생성을 정책 enforcement 증거로 사용하지 않는다.
-
-현재 관리형 실행 환경에서는 정책의 양성/음성 대조를 완료하지 못했다.
-05 meta의 untrusted 동작 유지 여부도 미확인이다. `container_only`와
-`spawn_time_policy` 어느 값도 확정하지 않는다. [H]의 일반 로컬 터미널에서
-격리된 임시 디렉터리로 동일 동작의 허용/거부 대조와 untrusted 실 세션을
-측정해야 한다. 자격증명은 CI/원격에 보내지 않는다. 좁힘이 확인되면
-제안 값을 보고하고 [H] 재확인 전 구현하지 않는다.
-
-## T16-1 — Codex control-mode marker (2026-09-06)
-
-**Blocked pending SCP-T16-001.** The required durable distinction between
-Codex spawn-time policy and Claude tool-level approval cannot be represented by
-current closed contracts: `subagent/spawn`, `subagent/ready`, tool, and
-approval payloads have no such field and use `additionalProperties:false`.
-No adapter, contracts, or fixtures were changed. See
-`docs/scp-t16-codex-control-mode.md`; after contract approval, resume T16-1.
-
-구현을 우회하지 않고 멈춘 지점의 기록 (CLAUDE.md 작업 방식).
-해소되면 해당 항목을 지우고 태스크를 재개한다.
+SCP-T16-001(control_mode)·T16-1 항목 제거. 근거: control_mode enum
+[tool_approval|container_only]은 SCP 승인 후 T16-1로 구현·CI green
+(docs/traceability.md T16-1 행), 실 codex 세션은 T16-3 [H] smoke PASS
+(2026-09-08). `spawn_time_policy` 값 세분은 차단이 아니라 선택적 후속
+SCP 후보로 docs/scp-t16-codex-control-mode.md에 이미 기록돼 있다.
 
 ## CI 간헐 실패 2건 — 처분 완료 (2026-09-03)
 
