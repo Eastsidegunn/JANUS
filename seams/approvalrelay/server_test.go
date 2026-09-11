@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"github.com/Eastsidegunn/JANUS/contracts/gen"
+	"github.com/Eastsidegunn/JANUS/core/policy"
 	"net"
 	"path/filepath"
 	"testing"
@@ -25,6 +27,38 @@ func roundTrip(t *testing.T, s *Server, m Message) Result {
 	_ = b.Close()
 	<-done
 	return r
+}
+
+func TestExpiredRecordKeepsFinalStateAndSeq(t *testing.T) {
+	s := testServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan Result, 1)
+	go func() { ch <- s.Wait(ctx, "t", "s", "r") }()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	<-ch
+	s.RecordApprovalResult(policy.ApprovalRequest{RequestID: "r", SpanID: "s"}, policy.ApprovalDecision{Reason: "EXPIRED"}, 9)
+	r := roundTrip(t, s, Message{Op: "query", TraceID: "t", SpanID: "s", RequestID: "r"})
+	if r.Status != "expired" || r.Decision != "deny" || r.ResponseSeq != 9 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestExpiredRuntimeEqualsRebuild(t *testing.T) {
+	s := testServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan Result, 1)
+	go func() { ch <- s.Wait(ctx, "t", "s", "r") }()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	<-ch
+	s.RecordApprovalResult(policy.ApprovalRequest{RequestID: "r", SpanID: "s"}, policy.ApprovalDecision{Reason: "EXPIRED"}, 9)
+	runtime := roundTrip(t, s, Message{Op: "query", TraceID: "t", SpanID: "s", RequestID: "r"})
+	p, _ := json.Marshal(gen.PolicyDecisionPayload{Decision: gen.PolicyDecisionPayloadDecisionDeny, ProfileID: "p", RequestID: ptr("r"), Reason: ptr("EXPIRED"), DecisionSource: sourcePtr(gen.PolicyDecisionPayloadDecisionSourceForced)})
+	derived := Rebuild([]gen.EventRecord{{Seq: 9, TraceID: "t", SpanID: "s", Kind: gen.KindPolicyDecision, Payload: p}})[requestKey{"t", "s", "r"}]
+	if runtime.Status != derived.Status || runtime.Decision != derived.Decision || runtime.ResponseSeq != derived.ResponseSeq {
+		t.Fatalf("runtime=%+v rebuild=%+v", runtime, derived)
+	}
 }
 
 func testServer(t *testing.T) *Server {

@@ -98,11 +98,17 @@ func (a *approvalCoordinator) resolve(req policy.ApprovalRequest, forcedReason s
 	payload := decisionAuditPayload(req, decision, forcedReason, a.profileID)
 	encoded, err := json.Marshal(payload)
 	if err == nil {
-		_, err = a.writer.Submit(context.Background(), gen.EventRecord{
+		seq, submitErr := a.writer.Submit(context.Background(), gen.EventRecord{
 			Ts: now(), TraceID: a.traceID, SpanID: a.sub.childSpn,
 			ParentSpanID: &a.parentSpan, Kind: gen.KindPolicyDecision,
 			Actor: "parent", Payload: encoded,
 		})
+		err = submitErr
+		if err == nil {
+			if recorder, ok := a.decider.(policy.ApprovalResultRecorder); ok {
+				recorder.RecordApprovalResult(req, decision, seq)
+			}
+		}
 	}
 	if err != nil {
 		a.terminate(req.RequestID, "정책 판정 기록 실패", fmt.Errorf("subagent: policy/decision 기록: %w", err), false)

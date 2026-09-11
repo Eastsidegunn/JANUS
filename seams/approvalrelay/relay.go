@@ -67,8 +67,12 @@ func (r *UnixApprovalRelay) Decide(ctx context.Context, req policy.ApprovalReque
 		return d, nil
 	}
 	r.mu.Unlock()
-	digest := sha256.Sum256(req.Args)
-	wire := relayRequest{Version: 1, TraceID: r.cfg.TraceID, SpanID: req.SpanID, RequestID: req.RequestID, RequestDigest: hex.EncodeToString(digest[:]), PolicyHash: r.cfg.PolicyHash, DisplaySummary: "tool=" + req.ToolName, ExpiresAt: time.Now().Add(r.cfg.Timeout).UnixMilli()}
+	canonical, canonErr := policy.CanonicalArgs(req.Args)
+	if canonErr != nil {
+		return policy.ApprovalDecision{Reason: "forced: invalid approval args", DecisionSource: "forced"}, nil
+	}
+	digest := sha256.Sum256(canonical)
+	wire := relayRequest{Version: 1, TraceID: r.cfg.TraceID, SpanID: req.SpanID, RequestID: req.RequestID, RequestDigest: "hx-args-digest-v1:" + hex.EncodeToString(digest[:]), PolicyHash: r.cfg.PolicyHash, DisplaySummary: "tool=" + req.ToolName, ExpiresAt: time.Now().Add(r.cfg.Timeout).UnixMilli()}
 	cctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 	var d policy.ApprovalDecision

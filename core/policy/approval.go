@@ -1,9 +1,38 @@
 package policy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 )
+
+// CanonicalArgs defines hx-args-digest-v1 input; changes require a new version.
+func CanonicalArgs(args json.RawMessage) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(args))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, fmt.Errorf("trailing JSON value")
+		}
+		return nil, err
+	}
+	if _, ok := v.(map[string]any); !ok {
+		return nil, fmt.Errorf("JSON object required")
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
 
 // ApprovalRequest is the policy-owned input for one adapter tool approval
 // request (FR-POL-05). SpanID identifies the requesting child span.
@@ -32,6 +61,12 @@ type ApprovalDecision struct {
 // ApprovalDecider supplies a parent-side policy decision for a manual profile.
 type ApprovalDecider interface {
 	Decide(context.Context, ApprovalRequest) (ApprovalDecision, error)
+}
+
+// ApprovalResultRecorder optionally receives the durable event sequence after
+// the coordinator has committed a policy decision.
+type ApprovalResultRecorder interface {
+	RecordApprovalResult(ApprovalRequest, ApprovalDecision, int64)
 }
 
 // DenyAll is the non-interactive default assembled by the hx surface.

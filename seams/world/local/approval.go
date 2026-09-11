@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Eastsidegunn/JANUS/core/policy"
 	"github.com/Eastsidegunn/JANUS/core/world"
 	"github.com/Eastsidegunn/JANUS/core/world/approvalrelaywire"
 	"github.com/Eastsidegunn/JANUS/core/world/approvalwire"
@@ -644,33 +645,7 @@ func (b *approvalBroker) writeHostError(encoder *json.Encoder, message string) {
 }
 
 func canonicalObject(raw json.RawMessage) ([]byte, error) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	// Preserve number lexemes instead of rounding through float64. Equivalent
-	// object key order/spacing canonicalizes; alternate numeric spellings deny
-	// conservatively rather than allowing a precision-collision match.
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, err
-	}
-	if err := ensureJSONEOF(decoder); err != nil {
-		return nil, err
-	}
-	if _, ok := value.(map[string]any); !ok {
-		return nil, fmt.Errorf("JSON object가 아님")
-	}
-	return json.Marshal(value)
-}
-
-func ensureJSONEOF(decoder *json.Decoder) error {
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return fmt.Errorf("후행 JSON 값")
-		}
-		return err
-	}
-	return nil
+	return policy.CanonicalArgs(raw)
 }
 
 func newApprovalRequestID() (string, error) {

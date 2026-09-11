@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Eastsidegunn/JANUS/core/policy"
 	"net"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ type Server struct {
 	mu       sync.Mutex
 	pending  map[requestKey]chan Result
 	decided  map[requestKey]Result
+	byID     map[string]requestKey
 	ln       net.Listener
 }
 type requestKey struct{ TraceID, SpanID, RequestID string }
@@ -49,7 +51,7 @@ func NewServer(endpoint string, timeout time.Duration) (*Server, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return &Server{Endpoint: endpoint, Timeout: timeout, pending: map[requestKey]chan Result{}, decided: map[requestKey]Result{}}, nil
+	return &Server{Endpoint: endpoint, Timeout: timeout, pending: map[requestKey]chan Result{}, decided: map[requestKey]Result{}, byID: map[string]requestKey{}}, nil
 }
 
 func (s *Server) Listen() error {
@@ -148,6 +150,7 @@ func (s *Server) Wait(ctx context.Context, traceID, spanID, requestID string) Re
 	}
 	ch := make(chan Result, 1)
 	s.pending[k] = ch
+	s.byID[requestID] = k
 	s.mu.Unlock()
 	t := time.NewTimer(s.Timeout)
 	defer t.Stop()
@@ -164,4 +167,27 @@ func (s *Server) Wait(ctx context.Context, traceID, spanID, requestID string) Re
 	case <-t.C:
 		return Result{Status: "unknown"}
 	}
+}
+
+// RecordApprovalResult attaches the durable session event sequence to the
+// derived decision after the coordinator commits it.
+func (s *Server) RecordApprovalResult(req policy.ApprovalRequest, d policy.ApprovalDecision, seq int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k, ok := s.byID[req.RequestID]
+	if !ok {
+		return
+	}
+	r := s.decided[k]
+	if r.Status != "expired" {
+		r.Status = "decided"
+		if !d.Allow {
+			r.Decision = "deny"
+		} else {
+			r.Decision = "allow"
+		}
+		r.Reason = d.Reason
+	}
+	r.ResponseSeq = seq
+	s.decided[k] = r
 }
