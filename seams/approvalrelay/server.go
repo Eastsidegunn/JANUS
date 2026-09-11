@@ -24,15 +24,26 @@ type Server struct {
 	pending  map[requestKey]chan Result
 	decided  map[requestKey]Result
 	byID     map[string]requestKey
+	meta     map[requestKey]PendingMeta
 	ln       net.Listener
+}
+type PendingMeta struct {
+	RequestDigest  string `json:"request_digest"`
+	PolicyHash     string `json:"policy_hash"`
+	DisplaySummary string `json:"display_summary"`
+	ExpiresAt      int64  `json:"expires_at"`
 }
 type requestKey struct{ TraceID, SpanID, RequestID string }
 type Result struct {
-	Status      string `json:"status"`
-	Decision    string `json:"decision,omitempty"`
-	Reason      string `json:"reason,omitempty"`
-	ResponseSeq int64  `json:"response_seq,omitempty"`
-	ResponseID  string `json:"response_id,omitempty"`
+	Status         string `json:"status"`
+	Decision       string `json:"decision,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	ResponseSeq    int64  `json:"response_seq,omitempty"`
+	ResponseID     string `json:"response_id,omitempty"`
+	RequestDigest  string `json:"request_digest,omitempty"`
+	PolicyHash     string `json:"policy_hash,omitempty"`
+	DisplaySummary string `json:"display_summary,omitempty"`
+	ExpiresAt      int64  `json:"expires_at,omitempty"`
 }
 type Message struct {
 	Op         string `json:"op"`
@@ -51,7 +62,7 @@ func NewServer(endpoint string, timeout time.Duration) (*Server, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return &Server{Endpoint: endpoint, Timeout: timeout, pending: map[requestKey]chan Result{}, decided: map[requestKey]Result{}, byID: map[string]requestKey{}}, nil
+	return &Server{Endpoint: endpoint, Timeout: timeout, pending: map[requestKey]chan Result{}, decided: map[requestKey]Result{}, byID: map[string]requestKey{}, meta: map[requestKey]PendingMeta{}}, nil
 }
 
 func (s *Server) Listen() error {
@@ -106,7 +117,8 @@ func (s *Server) serve(c net.Conn) {
 		if r, ok := s.decided[k]; ok {
 			_ = enc.Encode(r)
 		} else if _, ok := s.pending[k]; ok {
-			_ = enc.Encode(Result{Status: "pending"})
+			m := s.meta[k]
+			_ = enc.Encode(Result{Status: "pending", RequestDigest: m.RequestDigest, PolicyHash: m.PolicyHash, DisplaySummary: m.DisplaySummary, ExpiresAt: m.ExpiresAt})
 		} else {
 			_ = enc.Encode(Result{Status: "unknown"})
 		}
@@ -142,6 +154,9 @@ func (s *Server) serve(c net.Conn) {
 }
 
 func (s *Server) Wait(ctx context.Context, traceID, spanID, requestID string) Result {
+	return s.WaitWithMeta(ctx, traceID, spanID, requestID, PendingMeta{})
+}
+func (s *Server) WaitWithMeta(ctx context.Context, traceID, spanID, requestID string, meta PendingMeta) Result {
 	s.mu.Lock()
 	k := requestKey{traceID, spanID, requestID}
 	if r, ok := s.decided[k]; ok {
@@ -151,6 +166,7 @@ func (s *Server) Wait(ctx context.Context, traceID, spanID, requestID string) Re
 	ch := make(chan Result, 1)
 	s.pending[k] = ch
 	s.byID[requestID] = k
+	s.meta[k] = meta
 	s.mu.Unlock()
 	t := time.NewTimer(s.Timeout)
 	defer t.Stop()

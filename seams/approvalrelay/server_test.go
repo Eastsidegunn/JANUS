@@ -37,7 +37,7 @@ func TestExpiredRecordKeepsFinalStateAndSeq(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	cancel()
 	<-ch
-	s.RecordApprovalResult(policy.ApprovalRequest{RequestID: "r", SpanID: "s"}, policy.ApprovalDecision{Reason: "EXPIRED"}, 9)
+	s.RecordApprovalResult(policy.ApprovalRequest{RequestID: "r", SpanID: "s", Args: []byte(`{}`)}, policy.ApprovalDecision{Reason: "EXPIRED"}, 9)
 	r := roundTrip(t, s, Message{Op: "query", TraceID: "t", SpanID: "s", RequestID: "r"})
 	if r.Status != "expired" || r.Decision != "deny" || r.ResponseSeq != 9 {
 		t.Fatalf("%+v", r)
@@ -52,12 +52,34 @@ func TestExpiredRuntimeEqualsRebuild(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	cancel()
 	<-ch
-	s.RecordApprovalResult(policy.ApprovalRequest{RequestID: "r", SpanID: "s"}, policy.ApprovalDecision{Reason: "EXPIRED"}, 9)
+	s.RecordApprovalResult(policy.ApprovalRequest{RequestID: "r", SpanID: "s", Args: []byte(`{}`)}, policy.ApprovalDecision{Reason: "EXPIRED"}, 9)
 	runtime := roundTrip(t, s, Message{Op: "query", TraceID: "t", SpanID: "s", RequestID: "r"})
 	p, _ := json.Marshal(gen.PolicyDecisionPayload{Decision: gen.PolicyDecisionPayloadDecisionDeny, ProfileID: "p", RequestID: ptr("r"), Reason: ptr("EXPIRED"), DecisionSource: sourcePtr(gen.PolicyDecisionPayloadDecisionSourceForced)})
 	derived := Rebuild([]gen.EventRecord{{Seq: 9, TraceID: "t", SpanID: "s", Kind: gen.KindPolicyDecision, Payload: p}})[requestKey{"t", "s", "r"}]
 	if runtime.Status != derived.Status || runtime.Decision != derived.Decision || runtime.ResponseSeq != derived.ResponseSeq {
 		t.Fatalf("runtime=%+v rebuild=%+v", runtime, derived)
+	}
+}
+
+func TestServerApprovalRelayWaitsForSubmit(t *testing.T) {
+	s := testServer(t)
+	r, err := NewServerApprovalRelay(s, RelayConfig{Endpoint: filepath.Join(t.TempDir(), "unused.sock"), TraceID: "t", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan policy.ApprovalDecision, 1)
+	go func() {
+		d, _ := r.Decide(context.Background(), policy.ApprovalRequest{RequestID: "r", SpanID: "s", Args: []byte(`{}`)})
+		done <- d
+	}()
+	time.Sleep(10 * time.Millisecond)
+	got := roundTrip(t, s, Message{Op: "submit", TraceID: "t", SpanID: "s", RequestID: "r", ResponseID: "resp", Decision: "allow"})
+	if got.Status != "decided" {
+		t.Fatalf("submit=%+v", got)
+	}
+	d := <-done
+	if !d.Allow || d.DecisionSource != "relay" || d.ActorRef != "unverified-local-operator" || d.ResponseID != "resp" {
+		t.Fatalf("decision=%+v", d)
 	}
 }
 
