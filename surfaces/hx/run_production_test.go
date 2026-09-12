@@ -160,6 +160,9 @@ func TestProductionAcceptThenLaunch(t *testing.T) {
 	if string(launched.Sandbox.Approval) != "manual" {
 		t.Fatalf("승인 모드가 manual이어야 함: %q", launched.Sandbox.Approval)
 	}
+	if launched.PolicyHash != acc.PolicyHash {
+		t.Fatalf("launcher policy hash가 접수 응답과 달라짐: %q != %q", launched.PolicyHash, acc.PolicyHash)
+	}
 
 	// 접수 binding이 세션 로그에서 공개 관측 가능해야 한다(hx replay 표면).
 	log, err := sqlite.Open(context.Background(), acc.SessionRef.SessionDB)

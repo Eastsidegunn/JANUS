@@ -472,6 +472,38 @@
         },
         "reason": {
           "type": "string"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "response_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "human_intent_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "correlation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision_source": {
+          "enum": [
+            "local",
+            "relay",
+            "forced"
+          ],
+          "$comment": "판정 출처 (SCP-T18-001): local=프로세스 내 decider(DenyAll 등)의 판정, relay=검증된 원격 응답(사람 입력)이 relay를 경유해 도착한 판정 — 이때만 actor_ref에 사람 표식이 실린다, forced=시스템이 합성한 강제 deny 전부(deadline·lease 종료·mismatch·중복·relay 불가). coordinator의 강제 경로는 decider 제공 값보다 항상 우선한다"
         }
       },
       "required": [

@@ -35,10 +35,11 @@ var validLayers = map[string]bool{
 // 한정한다 — 문서 선언이 아니라 린트로 강제한다 (T3 [H] 승인 조건).
 // 키는 import 경로 접두사, 값은 허용되는 내부 패키지(및 그 하위) 목록.
 var externalRestrictions = map[string][]string{
-	"modernc.org/":                          {"seams/store/sqlite"}, // SQLite 드라이버 (T3 제안서)
-	"github.com/santhosh-tekuri/jsonschema": {"contracts/validate"}, // 스키마 검증기 (T1 제안서 §6)
-	"github.com/goccy/go-yaml":              {"core/policy"},        // YAML 파서 (T6 제안서)
-	"go.opentelemetry.io/":                  {"core/observe"},       // OTel 파생 export (T14 [H] 승인)
+	"golang.org/x/sys":                      {"seams/approvalrelay"}, // peer credentials
+	"modernc.org/":                          {"seams/store/sqlite"},  // SQLite 드라이버 (T3 제안서)
+	"github.com/santhosh-tekuri/jsonschema": {"contracts/validate"},  // 스키마 검증기 (T1 제안서 §6)
+	"github.com/goccy/go-yaml":              {"core/policy"},         // YAML 파서 (T6 제안서)
+	"go.opentelemetry.io/":                  {"core/observe"},        // OTel 파생 export (T14 [H] 승인)
 }
 
 // Check는 패키지 그래프가 §3.1의 의존 방향 규칙을 지키는지 검사한다.

@@ -77,7 +77,7 @@ func TestParseWorldConfigValidatesImageReferences(t *testing.T) {
 				if err := os.WriteFile(configPath, data, 0o600); err != nil {
 					t.Fatal(err)
 				}
-				err = runProductionCmd(requestPath, f.profilePath, nil, f.acceptRoot, configPath, "")
+				err = runProductionCmd(requestPath, f.profilePath, nil, f.acceptRoot, configPath, "", "")
 				if err == nil || !strings.Contains(err.Error(), want) {
 					t.Fatalf("CLI error=%v, want %q", err, want)
 				}

@@ -103,10 +103,25 @@ const (
 	PolicyDecisionPayloadDecisionDeny  PolicyDecisionPayloadDecision = "deny"
 )
 
+type PolicyDecisionPayloadDecisionSource string
+
+const (
+	PolicyDecisionPayloadDecisionSourceLocal  PolicyDecisionPayloadDecisionSource = "local"
+	PolicyDecisionPayloadDecisionSourceRelay  PolicyDecisionPayloadDecisionSource = "relay"
+	PolicyDecisionPayloadDecisionSourceForced PolicyDecisionPayloadDecisionSource = "forced"
+)
+
 type PolicyDecisionPayload struct {
-	Decision  PolicyDecisionPayloadDecision `json:"decision"`
-	ProfileID string                        `json:"profile_id"`
-	Reason    *string                       `json:"reason,omitempty"`
+	ActorRef       *string                              `json:"actor_ref,omitempty"`
+	CorrelationID  *string                              `json:"correlation_id,omitempty"`
+	Decision       PolicyDecisionPayloadDecision        `json:"decision"`
+	DecisionSource *PolicyDecisionPayloadDecisionSource `json:"decision_source,omitempty"`
+	HumanIntentID  *string                              `json:"human_intent_id,omitempty"`
+	OperationID    *string                              `json:"operation_id,omitempty"`
+	ProfileID      string                               `json:"profile_id"`
+	Reason         *string                              `json:"reason,omitempty"`
+	RequestID      *string                              `json:"request_id,omitempty"`
+	ResponseID     *string                              `json:"response_id,omitempty"`
 }
 
 type SessionForkPayload struct {
