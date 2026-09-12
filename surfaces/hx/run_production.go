@@ -23,6 +23,7 @@ import (
 	"github.com/Eastsidegunn/JANUS/core/policy"
 	"github.com/Eastsidegunn/JANUS/core/world"
 	"github.com/Eastsidegunn/JANUS/seams/accept"
+	"github.com/Eastsidegunn/JANUS/seams/approvalrelay"
 	sqlite "github.com/Eastsidegunn/JANUS/seams/store/sqlite"
 	"github.com/Eastsidegunn/JANUS/seams/subagent"
 	local "github.com/Eastsidegunn/JANUS/seams/world/local"
@@ -31,7 +32,7 @@ import (
 // runProductionCmd는 생산 경로의 CLI 진입점이다. world backend 구성은
 // claim 이전에 끝난다 — world를 조립할 수 없는 호스트는 key를 소모하지
 // 않고 실패한다.
-func runProductionCmd(requestPath, profilePath string, overlayPaths []string, acceptRoot, worldConfigPath, sessionArg string) error {
+func runProductionCmd(requestPath, profilePath string, overlayPaths []string, acceptRoot, worldConfigPath, sessionArg, approvalEndpoint string) error {
 	requestBytes, err := os.ReadFile(requestPath)
 	if err != nil {
 		return fmt.Errorf("request 읽기: %w", err)
@@ -48,9 +49,11 @@ func runProductionCmd(requestPath, profilePath string, overlayPaths []string, ac
 	if err != nil {
 		return err
 	}
+	launcher.approvalEndpoint = approvalEndpoint
 	return runProduction(context.Background(), productionRun{
 		RequestBytes: requestBytes, ProfilePath: profilePath, OverlayPaths: overlayPaths,
 		AcceptRoot: acceptRoot, SessionArg: sessionArg, Launcher: launcher, Stdout: os.Stdout,
+		ApprovalEndpoint: approvalEndpoint,
 	})
 }
 
@@ -63,22 +66,24 @@ type sessionLauncher interface {
 }
 
 type sessionLaunch struct {
-	Log      *sqlite.Log
-	TraceID  string
-	RootSpan string
-	Sandbox  policy.SandboxConfig
-	Request  runRequest
+	Log        *sqlite.Log
+	TraceID    string
+	RootSpan   string
+	Sandbox    policy.SandboxConfig
+	Request    runRequest
+	PolicyHash string
 }
 
 type productionRun struct {
-	RequestBytes []byte
-	ProfilePath  string
-	OverlayPaths []string
-	AcceptRoot   string
-	SessionArg   string // --session 제공 시 정본 경로와 일치 검증
-	Launcher     sessionLauncher
-	Stdout       io.Writer
-	Now          func() int64
+	RequestBytes     []byte
+	ProfilePath      string
+	OverlayPaths     []string
+	AcceptRoot       string
+	SessionArg       string // --session 제공 시 정본 경로와 일치 검증
+	Launcher         sessionLauncher
+	Stdout           io.Writer
+	Now              func() int64
+	ApprovalEndpoint string
 }
 
 // executionBinding은 session/start payload에 기록되는 접수 binding이다.
@@ -244,7 +249,7 @@ func runProduction(ctx context.Context, run productionRun) error {
 		return terr
 	}
 	done, launchErr := run.Launcher.Launch(ctx, sessionLaunch{
-		Log: log, TraceID: traceID, RootSpan: rootSpan, Sandbox: sandbox, Request: req,
+		Log: log, TraceID: traceID, RootSpan: rootSpan, Sandbox: sandbox, Request: req, PolicyHash: policyHash,
 	})
 	// launch 성패와 무관하게 세션 종료를 durable하게 남긴다.
 	_, endErr := log.Writer.Submit(ctx, gen.EventRecord{
@@ -268,6 +273,42 @@ func runProduction(ctx context.Context, run productionRun) error {
 		return fmt.Errorf("서브에이전트 status=%s", done.Status)
 	}
 	return nil
+}
+
+func selectApprovalDecider(endpoint, traceID, policyHash string, timeoutMs int64) (policy.ApprovalDecider, io.Closer, error) {
+	if endpoint == "" {
+		return policy.DenyAll{}, nil, nil
+	}
+	t := time.Duration(timeoutMs) * time.Millisecond
+	srv, err := approvalrelay.NewServer(endpoint, t)
+	if err != nil {
+		return nil, nil, err
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Listen() }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(endpoint); err == nil {
+			break
+		}
+		select {
+		case err := <-errCh:
+			_ = srv.Close()
+			return nil, nil, err
+		default:
+		}
+		if time.Now().After(deadline) {
+			_ = srv.Close()
+			return nil, nil, fmt.Errorf("approval endpoint did not appear")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	relay, err := approvalrelay.NewServerApprovalRelay(srv, approvalrelay.RelayConfig{Endpoint: endpoint, TraceID: traceID, PolicyHash: policyHash, Timeout: t})
+	if err != nil {
+		_ = srv.Close()
+		return nil, nil, err
+	}
+	return relay, srv, nil
 }
 
 // replayAcceptance는 동일 key 재요청의 무spawn 경로다: 응답 유실 재조회는
@@ -378,8 +419,9 @@ func parseWorldConfig(data []byte) (worldConfig, error) {
 // (claim 이전)에서 끝나므로, world를 조립할 수 없는 호스트(macOS 등)는
 // key를 소모하기 전에 실패한다.
 type worldLauncher struct {
-	backend world.Backend
-	config  worldConfig
+	backend          world.Backend
+	config           worldConfig
+	approvalEndpoint string
 }
 
 func newWorldLauncher(cfg worldConfig) (*worldLauncher, error) {
@@ -396,6 +438,17 @@ func newWorldLauncher(cfg worldConfig) (*worldLauncher, error) {
 }
 
 func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DonePayload, error) {
+	timeoutMs := in.Sandbox.Budget.TimeMs
+	if timeoutMs <= 0 || timeoutMs > 600000 {
+		timeoutMs = 600000
+	}
+	decider, closer, err := selectApprovalDecider(l.approvalEndpoint, in.TraceID, in.PolicyHash, timeoutMs)
+	if err != nil {
+		return gen.DonePayload{}, err
+	}
+	if closer != nil {
+		defer closer.Close()
+	}
 	adapter, ok := l.config.Adapters[in.Request.AdapterID]
 	if !ok {
 		return gen.DonePayload{}, fmt.Errorf("world config에 어댑터 %q 정의가 없음", in.Request.AdapterID)
@@ -421,7 +474,7 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 		Instruction: in.Request.TaskRef.Instruction, Workspace: local.ContainerWorkspacePath,
 		Budget: in.Sandbox.Budget, Depth: 0, ProfileID: in.Sandbox.ProfileID,
 		// T18 전까지 승인 decider는 DenyAll 고정 — 자동 allow 경로 없음.
-		Approval: subagent.Spec{Approval: in.Sandbox.Approval, Decider: policy.DenyAll{}},
+		Approval: subagent.Spec{Approval: in.Sandbox.Approval, Decider: decider},
 		// 호스트 어댑터 환경은 최소로 유지 — 러너 자격증명이 컨테이너
 		// 자격증명이 되는 경로를 차단한다(T15와 동일).
 		AdapterBaseEnv: []string{"PATH=" + os.Getenv("PATH")},

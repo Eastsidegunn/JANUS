@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -272,16 +273,17 @@ func runCmd(args []string) error {
 	fs.Var(&overlays, "overlay", "추가 정책 프로파일 YAML (반복 가능)")
 	acceptRoot := fs.String("accept-root", "", "scoped key 접수 레지스트리 root (생산 경로 필수)")
 	worldConfigPath := fs.String("world-config", "", "world 조립 설정 JSON (생산 경로 필수)")
+	approvalEndpoint := fs.String("approval-endpoint", "", "원격 승인 relay Unix socket (생산 경로 opt-in)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *request != "" {
-		if *profilePath == "" || *acceptRoot == "" || *worldConfigPath == "" || fs.NArg() != 0 || *adapter != "" {
-			return fmt.Errorf("사용법: hx run --request <request.json> --profile <yaml> [--overlay <yaml> ...] --accept-root <dir> --world-config <json> [--session <db>]")
+		if (*approvalEndpoint != "" && !filepath.IsAbs(*approvalEndpoint)) || *profilePath == "" || *acceptRoot == "" || *worldConfigPath == "" || fs.NArg() != 0 || *adapter != "" {
+			return fmt.Errorf("사용법: hx run --request <request.json> --profile <yaml> [--overlay <yaml> ...] --accept-root <dir> --world-config <json> [--session <db>] [--approval-endpoint <sock>]")
 		}
-		return runProductionCmd(*request, *profilePath, overlays, *acceptRoot, *worldConfigPath, *session)
+		return runProductionCmd(*request, *profilePath, overlays, *acceptRoot, *worldConfigPath, *session, *approvalEndpoint)
 	}
-	if *session == "" || *adapter == "" || fs.NArg() != 1 {
+	if *session == "" || *adapter == "" || *approvalEndpoint != "" || fs.NArg() != 1 {
 		return fmt.Errorf("사용법: hx run --session <db> --adapter <실행파일> [--workspace <경로>] <instruction>")
 	}
 	instruction := fs.Arg(0)

@@ -90,6 +90,14 @@ func TestCheckTestImports(t *testing.T) {
 	})
 }
 
+func TestExternalRestrictions(t *testing.T) {
+	pkgs := []Pkg{
+		{ImportPath: mod + "/seams/approvalrelay", Imports: []string{"golang.org/x/sys/unix"}},
+		{ImportPath: mod + "/core/policy", Imports: []string{"golang.org/x/sys/unix"}},
+	}
+	assertViolations(t, Check(mod, pkgs), []string{"core/policy → golang.org/x/sys/unix (외부 모듈 golang.org/x/sys*는 seams/approvalrelay에서만 import 가능)"})
+}
+
 // 미분류 최상위 패키지는 import가 없어도 존재만으로 위반이다 (T0.1 리뷰 발견 2).
 func TestCheckRoguePackage(t *testing.T) {
 	pkgs := []Pkg{
