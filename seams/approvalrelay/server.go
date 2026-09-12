@@ -18,16 +18,21 @@ import (
 // caller-owned session log; it is intentionally not an independent durable
 // store.
 type Server struct {
-	Endpoint  string
-	Timeout   time.Duration
-	mu        sync.Mutex
-	pending   map[requestKey]chan Result
-	decided   map[requestKey]Result
-	byID      map[string]requestKey
-	meta      map[requestKey]PendingMeta
-	ln        net.Listener
-	OwnerUID  int
-	peerCheck func(net.Conn) (int, error)
+	Endpoint       string
+	Timeout        time.Duration
+	mu             sync.Mutex
+	pending        map[requestKey]chan Result
+	decided        map[requestKey]Result
+	byID           map[string]requestKey
+	meta           map[requestKey]PendingMeta
+	ln             net.Listener
+	OwnerUID       int
+	peerCheck      func(net.Conn) (int, error)
+	budgetExceeded func() bool
+	evidenceValid  func(int64) bool
+	stopCallback   func(Message)
+	stops          map[stopKey]Result
+	terminalRef    int64
 }
 type PendingMeta struct {
 	RequestDigest  string `json:"request_digest"`
@@ -36,6 +41,7 @@ type PendingMeta struct {
 	ExpiresAt      int64  `json:"expires_at"`
 }
 type requestKey struct{ TraceID, SpanID, RequestID string }
+type stopKey struct{ TraceID, StopID string }
 type Result struct {
 	Status         string `json:"status"`
 	Decision       string `json:"decision,omitempty"`
@@ -46,15 +52,20 @@ type Result struct {
 	PolicyHash     string `json:"policy_hash,omitempty"`
 	DisplaySummary string `json:"display_summary,omitempty"`
 	ExpiresAt      int64  `json:"expires_at,omitempty"`
+	StopID         string `json:"stop_id,omitempty"`
+	TerminalRef    int64  `json:"terminal_ref,omitempty"`
 }
 type Message struct {
-	Op         string `json:"op"`
-	TraceID    string `json:"trace_id"`
-	SpanID     string `json:"span_id"`
-	RequestID  string `json:"request_id"`
-	ResponseID string `json:"response_id,omitempty"`
-	Decision   string `json:"decision,omitempty"`
-	Reason     string `json:"reason,omitempty"`
+	Op           string `json:"op"`
+	TraceID      string `json:"trace_id"`
+	SpanID       string `json:"span_id"`
+	RequestID    string `json:"request_id"`
+	ResponseID   string `json:"response_id,omitempty"`
+	Decision     string `json:"decision,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	StopID       string `json:"stop_id,omitempty"`
+	TargetSpanID string `json:"target_span_id,omitempty"`
+	EvidenceSeq  int64  `json:"evidence_seq,omitempty"`
 }
 
 func NewServer(endpoint string, timeout time.Duration) (*Server, error) {
@@ -64,7 +75,7 @@ func NewServer(endpoint string, timeout time.Duration) (*Server, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return &Server{Endpoint: endpoint, Timeout: timeout, OwnerUID: os.Getuid(), peerCheck: peerUID, pending: map[requestKey]chan Result{}, decided: map[requestKey]Result{}, byID: map[string]requestKey{}, meta: map[requestKey]PendingMeta{}}, nil
+	return &Server{Endpoint: endpoint, Timeout: timeout, OwnerUID: os.Getuid(), peerCheck: peerUID, pending: map[requestKey]chan Result{}, decided: map[requestKey]Result{}, byID: map[string]requestKey{}, meta: map[requestKey]PendingMeta{}, stops: map[stopKey]Result{}}, nil
 }
 
 func (s *Server) Listen() error {
@@ -116,6 +127,16 @@ func (s *Server) serve(c net.Conn) {
 	enc := json.NewEncoder(c)
 	var m Message
 	if dec.Decode(&m) != nil {
+		return
+	}
+	if m.Op == "stop" || m.Op == "stop_query" {
+		r, callback := s.handleStop(m)
+		// The receipt is recorded under the lock, but callbacks may re-enter
+		// Server APIs. Complete the callback outside the lock before replying.
+		if callback != nil {
+			callback(m)
+		}
+		_ = enc.Encode(r)
 		return
 	}
 	s.mu.Lock()
@@ -224,3 +245,38 @@ func (s *Server) RecordApprovalResult(req policy.ApprovalRequest, d policy.Appro
 	r.ResponseSeq = seq
 	s.decided[k] = r
 }
+
+// handleStop commits the receipt and returns a callback only for its first
+// acceptance. The caller must invoke that callback after this method unlocks.
+func (s *Server) handleStop(m Message) (Result, func(Message)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m.TraceID == "" || m.StopID == "" || (m.Op == "stop" && strings.TrimSpace(m.Reason) == "") {
+		return Result{Status: "error", Reason: "REQUEST_MISMATCH"}, nil
+	}
+	k := stopKey{m.TraceID, m.StopID}
+	if m.Op == "stop_query" {
+		if r, ok := s.stops[k]; ok {
+			return r, nil
+		}
+		return Result{Status: "unknown", StopID: m.StopID}, nil
+	}
+	if old, ok := s.stops[k]; ok {
+		if old.Reason != m.Reason {
+			return Result{Status: "error", Reason: "STOP_CONFLICT"}, nil
+		}
+		return old, nil
+	}
+	if m.Reason == "parent_done" || (m.Reason == "budget_exceeded" && (s.budgetExceeded == nil || !s.budgetExceeded())) || (m.Reason == "policy" && (s.evidenceValid == nil || !s.evidenceValid(m.EvidenceSeq))) {
+		return Result{Status: "error", Reason: "UNAUTHORIZED"}, nil
+	}
+	if s.terminalRef != 0 {
+		r := Result{Status: "already_terminal", StopID: m.StopID, TerminalRef: s.terminalRef}
+		s.stops[k] = r
+		return r, nil
+	}
+	r := Result{Status: "stop_accepted", StopID: m.StopID, Reason: m.Reason}
+	s.stops[k] = r
+	return r, s.stopCallback
+}
+func (s *Server) MarkTerminal(ref int64) { s.mu.Lock(); s.terminalRef = ref; s.mu.Unlock() }
