@@ -69,6 +69,9 @@ func (s *Server) Listen() error {
 	if err := os.MkdirAll(filepath.Dir(s.Endpoint), 0700); err != nil {
 		return err
 	}
+	if info, err := os.Stat(filepath.Dir(s.Endpoint)); err != nil || info.Mode().Perm() != 0700 {
+		return fmt.Errorf("approval relay socket directory must be mode 0700")
+	}
 	if _, err := os.Stat(s.Endpoint); err == nil {
 		return fmt.Errorf("approval relay socket already exists")
 	} else if !os.IsNotExist(err) {

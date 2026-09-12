@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +33,12 @@ func TestApprovalRelayCoordinatorDurableRoundTrip(t *testing.T) {
 	}
 	defer log.Close()
 	trace := logd.NewTraceID()
-	sock := filepath.Join("/tmp", "hxr-"+strconv.Itoa(os.Getpid())+"-"+strconv.FormatInt(time.Now().UnixNano(), 36)+".sock")
+	sockDir, err := os.MkdirTemp("/tmp", "hxr-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(sockDir)
+	sock := filepath.Join(sockDir, "approval.sock")
 	srv, err := approvalrelay.NewServer(sock, time.Second)
 	if err != nil {
 		t.Fatal(err)

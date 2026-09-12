@@ -7,6 +7,7 @@ import (
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/core/policy"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -58,6 +59,20 @@ func TestExpiredRuntimeEqualsRebuild(t *testing.T) {
 	derived := Rebuild([]gen.EventRecord{{Seq: 9, TraceID: "t", SpanID: "s", Kind: gen.KindPolicyDecision, Payload: p}})[requestKey{"t", "s", "r"}]
 	if runtime.Status != derived.Status || runtime.Decision != derived.Decision || runtime.ResponseSeq != derived.ResponseSeq {
 		t.Fatalf("runtime=%+v rebuild=%+v", runtime, derived)
+	}
+}
+
+func TestServerRejectsInsecureSocketDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(filepath.Join(dir, "relay.sock"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Listen(); err == nil {
+		t.Fatal("insecure directory accepted")
 	}
 }
 
