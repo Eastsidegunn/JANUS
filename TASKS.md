@@ -116,6 +116,7 @@
 - 대상: FR-POL-05, FR-LOG-01
 - 근거: 결정 시트 7번([H] 2026-09-10), 계약 §6·§8-②.
 - 완료 기준: relay decider의 (a) 정상 allow/deny 왕복, (b) deadline 경과 시 durable deny, (c) 같은 response_id 재전달 멱등·다른 내용 conflict, (d) request scope mismatch 거부, (e) 원문 args 미노출 검증 테스트 — `make ci` green. 기존 승인 배관 속성/단위 테스트 무손상.
+- 2026-09-12: 구현 완료(브랜치 t18/approval-relay), Rhizome 계약 정합 리뷰 **통과**(계약 v1.3, Rhizome ce584a6 — forwarded 제거 수용, request_seq·submit wire 감사 필드는 v2). 크기·rate 상한은 T19 완료 전 후속 필수. PR·[H] 스키마 리뷰(738949c) 대기.
 
 ## T19. `hx stop` CLI — 소유 프로세스 제어 표면
 - 내용: 세션 소유 프로세스의 제어 표면으로 중단 요청을 전달한다(DB writer 우회 금지, bare PID kill 불채택). 중단 **접수**(`stop_accepted {stop_id, request_ref}` 또는 `already_terminal`)와 실제 **종료 사실**(`subagent/done status: stopped` + 세션 종료·collector 정리)은 별개 조회. reason enum은 `user|budget_exceeded|policy|parent_done`만 허용하고 권한 분리(사람=`user`, budget/policy는 로그로 입증 가능한 조건 한정) — 사유 위장 차단. 같은 stop_id+내용은 멱등, 다른 내용은 conflict. 전송 timeout ≠ cancelled.
