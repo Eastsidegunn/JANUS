@@ -93,7 +93,9 @@ func (s *Server) Listen() error {
 }
 func (s *Server) Close() error {
 	if s.ln != nil {
-		return s.ln.Close()
+		err := s.ln.Close()
+		_ = os.Remove(s.Endpoint)
+		return err
 	}
 	return nil
 }
