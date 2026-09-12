@@ -18,9 +18,7 @@ func roundTrip(t *testing.T, s *Server, m Message) Result {
 	a, b := net.Pipe()
 	done := make(chan struct{})
 	go func() { s.serve(a); close(done) }()
-	if err := json.NewEncoder(b).Encode(m); err != nil {
-		t.Fatal(err)
-	}
+	go func() { _ = json.NewEncoder(b).Encode(m) }()
 	var r Result
 	if err := json.NewDecoder(bufio.NewReader(b)).Decode(&r); err != nil {
 		t.Fatal(err)
@@ -76,6 +74,32 @@ func TestServerRejectsInsecureSocketDirectory(t *testing.T) {
 	}
 }
 
+func TestServerPeerVerificationFailClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		uid  int
+		err  error
+		want string
+	}{
+		{"match", os.Getuid(), nil, "decided"},
+		{"mismatch", os.Getuid() + 1, nil, "UNAUTHENTICATED"},
+		{"error", -1, os.ErrPermission, "UNAUTHENTICATED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testServer(t)
+			s.peerCheck = func(net.Conn) (int, error) { return tc.uid, tc.err }
+			r := roundTrip(t, s, Message{Op: "submit", TraceID: "t", SpanID: "s", RequestID: "r", ResponseID: "resp", Decision: "allow"})
+			if tc.want == "decided" {
+				if r.Status != "decided" {
+					t.Fatalf("%+v", r)
+				}
+			} else if r.Reason != tc.want {
+				t.Fatalf("%+v", r)
+			}
+		})
+	}
+}
+
 func TestServerApprovalRelayWaitsForSubmit(t *testing.T) {
 	s := testServer(t)
 	r, err := NewServerApprovalRelay(s, RelayConfig{Endpoint: filepath.Join(t.TempDir(), "unused.sock"), TraceID: "t", Timeout: time.Second})
@@ -120,6 +144,7 @@ func testServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.peerCheck = func(net.Conn) (int, error) { return os.Getuid(), nil }
 	return s
 }
 

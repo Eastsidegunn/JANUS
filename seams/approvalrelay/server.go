@@ -18,14 +18,16 @@ import (
 // caller-owned session log; it is intentionally not an independent durable
 // store.
 type Server struct {
-	Endpoint string
-	Timeout  time.Duration
-	mu       sync.Mutex
-	pending  map[requestKey]chan Result
-	decided  map[requestKey]Result
-	byID     map[string]requestKey
-	meta     map[requestKey]PendingMeta
-	ln       net.Listener
+	Endpoint  string
+	Timeout   time.Duration
+	mu        sync.Mutex
+	pending   map[requestKey]chan Result
+	decided   map[requestKey]Result
+	byID      map[string]requestKey
+	meta      map[requestKey]PendingMeta
+	ln        net.Listener
+	OwnerUID  int
+	peerCheck func(net.Conn) (int, error)
 }
 type PendingMeta struct {
 	RequestDigest  string `json:"request_digest"`
@@ -62,7 +64,7 @@ func NewServer(endpoint string, timeout time.Duration) (*Server, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return &Server{Endpoint: endpoint, Timeout: timeout, pending: map[requestKey]chan Result{}, decided: map[requestKey]Result{}, byID: map[string]requestKey{}, meta: map[requestKey]PendingMeta{}}, nil
+	return &Server{Endpoint: endpoint, Timeout: timeout, OwnerUID: os.Getuid(), peerCheck: peerUID, pending: map[requestKey]chan Result{}, decided: map[requestKey]Result{}, byID: map[string]requestKey{}, meta: map[requestKey]PendingMeta{}}, nil
 }
 
 func (s *Server) Listen() error {
@@ -105,6 +107,11 @@ func (s *Server) Close() error {
 
 func (s *Server) serve(c net.Conn) {
 	defer c.Close()
+	uid, err := s.peerCheck(c)
+	if err != nil || uid != s.OwnerUID {
+		_ = json.NewEncoder(c).Encode(Result{Status: "error", Reason: "UNAUTHENTICATED"})
+		return
+	}
 	dec := json.NewDecoder(bufio.NewReader(c))
 	enc := json.NewEncoder(c)
 	var m Message
