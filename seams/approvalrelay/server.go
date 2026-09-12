@@ -186,7 +186,12 @@ func (s *Server) WaitWithMeta(ctx context.Context, traceID, spanID, requestID st
 		s.mu.Unlock()
 		return r
 	case <-t.C:
-		return Result{Status: "unknown"}
+		r := Result{Status: "expired", Decision: "deny", Reason: "EXPIRED"}
+		s.mu.Lock()
+		delete(s.pending, k)
+		s.decided[k] = r
+		s.mu.Unlock()
+		return r
 	}
 }
 
