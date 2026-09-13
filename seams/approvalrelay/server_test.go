@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -26,6 +27,56 @@ func roundTrip(t *testing.T, s *Server, m Message) Result {
 	_ = b.Close()
 	<-done
 	return r
+}
+
+func TestRelayRejectsOversizedMessage(t *testing.T) {
+	s, err := NewServer("/tmp/approval-size.sock", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.peerCheck = func(net.Conn) (int, error) { return s.OwnerUID, nil }
+	a, b := net.Pipe()
+	done := make(chan struct{})
+	go func() { s.serve(a); close(done) }()
+	go func() {
+		_, _ = b.Write([]byte(`{"op":"query","trace_id":"` + strings.Repeat("x", maxRelayMessage) + `"}` + "\n"))
+	}()
+	var r Result
+	if err := json.NewDecoder(b).Decode(&r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "error" {
+		t.Fatalf("%+v", r)
+	}
+	_ = b.Close()
+	<-done
+}
+
+func TestRelayRejectsConnectionBeyondLimit(t *testing.T) {
+	s, err := NewServer("/tmp/approval-limit.sock", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.peerCheck = func(net.Conn) (int, error) { return s.OwnerUID, nil }
+	for i := 0; i < cap(s.connSem); i++ {
+		s.connSem <- struct{}{}
+	}
+	a, b := net.Pipe()
+	done := make(chan struct{})
+	go func() { s.serve(a); close(done) }()
+	go func() { _ = json.NewEncoder(b).Encode(Message{Op: "query", TraceID: "t", SpanID: "s", RequestID: "r"}) }()
+	var r Result
+	if err := json.NewDecoder(b).Decode(&r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != "error" || r.Reason != "UNAVAILABLE" {
+		t.Fatalf("%+v", r)
+	}
+	_ = b.Close()
+	<-done
+	for i := 0; i < cap(s.connSem); i++ {
+		<-s.connSem
+	}
 }
 
 func TestExpiredRecordKeepsFinalStateAndSeq(t *testing.T) {

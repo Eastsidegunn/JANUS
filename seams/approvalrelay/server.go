@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/Eastsidegunn/JANUS/core/policy"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -33,6 +34,7 @@ type Server struct {
 	stopCallback   func(Message)
 	stops          map[stopKey]Result
 	terminalRef    int64
+	connSem        chan struct{}
 }
 type PendingMeta struct {
 	RequestDigest  string `json:"request_digest"`
@@ -68,6 +70,8 @@ type Message struct {
 	EvidenceSeq  int64  `json:"evidence_seq,omitempty"`
 }
 
+const maxRelayMessage = 64 * 1024
+
 func NewServer(endpoint string, timeout time.Duration) (*Server, error) {
 	if !filepath.IsAbs(endpoint) {
 		return nil, fmt.Errorf("approval relay endpoint must be absolute")
@@ -75,7 +79,7 @@ func NewServer(endpoint string, timeout time.Duration) (*Server, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return &Server{Endpoint: endpoint, Timeout: timeout, OwnerUID: os.Getuid(), peerCheck: peerUID, pending: map[requestKey]chan Result{}, decided: map[requestKey]Result{}, byID: map[string]requestKey{}, meta: map[requestKey]PendingMeta{}, stops: map[stopKey]Result{}}, nil
+	return &Server{Endpoint: endpoint, Timeout: timeout, OwnerUID: os.Getuid(), peerCheck: peerUID, pending: map[requestKey]chan Result{}, decided: map[requestKey]Result{}, byID: map[string]requestKey{}, meta: map[requestKey]PendingMeta{}, stops: map[stopKey]Result{}, connSem: make(chan struct{}, 32)}, nil
 }
 
 func (s *Server) Listen() error {
@@ -118,15 +122,25 @@ func (s *Server) Close() error {
 
 func (s *Server) serve(c net.Conn) {
 	defer c.Close()
+	if s.connSem != nil {
+		select {
+		case s.connSem <- struct{}{}:
+			defer func() { <-s.connSem }()
+		default:
+			_ = json.NewEncoder(c).Encode(Result{Status: "error", Reason: "UNAVAILABLE"})
+			return
+		}
+	}
 	uid, err := s.peerCheck(c)
 	if err != nil || uid != s.OwnerUID {
 		_ = json.NewEncoder(c).Encode(Result{Status: "error", Reason: "UNAUTHENTICATED"})
 		return
 	}
-	dec := json.NewDecoder(bufio.NewReader(c))
+	dec := json.NewDecoder(bufio.NewReader(io.LimitReader(c, maxRelayMessage)))
 	enc := json.NewEncoder(c)
 	var m Message
 	if dec.Decode(&m) != nil {
+		_ = enc.Encode(Result{Status: "error", Reason: "REQUEST_MISMATCH"})
 		return
 	}
 	if m.Op == "stop" || m.Op == "stop_query" {

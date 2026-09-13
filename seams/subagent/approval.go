@@ -128,7 +128,7 @@ func (a *approvalCoordinator) resolve(req policy.ApprovalRequest, forcedReason s
 		response.Reason = &reason
 	}
 	if err := a.send(req.RequestID, response); err != nil {
-		if durableCommitted && a.sub.doneWasObserved() {
+		if durableCommitted && (a.sub.stopWasRequested() || a.sub.doneWasObserved()) {
 			return
 		}
 		a.terminate(req.RequestID, "승인 응답 전송 실패", fmt.Errorf("subagent: approval_response 전송: %w", err), true)
