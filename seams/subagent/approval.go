@@ -95,6 +95,7 @@ func (a *approvalCoordinator) resolve(req policy.ApprovalRequest, forcedReason s
 		decision, fatal = a.decide(req)
 	}
 	reason := decision.Reason
+	durableCommitted := false
 	payload := decisionAuditPayload(req, decision, forcedReason, a.profileID)
 	encoded, err := json.Marshal(payload)
 	if err == nil {
@@ -105,6 +106,7 @@ func (a *approvalCoordinator) resolve(req policy.ApprovalRequest, forcedReason s
 		})
 		err = submitErr
 		if err == nil {
+			durableCommitted = true
 			if recorder, ok := a.decider.(policy.ApprovalResultRecorder); ok {
 				recorder.RecordApprovalResult(req, decision, seq)
 			}
@@ -126,6 +128,9 @@ func (a *approvalCoordinator) resolve(req policy.ApprovalRequest, forcedReason s
 		response.Reason = &reason
 	}
 	if err := a.send(req.RequestID, response); err != nil {
+		if durableCommitted && a.sub.doneWasObserved() {
+			return
+		}
 		a.terminate(req.RequestID, "승인 응답 전송 실패", fmt.Errorf("subagent: approval_response 전송: %w", err), true)
 		return
 	}

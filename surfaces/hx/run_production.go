@@ -275,14 +275,14 @@ func runProduction(ctx context.Context, run productionRun) error {
 	return nil
 }
 
-func selectApprovalDecider(endpoint, traceID, policyHash string, timeoutMs int64) (policy.ApprovalDecider, io.Closer, error) {
+func selectApprovalDecider(endpoint, traceID, policyHash string, timeoutMs int64) (policy.ApprovalDecider, io.Closer, *approvalrelay.Server, error) {
 	if endpoint == "" {
-		return policy.DenyAll{}, nil, nil
+		return policy.DenyAll{}, nil, nil, nil
 	}
 	t := time.Duration(timeoutMs) * time.Millisecond
 	srv, err := approvalrelay.NewServer(endpoint, t)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Listen() }()
@@ -294,21 +294,21 @@ func selectApprovalDecider(endpoint, traceID, policyHash string, timeoutMs int64
 		select {
 		case err := <-errCh:
 			_ = srv.Close()
-			return nil, nil, err
+			return nil, nil, nil, err
 		default:
 		}
 		if time.Now().After(deadline) {
 			_ = srv.Close()
-			return nil, nil, fmt.Errorf("approval endpoint did not appear")
+			return nil, nil, nil, fmt.Errorf("approval endpoint did not appear")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	relay, err := approvalrelay.NewServerApprovalRelay(srv, approvalrelay.RelayConfig{Endpoint: endpoint, TraceID: traceID, PolicyHash: policyHash, Timeout: t})
 	if err != nil {
 		_ = srv.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return relay, srv, nil
+	return relay, srv, srv, nil
 }
 
 // replayAcceptance는 동일 key 재요청의 무spawn 경로다: 응답 유실 재조회는
@@ -442,7 +442,7 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 	if timeoutMs <= 0 || timeoutMs > 600000 {
 		timeoutMs = 600000
 	}
-	decider, closer, err := selectApprovalDecider(l.approvalEndpoint, in.TraceID, in.PolicyHash, timeoutMs)
+	decider, closer, srv, err := selectApprovalDecider(l.approvalEndpoint, in.TraceID, in.PolicyHash, timeoutMs)
 	if err != nil {
 		return gen.DonePayload{}, err
 	}
@@ -482,6 +482,20 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 	if err != nil {
 		return gen.DonePayload{}, err
 	}
+	if relay, ok := decider.(*approvalrelay.UnixApprovalRelay); ok {
+		relay.SetStopHandler(func(m approvalrelay.Message) {
+			var reason gen.StopPayloadReason
+			switch m.Reason {
+			case "user":
+				reason = gen.StopPayloadReasonUser
+			case "budget_exceeded":
+				reason = gen.StopPayloadReasonBudgetExceeded
+			case "policy":
+				reason = gen.StopPayloadReasonPolicy
+			}
+			_ = active.Subagent.Stop(reason)
+		}, nil, nil)
+	}
 	finalized := false
 	defer func() {
 		if !finalized {
@@ -498,6 +512,15 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 	}
 	if closeErr != nil {
 		return gen.DonePayload{}, closeErr
+	}
+	if srv != nil {
+		if events, e := in.Log.Reader.ReadFrom(ctx, 1); e == nil {
+			for _, ev := range events {
+				if ev.Kind == gen.KindSubagentDone {
+					srv.MarkTerminal(ev.Seq)
+				}
+			}
+		}
 	}
 	return done, nil
 }

@@ -280,3 +280,10 @@ func (s *Server) handleStop(m Message) (Result, func(Message)) {
 	return r, s.stopCallback
 }
 func (s *Server) MarkTerminal(ref int64) { s.mu.Lock(); s.terminalRef = ref; s.mu.Unlock() }
+
+// SetStopHandler installs the session-owned stop callback and validators.
+func (s *Server) SetStopHandler(cb func(Message), budget func() bool, evidence func(int64) bool) {
+	s.mu.Lock()
+	s.stopCallback, s.budgetExceeded, s.evidenceValid = cb, budget, evidence
+	s.mu.Unlock()
+}

@@ -27,6 +27,12 @@ func (r *UnixApprovalRelay) RecordApprovalResult(req policy.ApprovalRequest, d p
 	}
 }
 
+func (r *UnixApprovalRelay) SetStopHandler(cb func(Message), budget func() bool, evidence func(int64) bool) {
+	if r.server != nil {
+		r.server.SetStopHandler(cb, budget, evidence)
+	}
+}
+
 func NewServerApprovalRelay(server *Server, cfg RelayConfig) (*UnixApprovalRelay, error) {
 	if server == nil {
 		return nil, fmt.Errorf("approval relay server is nil")
