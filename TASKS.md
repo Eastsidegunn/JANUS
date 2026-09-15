@@ -123,6 +123,7 @@
 - 대상: FR-POL-06, FR-ADP-02(stop), FR-CLI-06, §5.2 stop 메시지
 - 근거: 결정 시트 8번([H] 2026-09-10), 계약 §7·§8-③.
 - 완료 기준: (a) 실행 중 세션에 stop 요청 → stop_accepted 후 `subagent/done status: stopped`와 세션 종료가 로그로 확인되는 테스트, (b) 같은 stop_id 재요청 멱등 테스트, (c) 종료된 세션에 already_terminal 응답 테스트, (d) reason 위장(비인가 budget/policy 사유) 거부 테스트 — `make ci` green.
+- 2026-09-15: 구현 완료(브랜치 t19/stop-cli), Rhizome 계약 정합 리뷰 **통과**(계약 v1.4 [H] 비준 — evidence_seq 수용, 세션 종료 판정표, §7 현행화). bounded 상한 포함, stop-while-pending 게이트는 리뷰어 A/B 판정 반영. 후속: stop-request.json의 operation_id/correlation_id는 v2 wire 수용 항목(현재 파싱만·미전송, 주석 명시 예정). PR·[H] 확인 대기.
 
 ## 이후 (T19+, 착수 전 사람 판단 필요)
 - pi / OpenClaw / 사내 에이전트 어댑터 (contracts 안정성의 성적표)
