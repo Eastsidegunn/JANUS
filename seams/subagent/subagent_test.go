@@ -318,6 +318,26 @@ printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"stopped","resu
 	}
 }
 
+func TestApprovalWriteFailureBeforeDoneIsFatal(t *testing.T) {
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	script := `read task
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
+printf '%s\n' '{"v":1,"kind":"subagent/approval_request","payload":{"request_id":"` + approvalRequestID + `","call_id":"c","name":"Bash","args":{"command":"true"}},"raw":""}'
+exit 0`
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1, Spec{Adapter: "fake", Command: []string{"/bin/sh", "-c", script}, Instruction: "x", Workspace: "/workspace", Budget: gen.Budget{Tokens: 100, TimeMs: 1000, MaxDepth: 1}, ProfileID: "p", Approval: policy.ApprovalManual, Decider: &fakeDecider{decision: policy.ApprovalDecision{Reason: "deny"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sub.Wait(context.Background()); err == nil {
+		t.Fatal("write failure before done must be fatal")
+	}
+}
+
 func TestApprovalPolicyModesAndDurableAttribution(t *testing.T) {
 	cases := []struct {
 		name       string

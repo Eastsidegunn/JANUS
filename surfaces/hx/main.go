@@ -37,6 +37,8 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		err = runCmd(os.Args[2:])
+	case "stop":
+		err = stopCmd(os.Args[2:])
 	case "replay":
 		err = replayCmd(os.Args[2:])
 	case "audit":

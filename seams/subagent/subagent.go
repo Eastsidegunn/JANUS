@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
@@ -47,12 +48,14 @@ type Spec struct {
 
 // Subagent는 실행 중인 어댑터 프로세스 핸들이다.
 type Subagent struct {
-	actor     string
-	proc      *procgroup.Process
-	vals      *validate.Validators
-	doneCh    chan waitResult
-	childSpn  string
-	approvals *approvalCoordinator
+	actor         string
+	proc          *procgroup.Process
+	vals          *validate.Validators
+	doneCh        chan waitResult
+	childSpn      string
+	approvals     *approvalCoordinator
+	doneObserved  atomic.Bool
+	stopRequested atomic.Bool
 }
 
 type waitResult struct {
@@ -171,8 +174,12 @@ func (s *Subagent) Send(text string) error {
 
 // Stop은 중단을 요청한다 (§5.2 stop). 어댑터는 done(stopped)으로 응답해야 한다.
 func (s *Subagent) Stop(reason gen.StopPayloadReason) error {
+	s.stopRequested.Store(true)
 	return s.sendCommand(gen.CommandCmdStop, gen.StopPayload{Reason: reason})
 }
+
+func (s *Subagent) doneWasObserved() bool  { return s.doneObserved.Load() }
+func (s *Subagent) stopWasRequested() bool { return s.stopRequested.Load() }
 
 // Wait는 subagent/done까지 기다려 최종 결과를 반환한다. ctx가 먼저
 // 끝나면 프로세스 그룹을 kill하고 즉시 반환한다 — 회수(reap)는 reaper
@@ -275,6 +282,7 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string) {
 				return err
 			}
 			done = &d
+			s.doneObserved.Store(true)
 			// callback은 성공하지만 drain은 계속된다 — done 이후 출력 감시.
 		}
 		return nil
