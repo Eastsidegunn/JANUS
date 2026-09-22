@@ -5,6 +5,7 @@ package egressproxy
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -46,20 +47,52 @@ type Resolver interface {
 
 type DialContext func(context.Context, string, string) (net.Conn, error)
 
+// InjectRule is a non-secret declaration that requests for Domain must have
+// Header attached (Value = ValuePrefix + the resolved credential) and be
+// re-sent upstream over TLS. CredentialName names which credential fills the
+// header; the value itself is supplied separately in Config.Credentials and is
+// never part of this rule.
+type InjectRule struct {
+	Domain         string
+	Header         string
+	ValuePrefix    string
+	CredentialName string
+}
+
 type Config struct {
 	Allowlist []string
 	Audit     AuditSink
 	Resolver  Resolver
 	Dial      DialContext
 	Now       func() time.Time
+	// Inject declares proxy-held credential injection rules. Credentials maps a
+	// credential name to its value; the map is held only in this process's
+	// memory (fetched over a host-only socket) and is never logged or audited.
+	Inject      []InjectRule
+	Credentials map[string]string
+	// TLSConfig overrides the client TLS config used when re-sending an injected
+	// request upstream. Tests set an explicit root pool; production leaves it nil
+	// so the system trust store is used.
+	TLSConfig *tls.Config
+}
+
+// resolvedInjection binds a normalized target domain to the exact header name
+// and full header value (prefix + credential) to attach. The value is resolved
+// once at construction; the credential never re-enters a lookup at request time.
+type resolvedInjection struct {
+	domain string
+	header string
+	value  string
 }
 
 type Proxy struct {
-	allowlist []string
-	audit     AuditSink
-	resolver  Resolver
-	dial      DialContext
-	now       func() time.Time
+	allowlist  []string
+	audit      AuditSink
+	resolver   Resolver
+	dial       DialContext
+	now        func() time.Time
+	injections []resolvedInjection
+	tlsConfig  *tls.Config
 }
 
 func New(config Config) (*Proxy, error) {
@@ -69,6 +102,26 @@ func New(config Config) (*Proxy, error) {
 	allowlist, err := NormalizeAllowlist(config.Allowlist)
 	if err != nil {
 		return nil, fmt.Errorf("egressproxy: %w", err)
+	}
+	injections := make([]resolvedInjection, 0, len(config.Inject))
+	for _, rule := range config.Inject {
+		domain, err := normalizeDomain(rule.Domain)
+		if err != nil {
+			return nil, fmt.Errorf("egressproxy: inject domain %q: %w", rule.Domain, err)
+		}
+		if rule.Header == "" || strings.ContainsAny(rule.Header, " \t\r\n:") {
+			return nil, fmt.Errorf("egressproxy: inject header 이름이 유효하지 않음")
+		}
+		if strings.ContainsAny(rule.ValuePrefix, "\r\n") {
+			return nil, errors.New("egressproxy: inject value prefix에 개행 금지")
+		}
+		value, ok := config.Credentials[rule.CredentialName]
+		if !ok || value == "" {
+			// Fail closed: an injection domain must never fall through as an
+			// ordinary forward without its credential.
+			return nil, fmt.Errorf("egressproxy: inject 규칙의 credential %q 값이 없음", rule.CredentialName)
+		}
+		injections = append(injections, resolvedInjection{domain: domain, header: rule.Header, value: rule.ValuePrefix + value})
 	}
 	resolver := config.Resolver
 	if resolver == nil {
@@ -83,7 +136,21 @@ func New(config Config) (*Proxy, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Proxy{allowlist: allowlist, audit: config.Audit, resolver: resolver, dial: dial, now: now}, nil
+	return &Proxy{
+		allowlist: allowlist, audit: config.Audit, resolver: resolver, dial: dial, now: now,
+		injections: injections, tlsConfig: config.TLSConfig,
+	}, nil
+}
+
+// injectionFor returns the injection rule for a domain using the same exact /
+// label-boundary suffix match as the allowlist.
+func (p *Proxy) injectionFor(domain string) (resolvedInjection, bool) {
+	for _, rule := range p.injections {
+		if domain == rule.domain || strings.HasSuffix(domain, "."+rule.domain) {
+			return rule, true
+		}
+	}
+	return resolvedInjection{}, false
 }
 
 // NormalizeAllowlist is shared by the host world and the sidecar so invalid
@@ -130,15 +197,34 @@ func (p *Proxy) serveHTTP(w http.ResponseWriter, request *http.Request) {
 
 	outbound := request.Clone(request.Context())
 	outbound.RequestURI = ""
-	outbound.URL.Host = net.JoinHostPort(domain, port)
 	removeHopHeaders(outbound.Header)
 	outbound.Header.Del("Proxy-Authorization")
-	transport := &http.Transport{
-		Proxy: nil,
-		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return p.dial(ctx, network, net.JoinHostPort(ip.String(), port))
-		},
-		DisableCompression: true,
+
+	// Proxy-held credential injection (T20). The agent reaches this domain over
+	// plaintext HTTP inside the internal netns (ANTHROPIC_BASE_URL=http://…), so
+	// the agent leg never carries a credential — the agent has none. We attach
+	// the header here and re-send to the real origin over TLS. The credential
+	// therefore travels ONLY on this proxy→upstream TLS leg and never touches
+	// the container, its env, the audit wire (Attempt has no header field), or
+	// any log. CONNECT to an injection domain is denied (see serveConnect) so an
+	// agent cannot open an opaque TLS tunnel that would bypass this attachment.
+	dialPort := port
+	transport := &http.Transport{Proxy: nil, DisableCompression: true}
+	if rule, ok := p.injectionFor(domain); ok {
+		outbound.URL.Scheme = "https"
+		dialPort = connectPort
+		outbound.Header.Set(rule.header, rule.value)
+		transport.TLSClientConfig = p.tlsConfig
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{ServerName: domain, MinVersion: tls.VersionTLS12}
+		} else if transport.TLSClientConfig.ServerName == "" {
+			transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+			transport.TLSClientConfig.ServerName = domain
+		}
+	}
+	outbound.URL.Host = net.JoinHostPort(domain, dialPort)
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return p.dial(ctx, network, net.JoinHostPort(ip.String(), dialPort))
 	}
 	defer transport.CloseIdleConnections()
 	response, err := transport.RoundTrip(outbound)
@@ -154,6 +240,8 @@ func (p *Proxy) serveHTTP(w http.ResponseWriter, request *http.Request) {
 }
 
 func (p *Proxy) serveConnect(w http.ResponseWriter, request *http.Request) {
+	// authorize denies CONNECT to any injection domain (bypass closure) before
+	// the allow audit, so the domain itself is not needed past this point.
 	_, port, ip, ok, auditErr := p.authorize(request.Context(), request.Host, request.Method, 0)
 	if auditErr != nil {
 		writeAuditUnavailable(w)
@@ -236,6 +324,17 @@ func (p *Proxy) authorize(ctx context.Context, target, method string, size int64
 	}
 	if method == http.MethodConnect && port != connectPort {
 		return "", "", nil, false, p.auditDeny(ctx, domain, method, size, "CONNECT는 port 443만 허용")
+	}
+	// Bypass closure (T20 요구조건 3): deny CONNECT to any injection domain. An
+	// opaque end-to-end TLS tunnel would let the request skip the forward-path
+	// header attachment entirely, so the only sanctioned route to an injection
+	// domain is the audited plaintext-forward path that performs the injection
+	// and re-sends over TLS. Emitting the denial here (before the allow audit)
+	// keeps a single, truthful audit record for the attempt.
+	if method == http.MethodConnect {
+		if _, isInjection := p.injectionFor(domain); isInjection {
+			return "", "", nil, false, p.auditDeny(ctx, domain, method, size, "주입 대상 도메인 CONNECT 거부")
+		}
 	}
 	attempt := Attempt{
 		Domain: domain, Method: method, RequestBytes: size,
