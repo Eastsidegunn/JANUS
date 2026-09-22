@@ -131,6 +131,7 @@
 - 근거: [H] 승인(2026-09-22) — env 주입안 대신 proxy 보유안. "유출할 수 없는 것은 애초에 갖지 않은 것"의 이행. 지시 전문은 이 대화의 T20 지시.
 - 완료 기준: ① 컨테이너 env·podman inspect·adapter argv·세션 로그·audit 어디에도 비밀 값 부재(파수꾼 값 기계 검증, T15 방식 계승) ② 주입 경유 실호출 성립(fake 업스트림) ③ 벤더 2종 설정 파일만 바꿔 동일 테스트 통과 ④ 미선언 도메인 무주입 ⑤ 컨테이너 내부 env 전체 덤프에 비밀 부재(프롬프트 주입 구조적 무력화). CONNECT 터널로 주입 대상 도메인을 우회하는 구멍 없음(처리 방침 명시). 컨테이너↔proxy 평문 HTTP 경계 논증 문서화. T15 하네스 경로 회귀 보존. — `make ci` green.
 - 주의: Rhizome 계약 무개정(운영자 소유 영역, v1.1 ③ 원칙 — request.json wire 불변). 어긋남이 생기면 구현 전 회신. contracts/ 무수정.
+- 2026-09-23: opus 서브에이전트 구현, 독립 검증(적대적 유출 스캔·make ci exit0·contracts/fixtures/go.mod 무변경) 후 WIP 랜딩(e074f63, 브랜치 t20/proxy-held-credential). x/sys 용도 확장 [H] 승인(gate q-6601a460c134405aa92d034a) — 비준 문구: "x/sys 허용 용도는 2개로 한정 — peer credential 조회(seams/approvalrelay) + tty termios 비밀 입력 ECHO-off(seams/ttysecret), 각각 boundarylint 패키지 한정". 관찰(비차단): proxyCredentialTTL 24h는 tty 비밀의 실 OAuth 만료 미연동 stopgap. 남은 것: Linux 실물 통합 게이트(완료기준 ⑤/② 종단) — 구현자 후속.
 
 ## T21. lifecycle-orphan 간헐 실패 root-cause (T20 머지 선행)
 - 내용: `TestWorldIntegration/lifecycle-orphan`의 간헐 실패를 root-cause해 결정론적 green으로 만든다. **재실행으로 덮지 않는다**(BLOCKED escalation 방침). Stage 데이터 실측: `control read: EOF (stage=stream-end-write exit_sent=true stream_ended=false stop=false wait_result=true)` — orphan(비-stop) 자연 종료 경로에서 exit 관측·전송 후 stream-end 완료 전에 control peer가 닫히는 창이 process_broker.go의 sessionComplete()(exitSent && streamEnded) 게이트를 못 통과해 fatal로 분류됨. stop 경로엔 expectedStopControlGone 완화가 있으나 이 자연 종료 경로엔 없음. T10 선재이며 T20 무관.
