@@ -74,3 +74,39 @@ subuid 소유 character-device whiteout (`rdev 0:0`)로 나타났다. collector�
 opaque 디렉터리와 directory-path whiteout을 baseline의 모든 잎 삭제로
 전개하고, 재생성된 경로는 제외하며, 디렉터리→파일 대체를 삭제+추가로
 표현한다. probe 표와 구현이 일치하므로 차단을 해소했다.
+
+## T20-② — 컨테이너 게이트에서 업스트림 헤더 수신 실증 (2026-09-23 — 문서화, 우회 안 함)
+
+완료 기준 ②의 "가짜 TLS 업스트림이 `<header>: <prefix><sentinel>` 수신"을
+T20 컨테이너 게이트(`surfaces/hx/t20_integration_test.go`)에서 종단 실증하지
+못했다. 사유(우회·목업 대신 기록):
+
+1. **scratch 프록시 이미지에 CA 번들 부재.** 통합 프록시 이미지는
+   `FROM scratch`(world_integration_test.go buildScratchImage)라 신뢰 루트가
+   없다. 주입 재발신은 프록시가 TLS를 개시(RoundTrip https)하므로, 어떤
+   업스트림이든 인증서 검증이 핸드셰이크 단계에서 실패한다 → HTTP 헤더가
+   전송되기 전에 실패(=sentinel 미전송, fail-closed). 따라서 업스트림이 헤더를
+   수신하는 순간을 관측할 수 없다.
+2. **isPublicIP가 컨테이너/호스트 IP를 거부.** proxy.go `authorize`는 재발신
+   대상 IP가 공인(global-unicast, 비RFC1918)이어야 통과시킨다. 가짜 업스트림을
+   같은 podman 네트워크(사설 서브넷)나 호스트 게이트웨이(사설)로 두면 거부된다.
+   공인-대역 서브넷+가짜 업스트림 컨테이너로 우회하려면 프록시를 별도 테스트
+   네트워크에 사후 연결해 배관 격리 토폴로지를 변형해야 하는데, 이는 실물성이
+   아니라 테스트 편의를 위한 토폴로지 변형이라 게이트의 대표성을 훼손한다.
+3. **egress 네트워크는 backend 소유.** 테스트가 서브넷/`--add-host`를 지정할
+   수 없어 프록시의 DNS·재발신 경로를 하네스에서 제어할 수 없다.
+
+**현 상태**: ②의 헤더 부착 + TLS 재발신 자체는 egressproxy 단위 테스트
+`injection_test.go`(가짜 TLS 업스트림, InsecureSkipVerify 루트)에서 이미 종단
+실증되어 있다(green). 컨테이너 게이트는 대신 ③(주입 도메인 CONNECT 실물
+거부)·④(미선언 도메인 무주입)·⑤(env/inspect/argv/log/audit sentinel·이름
+부재)·정적 alias 경유 forward의 프록시 도달(감사 allow)·정리 잔존 0을 실물
+실증한다.
+
+**후보 해법(리뷰어 판단)**: (a) T20 전용 프록시 게이트 이미지에 테스트 CA 번들을
+넣고, 가짜 업스트림이 주입 도메인 인증서(테스트 CA 서명)를 제공하며, 공인-대역
+서브넷 네트워크에 업스트림+프록시를 함께 두어 isPublicIP·DNS·TLS 신뢰를 모두
+성립시킨다. (b) 프로덕션 프록시 이미지(CA 번들 보유)를 그대로 쓰고 [H]에서
+운영자 통제 하의 실 라우팅 공인 엔드포인트로 관측한다. 어느 쪽도 프로덕션 코드
+변경 없이 테스트 아티팩트 계층에서만 구성 가능하나, 상당한 배관과 [H] 실행
+검증이 필요해 이번 범위에서 제외하고 기록만 남긴다.

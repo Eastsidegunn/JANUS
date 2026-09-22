@@ -76,6 +76,10 @@ func TestProxyCredentialAbsentFromContainerYetServedToProxy(t *testing.T) {
 		"--inject api.anthropic.com|Authorization|Bearer |CLAUDE_CODE_OAUTH_TOKEN",
 		"--credential-socket " + credentialSocketPath,
 		":" + credentialMount + ":ro",
+		// The static alias must be attached alongside the per-span dynamic alias so
+		// a static world-config base_url/proxy URL (http://hx-egress-proxy) resolves
+		// to this sole proxy on the per-span isolated network.
+		"--network-alias " + proxyStaticAlias,
 	} {
 		if !strings.Contains(proxyCreate, required) {
 			t.Errorf("proxy create args에 %q 없음: %s", required, proxyCreate)

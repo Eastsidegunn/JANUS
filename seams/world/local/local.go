@@ -30,6 +30,15 @@ const podmanBinary = "podman"
 // is mounted inside agent containers.
 const ContainerWorkspacePath = "/workspace"
 
+// proxyStaticAlias is a stable, span-independent network-alias for the egress
+// proxy. Because each spawn's internal network is per-span isolated
+// (hx-<spanID>-internal) and holds exactly one proxy, a fixed alias resolves
+// unambiguously to that sole proxy. This lets an operator write a static
+// world-config env (e.g. ANTHROPIC_BASE_URL=http://hx-egress-proxy or
+// HTTP_PROXY=http://hx-egress-proxy:3128) that no longer has to embed the
+// per-span dynamic name hx-<spanID>-proxy.
+const proxyStaticAlias = "hx-egress-proxy"
+
 const (
 	proxyListenPort      = "3128"
 	proxySocketMount     = "/run/hx-audit"
@@ -613,7 +622,11 @@ func (b *Backend) proxyCreateArgs(
 	preImage := []string{
 		"create", "--cidfile", cidFile, "--name", proxyName,
 		"--pull=never", "--network", internalNetwork, "--network", externalNetwork,
+		// Both the per-span dynamic alias (kept for existing HTTP_PROXY injection)
+		// and a stable static alias resolve to this one proxy on the per-span
+		// isolated network, so a static base_url/proxy URL addresses it directly.
 		"--network-alias", proxyName,
+		"--network-alias", proxyStaticAlias,
 		"--userns=keep-id:uid=" + uid + ",gid=" + gid, "--user", uid + ":" + gid,
 		"--read-only", "--cap-drop=all", "--security-opt=no-new-privileges",
 		"--entrypoint", proxyExecutable,
