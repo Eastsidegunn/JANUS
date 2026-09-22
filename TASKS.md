@@ -125,6 +125,13 @@
 - 완료 기준: (a) 실행 중 세션에 stop 요청 → stop_accepted 후 `subagent/done status: stopped`와 세션 종료가 로그로 확인되는 테스트, (b) 같은 stop_id 재요청 멱등 테스트, (c) 종료된 세션에 already_terminal 응답 테스트, (d) reason 위장(비인가 budget/policy 사유) 거부 테스트 — `make ci` green.
 - 2026-09-15: 구현 완료(브랜치 t19/stop-cli), Rhizome 계약 정합 리뷰 **통과**(계약 v1.4 [H] 비준 — evidence_seq 수용, 세션 종료 판정표, §7 현행화). bounded 상한 포함, stop-while-pending 게이트는 리뷰어 A/B 판정 반영. 후속: stop-request.json의 operation_id/correlation_id는 v2 wire 수용 항목(현재 파싱만·미전송, 주석 명시 예정). PR·[H] 확인 대기.
 
+## T20. proxy 보유 자격증명 — 컨테이너 무비밀
+- 내용: 실 토큰이 에이전트 컨테이너 세계에 존재하지 않는 구조. hx run이 `read -s`(/dev/tty)로만 비밀 값을 받아(파일·argv·환경 상속·로그 금지) 즉시 SecretCapability로 감싸고, 값의 소비자는 egress proxy 프로세스뿐 — hx→proxy 전달은 디스크 무접촉(메모리/fd, 기존 audit 소켓 패턴 계승). proxy가 forward 경로에서 선언된 대상 도메인 요청에 헤더 부착 후 TLS 재발신. 설정(비밀 아님)은 world-config: adapter의 평문 env 선언(ANTHROPIC_BASE_URL 등)·proxy 주입 규칙(대상 도메인·헤더 이름·경로 매핑). 비밀의 이름은 파일 OK, 값은 절대 불가. 멀티 벤더(같은 모델·다른 공급자)가 설정 파일 변경만으로 성립.
+- 대상: FR-SBX-04(스코프 자격증명 — proxy 보유안), FR-SBX-03(egress), FR-COL-03(audit)
+- 근거: [H] 승인(2026-09-22) — env 주입안 대신 proxy 보유안. "유출할 수 없는 것은 애초에 갖지 않은 것"의 이행. 지시 전문은 이 대화의 T20 지시.
+- 완료 기준: ① 컨테이너 env·podman inspect·adapter argv·세션 로그·audit 어디에도 비밀 값 부재(파수꾼 값 기계 검증, T15 방식 계승) ② 주입 경유 실호출 성립(fake 업스트림) ③ 벤더 2종 설정 파일만 바꿔 동일 테스트 통과 ④ 미선언 도메인 무주입 ⑤ 컨테이너 내부 env 전체 덤프에 비밀 부재(프롬프트 주입 구조적 무력화). CONNECT 터널로 주입 대상 도메인을 우회하는 구멍 없음(처리 방침 명시). 컨테이너↔proxy 평문 HTTP 경계 논증 문서화. T15 하네스 경로 회귀 보존. — `make ci` green.
+- 주의: Rhizome 계약 무개정(운영자 소유 영역, v1.1 ③ 원칙 — request.json wire 불변). 어긋남이 생기면 구현 전 회신. contracts/ 무수정.
+
 ## T21. lifecycle-orphan 간헐 실패 root-cause (T20 머지 선행)
 - 내용: `TestWorldIntegration/lifecycle-orphan`의 간헐 실패를 root-cause해 결정론적 green으로 만든다. **재실행으로 덮지 않는다**(BLOCKED escalation 방침). Stage 데이터 실측: `control read: EOF (stage=stream-end-write exit_sent=true stream_ended=false stop=false wait_result=true)` — orphan(비-stop) 자연 종료 경로에서 exit 관측·전송 후 stream-end 완료 전에 control peer가 닫히는 창이 process_broker.go의 sessionComplete()(exitSent && streamEnded) 게이트를 못 통과해 fatal로 분류됨. stop 경로엔 expectedStopControlGone 완화가 있으나 이 자연 종료 경로엔 없음. T10 선재이며 T20 무관.
 - 대상: FR-SBX-01/FR-ADP-10 (T10 lifecycle 안정화)
@@ -133,6 +140,6 @@
 - 착수: opus 서브에이전트(astra codex usage limit ~9/26). T20 브랜치 보존(T21 머지 후 rebase).
 - 2026-09-24: 구현 완료(opus), Rhizome 정합 리뷰 **통과**(PR #79). root-cause 실체·수정 정밀성·load-bearing 양방향 확증(리뷰어 독립 검증). CI: t15 5/5 안정 green(이전 1/5 실패 소멸), broker -race -count=20 green. [H] 머지 가능 → main 안정 → T20 rebase.
 
-## 이후 (T19+, 착수 전 사람 판단 필요)
+## 이후 (T20+, 착수 전 사람 판단 필요)
 - pi / OpenClaw / 사내 에이전트 어댑터 (contracts 안정성의 성적표)
 - exec 감사(eBPF), Postgres store, 규칙 엔진 — 전부 명세 부록 A의 미결 확정 후.
