@@ -131,6 +131,7 @@
 - 근거: PR #78 CI(run 35760343569 attempt5) 재발, [H] (B) 결정(gate q-b00b55d7) — 브랜치 보호가 t15 green을 요구하므로 T20 머지의 선행. BLOCKED "T10 lifecycle-orphan escalation".
 - 완료 기준: 레이스 root-cause 확정(exit 관측·전송 후 출력 완전 drain 상태의 control EOF가 benign인지, 아니면 출력 손실을 가리는지 — consumer-gone-after-done과 같은 엄밀도로 구분) → 결정론적 수정 + 그 순서를 강제하는 테스트 → t15 게이트가 동일 SHA 반복 안정 green. macOS `make ci` 무손상.
 - 착수: opus 서브에이전트(astra codex usage limit ~9/26). T20 브랜치 보존(T21 머지 후 rebase).
+- 2026-09-24: 구현 완료(opus), Rhizome 정합 리뷰 **통과**(PR #79). root-cause 실체·수정 정밀성·load-bearing 양방향 확증(리뷰어 독립 검증). CI: t15 5/5 안정 green(이전 1/5 실패 소멸), broker -race -count=20 green. [H] 머지 가능 → main 안정 → T20 rebase.
 
 ## 이후 (T19+, 착수 전 사람 판단 필요)
 - pi / OpenClaw / 사내 에이전트 어댑터 (contracts 안정성의 성적표)
