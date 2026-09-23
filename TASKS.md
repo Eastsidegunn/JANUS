@@ -125,6 +125,13 @@
 - 완료 기준: (a) 실행 중 세션에 stop 요청 → stop_accepted 후 `subagent/done status: stopped`와 세션 종료가 로그로 확인되는 테스트, (b) 같은 stop_id 재요청 멱등 테스트, (c) 종료된 세션에 already_terminal 응답 테스트, (d) reason 위장(비인가 budget/policy 사유) 거부 테스트 — `make ci` green.
 - 2026-09-15: 구현 완료(브랜치 t19/stop-cli), Rhizome 계약 정합 리뷰 **통과**(계약 v1.4 [H] 비준 — evidence_seq 수용, 세션 종료 판정표, §7 현행화). bounded 상한 포함, stop-while-pending 게이트는 리뷰어 A/B 판정 반영. 후속: stop-request.json의 operation_id/correlation_id는 v2 wire 수용 항목(현재 파싱만·미전송, 주석 명시 예정). PR·[H] 확인 대기.
 
+## T21. lifecycle-orphan 간헐 실패 root-cause (T20 머지 선행)
+- 내용: `TestWorldIntegration/lifecycle-orphan`의 간헐 실패를 root-cause해 결정론적 green으로 만든다. **재실행으로 덮지 않는다**(BLOCKED escalation 방침). Stage 데이터 실측: `control read: EOF (stage=stream-end-write exit_sent=true stream_ended=false stop=false wait_result=true)` — orphan(비-stop) 자연 종료 경로에서 exit 관측·전송 후 stream-end 완료 전에 control peer가 닫히는 창이 process_broker.go의 sessionComplete()(exitSent && streamEnded) 게이트를 못 통과해 fatal로 분류됨. stop 경로엔 expectedStopControlGone 완화가 있으나 이 자연 종료 경로엔 없음. T10 선재이며 T20 무관.
+- 대상: FR-SBX-01/FR-ADP-10 (T10 lifecycle 안정화)
+- 근거: PR #78 CI(run 35760343569 attempt5) 재발, [H] (B) 결정(gate q-b00b55d7) — 브랜치 보호가 t15 green을 요구하므로 T20 머지의 선행. BLOCKED "T10 lifecycle-orphan escalation".
+- 완료 기준: 레이스 root-cause 확정(exit 관측·전송 후 출력 완전 drain 상태의 control EOF가 benign인지, 아니면 출력 손실을 가리는지 — consumer-gone-after-done과 같은 엄밀도로 구분) → 결정론적 수정 + 그 순서를 강제하는 테스트 → t15 게이트가 동일 SHA 반복 안정 green. macOS `make ci` 무손상.
+- 착수: opus 서브에이전트(astra codex usage limit ~9/26). T20 브랜치 보존(T21 머지 후 rebase).
+
 ## 이후 (T19+, 착수 전 사람 판단 필요)
 - pi / OpenClaw / 사내 에이전트 어댑터 (contracts 안정성의 성적표)
 - exec 감사(eBPF), Postgres store, 규칙 엔진 — 전부 명세 부록 A의 미결 확정 후.
