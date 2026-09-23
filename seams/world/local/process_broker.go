@@ -66,6 +66,7 @@ type processBroker struct {
 	stopReason                          string
 	waitResult                          *processwire.ExitObserved
 	exitSent, streamEnded               bool
+	streamEndReached                    bool
 	attach                              startedCommand
 	waiter                              startedCommand
 	firstErr                            error
@@ -353,6 +354,14 @@ func (b *processBroker) watchOutputPeer(conn net.Conn) {
 		b.markOutputPeerGone()
 		return
 	}
+	// Same drained consumer-gone-after-done terminal on the natural (non-stop)
+	// path: the output peer may close the instant it consumes stream-end, before
+	// the broker sets its own streamEnded flag. Benign only once exit is sent and
+	// output is fully drained (streamEndReached); a pre-drain output close stays
+	// fatal below.
+	if b.expectedDrainedPeerGone(err) {
+		return
+	}
 	b.fail(fmt.Errorf("output peer disconnect: %w", err))
 }
 
@@ -379,6 +388,35 @@ func (b *processBroker) expectedStopControlGone(err error) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.stopReason == "" || !b.exitSent {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && !netErr.Timeout()
+}
+
+// expectedDrainedPeerGone reports whether a control- or output-plane disconnect
+// is the benign consumer-gone-after-done terminal for a natural (non-stop)
+// exit. It extends the stop path's consumer-gone-after-done classification to
+// the orphan/natural exit path with the SAME rigor: it holds ONLY once the exit
+// frame has been delivered (exitSent) AND every container output byte has been
+// forwarded and the terminal stream-end write has begun (streamEndReached).
+//
+// (가)/(나) 판별: streamEndReached는 drainAttach 구조상 chunk-forward 루프가
+// 모두 drain되고 redaction tail까지 flush된 뒤에만 세워진다(= 출력 완전 drain).
+// 그 경계 이후의 peer close는 유실될 출력이 없으므로 benign이다. 그 경계 이전
+// (exit 미전송, 또는 chunk·attach 진행 중)의 close는 아직 forward되지 않은
+// 출력을 유실시킬 수 있으므로 fatal로 유지한다. "post-exit면 무조건 benign"이
+// 아니라 출력 drain 게이트(streamEndReached)를 반드시 통과해야 한다.
+func (b *processBroker) expectedDrainedPeerGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.exitSent || !b.streamEndReached {
 		return false
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
@@ -424,6 +462,18 @@ func (b *processBroker) handleControl(conn net.Conn, decoder *processwire.Decode
 			// obligation. The adapter may close this socket once it has consumed
 			// that frame; a disconnect before exitSent remains broker-fatal.
 			if b.expectedStopControlGone(err) {
+				return
+			}
+			// A natural (non-stop) exit has the same consumer-gone-after-done
+			// terminal as the stop path: once the exit frame is delivered and the
+			// output plane is fully drained (stream-end write begun), the adapter is
+			// permitted to close control the instant it consumes stream-end. The
+			// broker's own streamEnded flag lags the wire — it is set only after the
+			// terminal encoder Write returns — so a peer that closes on stream-end
+			// receipt races ahead of it; gating on streamEndReached instead of
+			// sessionComplete removes that spurious fatal. A pre-drain close (exit
+			// unsent, or chunks/attach still in flight) still falls through to fatal.
+			if b.expectedDrainedPeerGone(err) {
 				return
 			}
 			// Include the active stream stage in the fatal diagnostic. Control EOF
@@ -933,6 +983,16 @@ func (b *processBroker) sendStreamEnd(encoder *processwire.Encoder, end processw
 			b.redactionTail[stream] = nil
 		}
 	}
+	// Every container output byte (all chunks plus any redaction tail) has now
+	// been forwarded to the transport; only the terminal stream-end frame
+	// remains. Mark the output plane fully drained BEFORE the frame write so a
+	// peer that closes the instant it consumes stream-end is classified against a
+	// true drain gate, not against the streamEnded flag (which lags, being set
+	// only after this write returns). This is the orphan/natural-path analogue of
+	// the stop path's consumer-gone-after-done boundary.
+	b.mu.Lock()
+	b.streamEndReached = true
+	b.mu.Unlock()
 	payload, _ := processwire.Marshal(end)
 	leave := b.enterStreamStage(streamStageStreamEndWrite)
 	_, err := encoder.Write(processwire.KindStreamEnd, processwire.StreamControl, 0, payload)
