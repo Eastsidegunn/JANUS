@@ -30,6 +30,15 @@ const podmanBinary = "podman"
 // is mounted inside agent containers.
 const ContainerWorkspacePath = "/workspace"
 
+// proxyStaticAlias is a stable, span-independent network-alias for the egress
+// proxy. Because each spawn's internal network is per-span isolated
+// (hx-<spanID>-internal) and holds exactly one proxy, a fixed alias resolves
+// unambiguously to that sole proxy. This lets an operator write a static
+// world-config env (e.g. ANTHROPIC_BASE_URL=http://hx-egress-proxy or
+// HTTP_PROXY=http://hx-egress-proxy:3128) that no longer has to embed the
+// per-span dynamic name hx-<spanID>-proxy.
+const proxyStaticAlias = "hx-egress-proxy"
+
 const (
 	proxyListenPort      = "3128"
 	proxySocketMount     = "/run/hx-audit"
@@ -234,6 +243,9 @@ func (b *Backend) Prepare(ctx context.Context, spec world.SpawnSpec) (prepared w
 			return nil, fmt.Errorf("world/local: secret 주입을 지원하지 않는 Podman runner")
 		}
 	}
+	if err := validateProxyCredential(spec, time.Now()); err != nil {
+		return nil, err
+	}
 	if err := validateImageReference(spec.Image()); err != nil {
 		return nil, fmt.Errorf("world/local: agent image: %w", err)
 	}
@@ -329,6 +341,12 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 		cancel()
 		return nil, errors.Join(err, cleanupErr)
 	}
+	if err := validateProxyCredential(spec, time.Now()); err != nil {
+		_, cancel := cleanupContext(ctx)
+		cleanupErr := os.RemoveAll(layout.stateDir)
+		cancel()
+		return nil, errors.Join(err, cleanupErr)
+	}
 	broker, err := b.newEffectBroker(layout.stateDir, spec.SpanID(), b.auditCapacity)
 	if err != nil {
 		return nil, err
@@ -355,6 +373,25 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 		}
 	}()
 
+	// Proxy-held credential channel (T20). When injection rules are present, the
+	// credential broker is started before the proxy container so the sidecar can
+	// fetch its values over the mounted socket at startup. The value lives only
+	// in host memory and on the socket wire — never in argv, env, or a file.
+	injections := spec.ProxyInjections()
+	credentialSocketDir := ""
+	if len(injections) > 0 {
+		values := make(map[string]string, len(spec.ProxyCredentials()))
+		for _, credential := range spec.ProxyCredentials() {
+			values[credential.Name()] = credential.Value()
+		}
+		credBroker, err := startCredentialBroker(values)
+		if err != nil {
+			return nil, err
+		}
+		resources.credential = credBroker
+		credentialSocketDir = credBroker.SocketDir()
+	}
+
 	internalNetwork := "hx-" + spec.SpanID() + "-internal"
 	externalNetwork := "hx-" + spec.SpanID() + "-egress"
 	proxyName := "hx-" + spec.SpanID() + "-proxy"
@@ -368,7 +405,7 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 	resources.networks = append(resources.networks, externalNetwork)
 
 	proxyCIDFile := filepath.Join(layout.stateDir, "proxy.cid")
-	proxyArgs := b.proxyCreateArgs(prepared.allowlist, prepared.proxyRef.String(), broker.SocketDir(), proxyCIDFile, proxyName, internalNetwork, externalNetwork)
+	proxyArgs := b.proxyCreateArgs(prepared.allowlist, prepared.proxyRef.String(), broker.SocketDir(), proxyCIDFile, proxyName, internalNetwork, externalNetwork, injections, credentialSocketDir)
 	proxyID, err := b.createContainer(ctx, proxyArgs, proxyCIDFile)
 	if err != nil {
 		return nil, fmt.Errorf("world/local: proxy container create: %w", err)
@@ -406,6 +443,13 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 		"--volume", approval.RelayDir() + ":" + approvalRelayMount + ":ro",
 		"--volume", volume,
 		prepared.agentRef.String(),
+	}
+	// Non-secret plaintext env declared by world-config (e.g. ANTHROPIC_BASE_URL
+	// pointing the agent at the proxy over plaintext http). These are values the
+	// operator explicitly declared as non-secret; the credential VALUE never
+	// travels here — only the proxy holds it.
+	for _, env := range spec.AgentEnv() {
+		args = append(args[:len(args)-1], "--env", env, args[len(args)-1])
 	}
 	secretEnv := []string(nil)
 	if secret := spec.SecretCapability(); !secret.IsZero() {
@@ -447,7 +491,7 @@ func (b *Backend) activate(ctx context.Context, prepared *preparedLease) (opened
 		stateDir: layout.stateDir, upperDir: layout.upper, workDir: layout.work,
 		cidFile: cidFile, proxyCIDFile: proxyCIDFile,
 		broker: broker, effects: broker.Effects(), effectsDone: broker.Done(),
-		approval: approval, process: process,
+		approval: approval, process: process, credential: resources.credential,
 		processEndpoint: process.Endpoint(), approvalEndpoint: approval.Endpoint(),
 		closeToken:     makeCloseToken(),
 		spanID:         spec.SpanID(),
@@ -523,37 +567,105 @@ func validateSecretCapability(spec world.SpawnSpec, now time.Time) error {
 	return nil
 }
 
+// validateProxyCredential enforces, before any runtime resource is created,
+// that every injection rule names an available credential and that each
+// credential outlives the spawn budget plus a clock-skew margin. A spec with no
+// injection rules is the ordinary credential-free path. The credential VALUE is
+// never touched here beyond an emptiness check; only names are compared.
+func validateProxyCredential(spec world.SpawnSpec, now time.Time) error {
+	rules := spec.ProxyInjections()
+	credentials := spec.ProxyCredentials()
+	if len(rules) == 0 {
+		if len(credentials) > 0 {
+			return fmt.Errorf("world/local: 주입 규칙 없이 proxy credential이 제공됨")
+		}
+		return nil
+	}
+	available := make(map[string]world.ProxyCredential, len(credentials))
+	for _, credential := range credentials {
+		if credential.IsZero() || credential.Value() == "" {
+			return fmt.Errorf("world/local: proxy credential이 유효하지 않음")
+		}
+		available[credential.Name()] = credential
+	}
+	budgetMs := spec.Policy().Budget().TimeMs
+	if budgetMs < 0 {
+		return fmt.Errorf("world/local: proxy credential 만료 전 시간 예산이 유효하지 않음")
+	}
+	marginMs := int64(credentialClockSkew / time.Millisecond)
+	needMs := budgetMs + marginMs
+	if needMs < budgetMs { // integer overflow, fail closed
+		return fmt.Errorf("world/local: proxy credential 시간 예산이 오버플로")
+	}
+	for _, rule := range rules {
+		if err := rule.Validate(); err != nil {
+			return fmt.Errorf("world/local: %w", err)
+		}
+		credential, ok := available[rule.CredentialName]
+		if !ok {
+			return fmt.Errorf("world/local: 주입 규칙이 참조한 credential %q 값이 없음", rule.CredentialName)
+		}
+		if credential.ExpiresAtUnixMs()-now.UnixMilli() < needMs {
+			return fmt.Errorf("world/local: proxy credential이 실행 예산 전에 만료됨")
+		}
+	}
+	return nil
+}
+
 func (b *Backend) proxyCreateArgs(
 	allowlist []string,
 	proxyDigest, socketDir, cidFile, proxyName, internalNetwork, externalNetwork string,
+	injections []world.ProxyInjection, credentialSocketDir string,
 ) []string {
 	uid := strconv.FormatUint(uint64(b.proxyIdentity.UID), 10)
 	gid := strconv.FormatUint(uint64(b.proxyIdentity.GID), 10)
-	args := []string{
+	preImage := []string{
 		"create", "--cidfile", cidFile, "--name", proxyName,
 		"--pull=never", "--network", internalNetwork, "--network", externalNetwork,
+		// Both the per-span dynamic alias (kept for existing HTTP_PROXY injection)
+		// and a stable static alias resolve to this one proxy on the per-span
+		// isolated network, so a static base_url/proxy URL addresses it directly.
 		"--network-alias", proxyName,
+		"--network-alias", proxyStaticAlias,
 		"--userns=keep-id:uid=" + uid + ",gid=" + gid, "--user", uid + ":" + gid,
 		"--read-only", "--cap-drop=all", "--security-opt=no-new-privileges",
 		"--entrypoint", proxyExecutable,
 		"--volume", socketDir + ":" + proxySocketMount + ":ro",
-		proxyDigest,
-		"--listen", ":" + proxyListenPort, "--audit-socket", proxySocketPath,
+	}
+	// The credential socket dir is a second read-only mount, distinct from the
+	// audit mount and given only to the trusted proxy sidecar. The credential
+	// value itself never appears in these args — only the (non-secret) socket
+	// path and the injection rule names do.
+	if credentialSocketDir != "" {
+		preImage = append(preImage, "--volume", credentialSocketDir+":"+credentialMount+":ro")
+	}
+	args := append(preImage, proxyDigest,
+		"--listen", ":"+proxyListenPort, "--audit-socket", proxySocketPath)
+	if credentialSocketDir != "" {
+		args = append(args, "--credential-socket", credentialSocketPath)
 	}
 	for _, domain := range allowlist {
 		args = append(args, "--allow", domain)
+	}
+	// Injection rules travel as argv: only names (domain, header, value prefix,
+	// credential name), never the credential value. Fields are pipe-joined; the
+	// proxy splits them back. world.ProxyInjection.Validate has already rejected
+	// separators/newlines in these fields.
+	for _, rule := range injections {
+		args = append(args, "--inject", rule.Domain+"|"+rule.Header+"|"+rule.ValuePrefix+"|"+rule.CredentialName)
 	}
 	return args
 }
 
 type runtimeResources struct {
-	runner   commandRunner
-	broker   effectBroker
-	approval *approvalBroker
-	process  *processBroker
-	agentID  string
-	proxyID  string
-	networks []string
+	runner     commandRunner
+	broker     effectBroker
+	approval   *approvalBroker
+	process    *processBroker
+	credential *credentialBroker
+	agentID    string
+	proxyID    string
+	networks   []string
 }
 
 func (r *runtimeResources) cleanupOpen(ctx context.Context) error {
@@ -563,6 +675,9 @@ func (r *runtimeResources) cleanupOpen(ctx context.Context) error {
 	}
 	if r.approval != nil {
 		joined = errors.Join(joined, r.approval.Cleanup())
+	}
+	if r.credential != nil {
+		joined = errors.Join(joined, r.credential.Cleanup())
 	}
 	for _, containerID := range []string{r.agentID, r.proxyID} {
 		if containerID == "" {
@@ -841,6 +956,7 @@ type lease struct {
 	effectsDone      <-chan struct{}
 	approval         *approvalBroker
 	process          *processBroker
+	credential       *credentialBroker
 	processEndpoint  world.ProcessEndpoint
 	approvalEndpoint world.ApprovalEndpoint
 	spanID           string
@@ -972,6 +1088,11 @@ func (l *lease) Close(ctx context.Context) error {
 	if l.approval != nil {
 		if err := l.approval.Cleanup(); err != nil {
 			joined = errors.Join(joined, fmt.Errorf("world/local: approval socket cleanup: %w", err))
+		}
+	}
+	if l.credential != nil {
+		if err := l.credential.Cleanup(); err != nil {
+			joined = errors.Join(joined, fmt.Errorf("world/local: credential socket cleanup: %w", err))
 		}
 	}
 	// upper is intentionally preserved for T11. Agent termination is not a

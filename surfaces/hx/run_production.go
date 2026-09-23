@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
@@ -26,6 +28,7 @@ import (
 	"github.com/Eastsidegunn/JANUS/seams/approvalrelay"
 	sqlite "github.com/Eastsidegunn/JANUS/seams/store/sqlite"
 	"github.com/Eastsidegunn/JANUS/seams/subagent"
+	"github.com/Eastsidegunn/JANUS/seams/ttysecret"
 	local "github.com/Eastsidegunn/JANUS/seams/world/local"
 )
 
@@ -50,6 +53,16 @@ func runProductionCmd(requestPath, profilePath string, overlayPaths []string, ac
 		return err
 	}
 	launcher.approvalEndpoint = approvalEndpoint
+	// T20: read proxy-held credential VALUES for the requested adapter from
+	// /dev/tty only (never a file, argv, or inherited env), immediately wrapping
+	// each in a host-only capability. This happens before the claim so a missing
+	// secret fails without consuming an idempotency key. If the request cannot be
+	// parsed here, runProduction below rejects it cleanly without prompting.
+	if req, rerr := parseRunRequest(requestBytes); rerr == nil {
+		if err := launcher.loadProxyCredentials(cfg, req.AdapterID); err != nil {
+			return err
+		}
+	}
 	return runProduction(context.Background(), productionRun{
 		RequestBytes: requestBytes, ProfilePath: profilePath, OverlayPaths: overlayPaths,
 		AcceptRoot: acceptRoot, SessionArg: sessionArg, Launcher: launcher, Stdout: os.Stdout,
@@ -383,7 +396,26 @@ type worldAdapterConfig struct {
 	Image       worldImageConfig `json:"image"`
 	AgentArgv   []string         `json:"agent_argv"`
 	ControlMode string           `json:"control_mode"` // tool_approval | container_only
+	// Env is non-secret plaintext container environment (NAME=VALUE), e.g.
+	// ANTHROPIC_BASE_URL=http://api.anthropic.com. Secret VALUES are forbidden
+	// here — the credential lives only in the proxy (T20 요구조건 2).
+	Env []string `json:"env,omitempty"`
+	// Inject declares proxy header-injection rules. Only names appear (target
+	// domain, header, optional value prefix, and the credential NAME); the
+	// credential value is supplied at runtime via read -s on /dev/tty.
+	Inject []worldInjectRule `json:"inject,omitempty"`
 }
+
+// worldInjectRule is the operator-declared, non-secret injection rule. The
+// credential NAME is a file-safe identifier; its VALUE never appears in config.
+type worldInjectRule struct {
+	Domain      string `json:"domain"`
+	Header      string `json:"header"`
+	ValuePrefix string `json:"value_prefix,omitempty"`
+	Credential  string `json:"credential"`
+}
+
+var worldEnvNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func parseWorldConfig(data []byte) (worldConfig, error) {
 	var cfg worldConfig
@@ -411,8 +443,32 @@ func parseWorldConfig(data []byte) (worldConfig, error) {
 		if adapter.ControlMode != "tool_approval" && adapter.ControlMode != "container_only" {
 			return worldConfig{}, fmt.Errorf("world config: 어댑터 %q control_mode %q — tool_approval|container_only만 허용", name, adapter.ControlMode)
 		}
+		for _, env := range adapter.Env {
+			key, _, ok := strings.Cut(env, "=")
+			if !ok || !worldEnvNamePattern.MatchString(key) {
+				return worldConfig{}, fmt.Errorf("world config: 어댑터 %q env 항목은 NAME=VALUE 형식이어야 함: %q", name, env)
+			}
+		}
+		for _, rule := range adapter.Inject {
+			if err := rule.toProxyInjection().Validate(); err != nil {
+				return worldConfig{}, fmt.Errorf("world config: 어댑터 %q inject 규칙: %w", name, err)
+			}
+			// The injection target domain must be within the operator's egress
+			// allowlist path; the allowlist itself comes from the merged policy at
+			// launch, so here we only fix the rule's own shape. Cross-checking the
+			// domain against effective egress happens in the proxy (allowlist) and
+			// is not duplicated as speculative policy here.
+		}
 	}
 	return cfg, nil
+}
+
+// toProxyInjection converts an operator config rule to the host-only capability
+// input. Only names cross over; there is no value field to carry.
+func (r worldInjectRule) toProxyInjection() world.ProxyInjection {
+	return world.ProxyInjection{
+		Domain: r.Domain, Header: r.Header, ValuePrefix: r.ValuePrefix, CredentialName: r.Credential,
+	}
 }
 
 // worldLauncher는 유일한 생산 sessionLauncher다. backend 구성이 CLI 단계
@@ -422,6 +478,10 @@ type worldLauncher struct {
 	backend          world.Backend
 	config           worldConfig
 	approvalEndpoint string
+	// proxyCredentials holds the host-only credential values read from /dev/tty
+	// at CLI time, keyed by credential name. They are never persisted; they flow
+	// only to the egress proxy via the world backend's credential socket.
+	proxyCredentials map[string]world.ProxyCredential
 }
 
 func newWorldLauncher(cfg worldConfig) (*worldLauncher, error) {
@@ -435,6 +495,50 @@ func newWorldLauncher(cfg worldConfig) (*worldLauncher, error) {
 		return nil, err
 	}
 	return &worldLauncher{backend: backend, config: cfg}, nil
+}
+
+// proxyCredentialTTL is the liveness bound stamped on a credential read from
+// the tty. Unlike the Claude OAuth path (which carries a real expiry), a raw
+// operator-provided secret has no self-declared expiry, so this is a generous
+// bound that comfortably exceeds the maximum spawn budget (10 minutes). It is a
+// safety cap, not a claim about the upstream token's real lifetime.
+const proxyCredentialTTL = 24 * time.Hour
+
+// loadProxyCredentials reads, from /dev/tty only, one value per distinct
+// credential named by the requested adapter's injection rules and wraps each in
+// a host-only capability. Adapters with no injection rules read nothing.
+func (l *worldLauncher) loadProxyCredentials(cfg worldConfig, adapterID string) error {
+	adapter, ok := cfg.Adapters[adapterID]
+	if !ok || len(adapter.Inject) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(adapter.Inject))
+	seen := map[string]bool{}
+	for _, rule := range adapter.Inject {
+		if !seen[rule.Credential] {
+			seen[rule.Credential] = true
+			names = append(names, rule.Credential)
+		}
+	}
+	if l.proxyCredentials == nil {
+		l.proxyCredentials = make(map[string]world.ProxyCredential, len(names))
+	}
+	expiresAt := time.Now().Add(proxyCredentialTTL).UnixMilli()
+	for _, name := range names {
+		if _, already := l.proxyCredentials[name]; already {
+			continue
+		}
+		value, err := ttysecret.Read(fmt.Sprintf("Enter secret for %s (hidden): ", name))
+		if err != nil {
+			return fmt.Errorf("proxy credential %q 입력: %w", name, err)
+		}
+		credential, err := world.NewProxyCredential(name, value, expiresAt)
+		if err != nil {
+			return err
+		}
+		l.proxyCredentials[name] = credential
+	}
+	return nil
 }
 
 func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DonePayload, error) {
@@ -464,6 +568,32 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 		adapter.AgentArgv, 0, in.TraceID, childSpan,
 		world.AgentIdentity{UID: adapter.Image.UID, GID: adapter.Image.GID}, nil,
 	)
+	// Non-secret plaintext container env (e.g. ANTHROPIC_BASE_URL) from config.
+	if len(adapter.Env) > 0 {
+		spawnSpec = spawnSpec.WithAgentEnv(adapter.Env)
+	}
+	// Proxy-held credential (T20): attach injection rules and the matching
+	// host-only credential values. The container receives none of these; only
+	// the egress proxy does. Multi-vendor is achieved purely by changing the
+	// adapter's inject rules and env in world-config (완료 기준 ③).
+	if len(adapter.Inject) > 0 {
+		rules := make([]world.ProxyInjection, 0, len(adapter.Inject))
+		credentials := make([]world.ProxyCredential, 0, len(adapter.Inject))
+		seen := map[string]bool{}
+		for _, rule := range adapter.Inject {
+			rules = append(rules, rule.toProxyInjection())
+			if seen[rule.Credential] {
+				continue
+			}
+			seen[rule.Credential] = true
+			credential, ok := l.proxyCredentials[rule.Credential]
+			if !ok {
+				return gen.DonePayload{}, fmt.Errorf("어댑터 %q inject 규칙의 credential %q가 제공되지 않음 (hx run이 /dev/tty에서 읽어야 함)", in.Request.AdapterID, rule.Credential)
+			}
+			credentials = append(credentials, credential)
+		}
+		spawnSpec = spawnSpec.WithProxyCredential(rules, credentials)
+	}
 	active, err := startProductionWorld(ctx, worldLaunch{
 		Backend: l.backend, SpawnSpec: spawnSpec, Writer: in.Log.Writer,
 		TraceID: in.TraceID, ParentSpan: in.RootSpan,
