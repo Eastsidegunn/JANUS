@@ -13,19 +13,29 @@ import (
 	"github.com/Eastsidegunn/JANUS/seams/world/local/egressproxy"
 )
 
+// proxyCredentialPlaceholder is the non-secret value an operator declares in
+// world-config as the container's CLAUDE_CODE_OAUTH_TOKEN so claude-code passes
+// its login gate and emits an Authorization: Bearer <placeholder> request the
+// proxy can replace with the real token (T22). It is intentionally distinct
+// from any credential sentinel; the guardian asserts placeholder != sentinel.
+const proxyCredentialPlaceholder = "hx-proxy-injected-placeholder"
+
 // proxyCredentialSpec builds a spawn spec whose egress admits the injection
 // domain and which routes a proxy-held credential (never a container secret).
-func proxyCredentialSpec(lower, digest, domain, header, prefix, credName, credValue string) world.SpawnSpec {
+// extraEnv appends non-secret plaintext container env (NAME=VALUE) — e.g. a
+// placeholder CLAUDE_CODE_OAUTH_TOKEN — on top of the plaintext ANTHROPIC_BASE_URL.
+func proxyCredentialSpec(lower, digest, domain, header, prefix, credName, credValue string, extraEnv ...string) world.SpawnSpec {
 	effective := world.NewEffectivePolicy(policy.SandboxConfig{
 		ProfileID: "profile", Workspace: lower, FSScope: []string{lower}, Egress: []string{domain},
 		Budget:   gen.Budget{Tokens: 10, TimeMs: 1000, MaxDepth: 2},
 		Approval: policy.ApprovalManual,
 	})
+	agentEnv := append([]string{"ANTHROPIC_BASE_URL=http://" + domain}, extraEnv...)
 	spec := world.NewSpawnSpec(
 		effective, world.NewImageReference(testAgentRepository, digest), []string{"agent", "--serve"}, 0,
 		strings.Repeat("1", 32), strings.Repeat("2", 16),
 		world.AgentIdentity{UID: 1000, GID: 1001}, nil,
-	).WithAgentEnv([]string{"ANTHROPIC_BASE_URL=http://" + domain})
+	).WithAgentEnv(agentEnv)
 	credential, err := world.NewProxyCredential(credName, credValue, time.Now().Add(time.Hour).UnixMilli())
 	if err != nil {
 		panic(err)
@@ -34,19 +44,30 @@ func proxyCredentialSpec(lower, digest, domain, header, prefix, credName, credVa
 	return spec.WithProxyCredential(rules, []world.ProxyCredential{credential})
 }
 
-// TestProxyCredentialAbsentFromContainerYetServedToProxy is 완료 기준 ①·⑤: the
-// credential value is absent from every Podman argv, from every environment
-// passed to Podman, from the agent container's --env set, and from durable
-// spawn metadata — while it is delivered to the proxy sidecar only over the
-// mounted credential socket. The proxy create args carry only the (non-secret)
-// injection rule names, the credential socket path, and the socket mount.
+// TestProxyCredentialAbsentFromContainerYetServedToProxy is 완료 기준 ①·⑤,
+// precisioned for T22: the guardian forbids the real credential VALUE (sentinel)
+// — never the credential NAME. The container legitimately carries a non-secret
+// placeholder CLAUDE_CODE_OAUTH_TOKEN so claude-code passes its login gate; the
+// real token exists only in the proxy. The test asserts the sentinel is absent
+// from every Podman argv, from every environment passed to Podman, from the
+// agent container's --env set, and from durable spawn metadata, while the
+// placeholder (≠ sentinel) is present in the agent env and the real value is
+// delivered to the proxy sidecar only over the mounted credential socket. The
+// proxy create args carry only the (non-secret) injection rule names, the
+// credential socket path, and the socket mount.
 func TestProxyCredentialAbsentFromContainerYetServedToProxy(t *testing.T) {
 	const sentinel = "sk-proxy-held-secret-DO-NOT-LEAK-01"
+	// The whole point of the precision: the placeholder in the container must be
+	// a different, non-secret string from the real token the proxy holds.
+	if proxyCredentialPlaceholder == sentinel {
+		t.Fatal("placeholder가 sentinel과 같으면 실값 부재 단정이 무의미해짐")
+	}
 	digest := "sha256:" + strings.Repeat("a", 64)
 	lower, stateRoot := testDirs(t)
 	runner := newFakePodman(digest)
 	backend := mustBackend(t, stateRoot, runner, statDevice)
-	spec := proxyCredentialSpec(lower, digest, "api.anthropic.com", "Authorization", "Bearer ", "CLAUDE_CODE_OAUTH_TOKEN", sentinel)
+	spec := proxyCredentialSpec(lower, digest, "api.anthropic.com", "Authorization", "Bearer ", "CLAUDE_CODE_OAUTH_TOKEN", sentinel,
+		"CLAUDE_CODE_OAUTH_TOKEN="+proxyCredentialPlaceholder)
 
 	leaseValue, err := openTestLease(t, backend, context.Background(), spec)
 	if err != nil {
@@ -90,18 +111,24 @@ func TestProxyCredentialAbsentFromContainerYetServedToProxy(t *testing.T) {
 	if !strings.Contains(agentCreate, "ANTHROPIC_BASE_URL=http://api.anthropic.com") {
 		t.Errorf("agent create가 평문 ANTHROPIC_BASE_URL을 받지 못함: %s", agentCreate)
 	}
-	// The credential NAME must also never reach the agent container (env-injection
-	// path is not used for proxy-held credentials).
-	if strings.Contains(agentCreate, "CLAUDE_CODE_OAUTH_TOKEN") {
-		t.Errorf("credential 이름이 agent 컨테이너에 노출됨: %s", agentCreate)
+	// T22 precision — the credential NAME with a PLACEHOLDER value is allowed (and
+	// required) in the agent container so claude-code emits a Bearer request. What
+	// must never appear is the real token VALUE (sentinel).
+	if !strings.Contains(agentCreate, "CLAUDE_CODE_OAUTH_TOKEN="+proxyCredentialPlaceholder) {
+		t.Errorf("agent create가 placeholder CLAUDE_CODE_OAUTH_TOKEN을 받지 못함: %s", agentCreate)
+	}
+	if strings.Contains(agentCreate, sentinel) {
+		t.Errorf("실토큰 값이 agent 컨테이너 env/argv에 노출됨: %s", agentCreate)
 	}
 
 	metadata, err := json.Marshal(got.metadata)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(metadata), sentinel) || strings.Contains(string(metadata), "CLAUDE_CODE_OAUTH_TOKEN") {
-		t.Fatalf("spawn metadata에 credential이 노출됨: %s", metadata)
+	// Only the real value is forbidden in durable metadata; the placeholder name
+	// is a non-secret operator declaration.
+	if strings.Contains(string(metadata), sentinel) {
+		t.Fatalf("spawn metadata에 실토큰 값이 노출됨: %s", metadata)
 	}
 
 	// The value reaches the proxy ONLY over the mounted socket. Fetch it as the

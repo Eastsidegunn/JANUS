@@ -15,6 +15,13 @@ import (
 
 const injectionSentinel = "sk-secret-oauth-value-DO-NOT-LEAK-42"
 
+// injectionPlaceholder is the non-secret value the agent container carries in
+// CLAUDE_CODE_OAUTH_TOKEN so claude-code passes its "logged in" gate and emits
+// an Authorization: Bearer <placeholder> request. It is a fixed, non-secret
+// string that is deliberately distinct from injectionSentinel — the proxy must
+// replace it with the real token, so the placeholder must never reach upstream.
+const injectionPlaceholder = "hx-proxy-injected-placeholder"
+
 // TestForwardInjectionAttachesHeaderAndReSendsOverTLS is 완료 기준 ②: a request
 // through the forward path to a declared injection domain gets the credential
 // header attached and is re-sent to a real (fake) TLS upstream. The agent sent
@@ -67,6 +74,71 @@ func TestForwardInjectionAttachesHeaderAndReSendsOverTLS(t *testing.T) {
 		t.Fatalf("audit attempt 위반: %+v", attempts)
 	}
 	assertNoSecret(t, attempts)
+}
+
+// TestForwardInjectionReplacesPlaceholderAuthorization is T22's core assertion:
+// claude-code will not emit any API request unless CLAUDE_CODE_OAUTH_TOKEN is
+// present, so the container carries a non-secret placeholder and emits
+// Authorization: Bearer <placeholder>. The proxy MUST overwrite (Header.Set,
+// not add) that placeholder with the real token before re-sending over TLS. The
+// fake upstream must therefore receive exactly one Authorization header whose
+// value is the real sentinel — never the placeholder, and never both.
+func TestForwardInjectionReplacesPlaceholderAuthorization(t *testing.T) {
+	if injectionPlaceholder == injectionSentinel {
+		t.Fatal("placeholder와 sentinel이 같으면 replace를 증명할 수 없음")
+	}
+	var gotAuthValues atomic.Value // []string, all Authorization header values
+	gotAuthValues.Store([]string(nil))
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthValues.Store(append([]string(nil), r.Header.Values("Authorization")...))
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+	upstreamAddr := strings.TrimPrefix(upstream.URL, "https://")
+
+	audit := &fakeAudit{}
+	proxy := mustProxy(t, Config{
+		Allowlist: []string{"api.anthropic.com"},
+		Audit:     audit,
+		Resolver:  fakeResolver{"api.anthropic.com": {{IP: net.ParseIP("93.184.216.34")}}},
+		Inject: []InjectRule{{
+			Domain: "api.anthropic.com", Header: "Authorization", ValuePrefix: "Bearer ",
+			CredentialName: "CLAUDE_CODE_OAUTH_TOKEN",
+		}},
+		Credentials: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": injectionSentinel},
+		TLSConfig:   &tls.Config{InsecureSkipVerify: true},
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if !strings.HasSuffix(address, ":443") {
+				t.Fatalf("injection dial이 443이 아님: %s", address)
+			}
+			return net.Dial("tcp", upstreamAddr)
+		},
+	})
+
+	// The agent request carries the non-secret placeholder Authorization exactly
+	// as claude-code would after reading the placeholder env.
+	request := httptest.NewRequest(http.MethodPost, "http://api.anthropic.com/v1/messages", strings.NewReader("{}"))
+	request.Header.Set("Authorization", "Bearer "+injectionPlaceholder)
+	response := httptest.NewRecorder()
+	proxy.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Body.String() != "ok" {
+		t.Fatalf("placeholder replace forward = %d %q", response.Code, response.Body.String())
+	}
+	values := gotAuthValues.Load().([]string)
+	// Exactly one Authorization header (Set replaced, did not append a second).
+	if len(values) != 1 {
+		t.Fatalf("upstream Authorization 헤더 개수 = %d, want 1 (%v)", len(values), values)
+	}
+	if values[0] != "Bearer "+injectionSentinel {
+		t.Fatalf("upstream Authorization = %q, want 실토큰 Bearer <sentinel>", values[0])
+	}
+	// The placeholder must NEVER reach upstream — proven against the concrete
+	// value, not merely against the presence of the real token.
+	if strings.Contains(values[0], injectionPlaceholder) {
+		t.Fatalf("placeholder가 업스트림에 도달함: %q", values[0])
+	}
+	assertNoSecret(t, audit.snapshot())
 }
 
 // TestUndeclaredDomainNotInjected is 완료 기준 ④: an allowed but undeclared

@@ -142,6 +142,13 @@
 - 착수: opus 서브에이전트(astra codex usage limit ~9/26). T20 브랜치 보존(T21 머지 후 rebase).
 - 2026-09-24: 구현 완료(opus), Rhizome 정합 리뷰 **통과**(PR #79). root-cause 실체·수정 정밀성·load-bearing 양방향 확증(리뷰어 독립 검증). CI: t15 5/5 안정 green(이전 1/5 실패 소멸), broker -race -count=20 green. [H] 머지 가능 → main 안정 → T20 rebase.
 
+## T22. claude-code 인증 호환 — placeholder 로그인 + proxy Authorization replace
+- 내용: [H] 실 토큰 smoke가 잡은 결함 — 컨테이너 claude가 CLAUDE_CODE_OAUTH_TOKEN env 부재 시 "Not logged in"으로 요청 자체를 안 만들어 proxy 주입 기회가 없다(실측: dummy 토큰 주면 401 = env 읽어 Bearer로 요청함). 해법(B, [H] 결정 — 컨테이너 무비밀 사수, A안 후퇴 금지): 컨테이너 env에 **placeholder**(비밀 아님) CLAUDE_CODE_OAUTH_TOKEN을 주어 claude가 로그인 판정 통과·`Authorization: Bearer <placeholder>` 요청 생성 → proxy가 Header.Set으로 실토큰 replace(이미 구현됨, proxy.go:216). 파수꾼 검증을 "이름 금지"에서 "**실 값 금지**"로 정밀화(placeholder 이름·값은 허용, 실토큰 sentinel은 env·argv·log·inspect·metadata 어디에도 부재 유지).
+- 대상: FR-SBX-04 (proxy 보유 자격증명의 claude-code 호환)
+- 근거: [H] 실 토큰 smoke 결과(2026-09, native-overlay 서버). Rhizome 계약 무관. T17·18·19·21 배관은 실증됨.
+- 완료 기준: (a) proxy가 placeholder Authorization을 실토큰으로 replace함을 fake 업스트림이 실토큰 수신으로 단정(placeholder 아님), (b) 실토큰 값(sentinel)이 컨테이너 env·argv·metadata·log 부재 파수꾼 유지(placeholder는 허용), (c) world-config env 패턴 문서화(placeholder CLAUDE_CODE_OAUTH_TOKEN + HTTP_PROXY 정적 alias + base_url 평문 http 실도메인), (d) 기존 T20 테스트·make ci green. 실 claude 종단 확인은 [H] smoke 재실행([H] 직접).
+- 착수: opus 서브에이전트. checkpoint는 Rhizome 리뷰어. 서버 재실행은 [H].
+
 ## 이후 (T20+, 착수 전 사람 판단 필요)
 - pi / OpenClaw / 사내 에이전트 어댑터 (contracts 안정성의 성적표)
 - exec 감사(eBPF), Postgres store, 규칙 엔진 — 전부 명세 부록 A의 미결 확정 후.
