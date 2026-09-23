@@ -1,5 +1,22 @@
 # BLOCKED
 
+## T10 lifecycle-orphan 간헐 실패 — escalation (2026-09-23, 재실행으로 덮지 않음)
+
+PR #78(T20) CI에서 `TestWorldIntegration/lifecycle-orphan`이 t15-linux-gate
+attempt 5에서만 실패(1~4 pass, 1.84s, VERIFICATION 수준 — 이미지 pull 아님,
+orphan 프로세스 reaping 타이밍 레이스). run 35760343569 job 106856530598.
+
+T20 회귀 아님(실물 확인): (1) lifecycle-orphan은 T20 이전 main af5a5ff에
+존재, (2) T20의 testagent diff는 순수 additive(삭제줄 0, 기존 모드 무변경),
+(3) credentialBroker·AgentEnv는 주입 규칙 있을 때만 활성(이 서브테스트는
+주입 없음), 정적 alias는 깨졌으면 1/5 아니라 매번 실패. → T10 선재 flaky.
+
+방침(BLOCKED "재발 시 재실행 금지·stage 데이터 우선" 계승): attempt 5를
+재돌려 5/5로 덮지 않는다. root-cause 대상(orphan descendant reaping의
+Wait/kill 레이스)으로 남긴다 — T21 후보. [H] (A) 승인(2026-09-23):
+escalation은 T20 머지를 막지 않으며 별도 root-cause 태스크로 추적.
+
+
 ## T16 — 해소 기록 (2026-09-12, [H] 지시로 축소)
 
 SCP-T16-001(control_mode)·T16-1 항목 제거. 근거: control_mode enum
