@@ -675,6 +675,175 @@ func TestProcessBrokerRepeatedUnusedLeaseDoesNotAccumulateGoroutines(t *testing.
 	}
 }
 
+func TestDrainedPeerCloseIsExpectedOnlyAfterOutputDrain(t *testing.T) {
+	b := &processBroker{}
+	// (나) exit 전: 아직 forward되지 않은 출력을 유실시킬 수 있으므로 fatal 유지.
+	if b.expectedDrainedPeerGone(io.EOF) {
+		t.Fatal("exit 전 peer close가 정상 종말로 분류됨")
+	}
+	b.exitSent = true
+	// (나) exit는 전송됐지만 출력 미완: post-exit라는 이유만으로 benign이면 안 됨.
+	if b.expectedDrainedPeerGone(io.EOF) {
+		t.Fatal("출력 drain 전 post-exit peer close가 정상 종말로 분류됨")
+	}
+	b.streamEndReached = true
+	// (가) exit 전송 + 출력 완전 drain: consumer-gone-after-done 정상 종말.
+	if !b.expectedDrainedPeerGone(io.EOF) {
+		t.Fatal("출력 drain 완료 후 peer close가 정상 종말로 분류되지 않음")
+	}
+	if !b.expectedDrainedPeerGone(net.ErrClosed) || !b.expectedDrainedPeerGone(os.ErrClosed) {
+		t.Fatal("closed transport error가 정상 종말로 분류되지 않음")
+	}
+	// timeout은 종말(close)이 아니라 지연이므로 fatal 유지.
+	timeout := &net.DNSError{Err: "synthetic timeout", IsTimeout: true}
+	if b.expectedDrainedPeerGone(timeout) {
+		t.Fatal("timeout을 정상 종말로 분류함")
+	}
+	if b.expectedDrainedPeerGone(nil) {
+		t.Fatal("nil err을 종말로 분류함")
+	}
+}
+
+func TestProcessBrokerNaturalControlCloseAfterDrainIsExpected(t *testing.T) {
+	waiter, attach := newFakeStartedCommand(t), newFakeStartedCommand(t)
+	runtime := &fakeProcessRuntime{waiter: waiter, attach: attach}
+	b := mustProcessBroker(t, context.Background(), runtime)
+	client := connectProcessClient(t, b)
+	defer client.close()
+	client.send(t, processwire.KindStart, nil)
+	client.ack(t, "start")
+	client.send(t, processwire.KindWait, nil)
+	client.ack(t, "wait")
+	// 자연(비-stop) 종료: 출력을 낸 뒤 컨테이너가 stop 없이 종료한다.
+	_, _ = io.WriteString(attach.stdoutW, "orphan-output")
+	attach.closeWriters()
+	attach.finish(nil)
+	waiter.completeWait("0")
+	if f := readFrame(t, client.control, client.controlDec, "exit observed"); f.Kind != processwire.KindExitObserved {
+		t.Fatalf("exit kind=%d", f.Kind)
+	}
+	// 순서 고정: 출력을 stream-end까지 완전 drain한 뒤에만 control을 닫는다.
+	// stream-end 프레임을 읽었다는 것은 broker가 streamEndReached를 이미
+	// 세웠다는 뜻이므로(-count 반복에도 결정적) 아래 close는 항상 drain 이후다.
+	var out []byte
+	for {
+		f := readFrame(t, client.output, client.outputDec, "orphan drain")
+		if f.Kind == processwire.KindStreamEnd {
+			break
+		}
+		out = append(out, f.Payload...)
+	}
+	if string(out) != "orphan-output" {
+		t.Fatalf("drained output=%q", out)
+	}
+	// 어댑터가 stream-end를 소비한 직후 control을 닫는 경합. 자연 종료 경로에서도
+	// consumer-gone-after-done 정상 종말이어야 한다(broker fatal 금지). 수정 전에는
+	// streamEnded 플래그가 wire보다 늦게 세워져 이 close가 간헐 fatal이었다.
+	_ = client.control.Close()
+	select {
+	case <-b.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("drain 뒤 세션이 완료로 종결되지 않음")
+	}
+	if err := b.Err(); err != nil {
+		t.Fatalf("자연 종료 control close가 fatal로 분류됨: %v", err)
+	}
+	shutdownBroker(t, b)
+}
+
+// TestProcessBrokerControlEOFDuringStreamEndWriteWindow reproduces the exact CI
+// flake state deterministically at the broker level: exit observed and sent,
+// stop=false, but the broker's own streamEnded bookkeeping not yet flipped (the
+// terminal frame is on the wire and the peer has consumed it and closed control,
+// racing ahead of the post-write flag). This is the state from run
+// 35760343569 attempt5: (exit_sent=true stream_ended=false stop=false). The
+// only discriminator is whether the output plane was fully drained beforehand
+// (streamEndReached). It is deterministic under -count: the flags are fixed
+// before control EOF is delivered, so the classification never depends on
+// goroutine scheduling.
+func TestProcessBrokerControlEOFDuringStreamEndWriteWindow(t *testing.T) {
+	newBroker := func(t *testing.T) (*processBroker, func()) {
+		t.Helper()
+		root, err := os.MkdirTemp("/tmp", "hxt-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		lis, err := net.Listen("unix", filepath.Join(root, "process.sock"))
+		if err != nil {
+			_ = os.RemoveAll(root)
+			t.Fatal(err)
+		}
+		b := &processBroker{
+			ctx: context.Background(), cancel: func() {}, listener: lis,
+			runner: &fakeProcessRuntime{}, done: make(chan struct{}),
+			activeStages: make(map[streamStage]time.Time), redactionTail: make(map[processwire.Stream][]byte),
+		}
+		return b, func() { _ = lis.Close(); _ = os.RemoveAll(root) }
+	}
+	run := func(t *testing.T, drained bool) error {
+		b, cleanup := newBroker(t)
+		defer cleanup()
+		b.mu.Lock()
+		b.started, b.waitRequested, b.waitAcked, b.exitSent = true, true, true, true
+		// streamEnded is deliberately still false: the terminal frame reached the
+		// peer but the broker has not yet run the post-write flag assignment.
+		b.streamEnded = false
+		b.streamEndReached = drained
+		b.waitResult = &processwire.ExitObserved{Code: 0, Reason: "container exited"}
+		b.mu.Unlock()
+		server, client := net.Pipe()
+		dec := processwire.NewDecoder(server)
+		enc := processwire.NewEncoder(server)
+		returned := make(chan struct{})
+		go func() { b.handleControl(server, dec, enc); close(returned) }()
+		// The adapter closes control the instant it consumes stream-end.
+		_ = client.Close()
+		select {
+		case <-returned:
+		case <-time.After(2 * time.Second):
+			t.Fatal("handleControl가 control EOF에서 반환하지 않음")
+		}
+		_ = server.Close()
+		return b.Err()
+	}
+	// (가) 출력 완전 drain 후 control EOF: consumer-gone-after-done 정상 종말.
+	if err := run(t, true); err != nil {
+		t.Fatalf("drain 완료 상태의 control EOF가 fatal로 분류됨: %v", err)
+	}
+	// (나) 출력 미완(streamEndReached=false) 상태의 control EOF: 유실 위험이므로
+	// exit가 전송됐더라도 반드시 fatal.
+	if err := run(t, false); !errors.Is(err, ErrProcessBrokerFatal) {
+		t.Fatalf("출력 미완 상태의 control EOF가 fatal이 아님: %v", err)
+	}
+}
+
+func TestProcessBrokerNaturalControlCloseBeforeDrainStaysFatal(t *testing.T) {
+	waiter, attach := newFakeStartedCommand(t), newFakeStartedCommand(t)
+	runtime := &fakeProcessRuntime{waiter: waiter, attach: attach}
+	b := mustProcessBroker(t, context.Background(), runtime)
+	client := connectProcessClient(t, b)
+	defer client.close()
+	client.send(t, processwire.KindStart, nil)
+	client.ack(t, "start")
+	client.send(t, processwire.KindWait, nil)
+	client.ack(t, "wait")
+	// 컨테이너는 종료해 exit는 전송되지만, attach 출력 파이프는 열린 채로 둬
+	// stream-end(출력 완전 drain)가 아직 오지 않은 (나) 상태를 결정적으로 고정한다.
+	waiter.completeWait("0")
+	if f := readFrame(t, client.control, client.controlDec, "exit observed"); f.Kind != processwire.KindExitObserved {
+		t.Fatalf("exit kind=%d", f.Kind)
+	}
+	// 출력 미완 상태의 control close는 미forward 출력을 유실시킬 수 있으므로
+	// post-exit라도 반드시 fatal이어야 한다.
+	_ = client.control.Close()
+	err := waitBrokerError(t, b)
+	if !errors.Is(err, ErrProcessBrokerFatal) {
+		t.Fatalf("출력 drain 전 control close가 fatal이 아님: %v", err)
+	}
+	_ = client.output.Close()
+	shutdownBrokerAllowError(t, b)
+}
+
 func mustProcessBroker(t *testing.T, parent context.Context, r *fakeProcessRuntime) *processBroker {
 	t.Helper()
 	b, err := startProcessBroker(parent, strings.Repeat("2", 16), strings.Repeat("1", 64), fakeAgentID, r)
