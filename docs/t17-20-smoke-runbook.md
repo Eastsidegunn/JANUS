@@ -47,18 +47,26 @@ echo "$PHASH"
 ```
 > profile/overlay 파일이 이 시점 이후 바뀌면 hx가 `POLICY_CHANGED`로 거부한다 — pin은 실행 순간의 파일 내용에 고정된다.
 
-### 1-T20. proxy 보유 자격증명 (T20 — 토큰은 world-config에 없다)
+### 1-T20. proxy 보유 자격증명 (T20/T22 — 실 토큰은 world-config에 없다, 컨테이너엔 placeholder만)
 
-T20 이후 **실 토큰은 world-config JSON에 넣지 않는다.** hx run이 `/dev/tty`(ECHO off)로 값을 직접 받아 proxy에만 전달하고, 컨테이너/argv/env/로그 어디에도 값이 없다. world-config의 어댑터 항목은 이름·설정만:
+T20 이후 **실 토큰은 world-config JSON에 넣지 않는다.** hx run이 `/dev/tty`(ECHO off)로 값을 직접 받아 proxy에만 전달하고, 컨테이너/argv/log 어디에도 **실 토큰 값**이 없다.
+
+**T22 보정(중요):** 컨테이너의 claude-code는 `CLAUDE_CODE_OAUTH_TOKEN` env가 **없으면** "Not logged in"으로 API 요청 자체를 만들지 않는다([H] 실측: dummy 값을 주면 401 = env를 읽어 `Authorization: Bearer …` 요청을 실제로 생성). 그래서 컨테이너 env에 **비밀이 아닌 placeholder** `CLAUDE_CODE_OAUTH_TOKEN`을 준다 → claude가 로그인 판정을 통과해 `Authorization: Bearer <placeholder>` 요청을 만든다 → **proxy가 그 Authorization을 실 토큰으로 replace**(`proxy.go`의 `Header.Set`이 이미 replace이므로 proxy 코드 변경 없음). 결과: **컨테이너엔 placeholder 값만, 실 토큰 값은 proxy만 보유**하는 무비밀 원칙 유지. placeholder는 sentinel(실 토큰)과 명백히 다른 고정 비밀-아닌 문자열이어야 한다.
+
+world-config의 어댑터 항목은 이름·설정·placeholder만:
 ```json
 "claudecode": {
   "bin": "...", "image": {...}, "agent_argv": ["claude"], "control_mode": "tool_approval",
-  "env": ["HTTP_PROXY=http://hx-egress-proxy:3128", "ANTHROPIC_BASE_URL=http://api.anthropic.com"],
-  "inject": [{ "domain": "api.anthropic.com", "header": "Authorization", "value_prefix": "Bearer ", "credential": "ANTHROPIC_OAUTH" }]
+  "env": [
+    "HTTP_PROXY=http://hx-egress-proxy:3128",
+    "ANTHROPIC_BASE_URL=http://api.anthropic.com",
+    "CLAUDE_CODE_OAUTH_TOKEN=hx-proxy-injected-placeholder"
+  ],
+  "inject": [{ "domain": "api.anthropic.com", "header": "Authorization", "value_prefix": "Bearer ", "credential": "CLAUDE_CODE_OAUTH_TOKEN" }]
 }
 ```
-- `env`: 평문만. `HTTP_PROXY`는 **정적 alias `hx-egress-proxy`**(:3128), `ANTHROPIC_BASE_URL`은 **평문 http + 실 도메인**(주입 대상은 CONNECT deny라 평문 forward로 proxy에 닿아야 함).
-- `inject[].credential`은 **이름만**(`ANTHROPIC_OAUTH`). 값은 hx run 실행 중 `/dev/tty` 프롬프트로 입력.
+- `env`: 평문·비밀 아님만. `HTTP_PROXY`는 **정적 alias `hx-egress-proxy`**(:3128), `ANTHROPIC_BASE_URL`은 **평문 http + 실 도메인**(주입 대상은 CONNECT deny라 평문 forward로 proxy에 닿아야 함), `CLAUDE_CODE_OAUTH_TOKEN`은 **placeholder 값**(로그인 판정 통과용, 실 토큰 아님).
+- `inject[].credential`은 **이름만**. 값은 hx run 실행 중 `/dev/tty` 프롬프트로 입력해 proxy가 placeholder를 이 실 토큰으로 replace한다. env의 placeholder와 inject의 credential이 같은 이름(`CLAUDE_CODE_OAUTH_TOKEN`)이어도 무방하다 — env는 placeholder 값(컨테이너), inject는 실 값(proxy 전용)으로 **출처·저장소가 완전히 독립**이다(`worldAdapterConfig`의 `env`/`inject`는 별개 필드).
 - **열린 항목(리뷰어/드라이버 확인 필요)**: hx run은 tty 프롬프트를 띄우는데, smoke 드라이버(`cmd/smoke`→janusadapter가 hx run을 서브프로세스로 실행)가 그 tty 프롬프트를 [H] 터미널로 통과시키는지 미확인. 통과 안 되면 (a) 드라이버가 tty를 상속·전달하도록 하거나, (b) hx run을 smoke start와 분리해 [H]가 직접 실행. 서버 검증 전 이 경로 확정 필요.
 
 ## 2. Rhizome 준비
