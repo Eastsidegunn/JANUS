@@ -26,6 +26,7 @@ import (
 	"github.com/Eastsidegunn/JANUS/core/policy"
 	"github.com/Eastsidegunn/JANUS/core/world"
 	"github.com/Eastsidegunn/JANUS/seams/subagent"
+	"github.com/Eastsidegunn/JANUS/seams/subagent/claudecode"
 	localworld "github.com/Eastsidegunn/JANUS/seams/world/local"
 )
 
@@ -80,7 +81,7 @@ func TestT15HumanSmoke(t *testing.T) {
 		ProfileID: "t15-human-expired", Workspace: lower, FSScope: []string{lower},
 		Egress: []string{"example.com"}, Budget: budget, Approval: policy.ApprovalManual,
 	})
-	spawn := world.NewSpawnSpec(effective, world.NewImageReference(claudeRepo, claudeDigest), []string{"claude"}, 0,
+	spawn := world.NewSpawnSpec(effective, world.NewImageReference(claudeRepo, claudeDigest), claudecode.ContainerArgv("claude", "이 실행은 시작되면 안 된다."), 0,
 		traceID, childSpan, world.AgentIdentity{UID: 1000, GID: 1000}, nil).WithSecretCapability(expired)
 	store := newIntegrationStore(t, filepath.Join(t.TempDir(), "expired.ndjson"), false)
 	writer, err := logd.NewWriter(ctx, store)
@@ -174,7 +175,7 @@ func runT15SmokeCase(t *testing.T, parent context.Context, backend world.Backend
 		ProfileID: "t15-human-smoke", Workspace: lower, FSScope: []string{lower}, Egress: []string{"example.com"},
 		Budget: budget, Approval: policy.ApprovalManual,
 	})
-	spawn := world.NewSpawnSpec(effective, world.NewImageReference(repo, digest), []string{"claude"}, 0,
+	spawn := world.NewSpawnSpec(effective, world.NewImageReference(repo, digest), claudecode.ContainerArgv("claude", "Use the Write tool to create /workspace/t15-smoke-marker.txt containing exactly T15-SMOKE. Then use the Bash tool to run `curl -fsS --max-time 5 https://example.com/ >/dev/null || true` and `curl --max-time 2 http://1.1.1.1/ >/dev/null || true`. Then respond exactly T15_SMOKE_DONE."), 0,
 		traceID, childSpan, world.AgentIdentity{UID: 1000, GID: 1000}, nil).WithSecretCapability(secret)
 	var stderr bytes.Buffer
 	active, err := startProductionWorld(ctx, worldLaunch{
@@ -280,7 +281,7 @@ func runT15ExpiryCase(t *testing.T, parent context.Context, backend world.Backen
 	if err != nil {
 		t.Fatal(err)
 	}
-	spawn := world.NewSpawnSpec(effective, world.NewImageReference(repo, digest), []string{"claude"}, 0,
+	spawn := world.NewSpawnSpec(effective, world.NewImageReference(repo, digest), claudecode.ContainerArgv("claude", "Use the Bash tool to run `sleep 120`, then respond exactly T15_EXPIRY_DONE. Do not use any other tool."), 0,
 		traceID, childSpan, world.AgentIdentity{UID: 1000, GID: 1000}, nil).WithSecretCapability(secret)
 	var stderr bytes.Buffer
 	active, err := startProductionWorld(ctx, worldLaunch{

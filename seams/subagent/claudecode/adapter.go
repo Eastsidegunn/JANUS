@@ -225,11 +225,7 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 	}
 	defer approvals.Close()
 	if cfg.ProcessEndpoint != (world.ProcessEndpoint{}) {
-		taskLine, marshalErr := json.Marshal(cmd)
-		if marshalErr != nil {
-			return marshalErr
-		}
-		return runWorldProcess(ctx, in, stderr, cfg, vals, w, approvals, scanner, append(taskLine, '\n'))
+		return runWorldProcess(ctx, in, stderr, cfg, w, approvals, scanner)
 	}
 
 	// task.Workspace는 policy/T10이 준비한 pristine 작업공간이다. Claude의
@@ -444,9 +440,15 @@ func monitorCommands(scanner *bufio.Scanner, vals *validate.Validators, parser *
 }
 
 func claudeCommand(cfg Config, task gen.TaskPayload) []string {
+	return ContainerArgv(cfg.ClaudeBin, task.Instruction)
+}
+
+// ContainerArgv builds the in-container Claude PID1 command. Host and container
+// modes share this definition so instruction, flags, and approval hooks cannot drift.
+func ContainerArgv(bin, instruction string) []string {
 	return []string{
-		cfg.ClaudeBin,
-		"-p", task.Instruction,
+		bin,
+		"-p", instruction,
 		"--output-format", "stream-json",
 		"--verbose",
 		"--no-session-persistence",

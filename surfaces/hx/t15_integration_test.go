@@ -20,6 +20,7 @@ import (
 	"github.com/Eastsidegunn/JANUS/core/policy"
 	"github.com/Eastsidegunn/JANUS/core/world"
 	"github.com/Eastsidegunn/JANUS/seams/subagent"
+	"github.com/Eastsidegunn/JANUS/seams/subagent/claudecode"
 	localworld "github.com/Eastsidegunn/JANUS/seams/world/local"
 )
 
@@ -61,7 +62,7 @@ func TestClaudeWorldIntegration(t *testing.T) {
 		ProfileID: "t15-claude-auth", Workspace: lower, FSScope: []string{lower},
 		Egress: []string{"example.com"}, Budget: budget, Approval: policy.ApprovalManual,
 	})
-	spawnSpec := world.NewSpawnSpec(effective, world.NewImageReference(claudeRepo, claudeDigest), []string{"claude"}, 0, traceID, childSpan, world.AgentIdentity{UID: 1000, GID: 1000}, nil)
+	spawnSpec := world.NewSpawnSpec(effective, world.NewImageReference(claudeRepo, claudeDigest), claudecode.ContainerArgv("claude", "Respond with exactly OK."), 0, traceID, childSpan, world.AgentIdentity{UID: 1000, GID: 1000}, nil)
 	var adapterStderr bytes.Buffer
 	active, err := startProductionWorld(ctx, worldLaunch{
 		Backend: backend, SpawnSpec: spawnSpec, Writer: writer, TraceID: traceID, ParentSpan: parentSpan,

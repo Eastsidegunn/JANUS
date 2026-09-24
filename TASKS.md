@@ -165,6 +165,7 @@
 - 완료 기준: 종단 smoke에서 hx replay turns≥1·messages≥1, CLIProxyAPI 로그에 요청 도착, ls /workspace 결과(data.txt·README.txt 요약). 승인 relay(hxapprove→HX_APPROVAL_SOCKET)·stream-json→§5.2 정규화가 실 claude 출력에 작동. macOS `make ci` green(단위·fake 경로 무손상). 실 claude 종단은 [H] smoke(서버 T23 아티팩트 위).
 - 방향(JANUS 재량, direction 1 권고): 컨테이너 PID1을 full claudeCommand로 실행(instruction·플래그·hxapprove settings 포함), host는 task-JSON-to-stdin 중단·stdout stream-json만 파싱. bare claude에 JANUS task 전송 경로 제거.
 - 계약: Rhizome 계약 무개정 예상(어댑터 내부 배선). 어긋나면 구현 전 회신.
+- 완료(리뷰어 검증): 구현자(codex astra) 산출 → 리뷰어 검토·`make ci` green(boundarylint 40패키지 linux+darwin·fixtures fingerprint 일치). 컨테이너 PID1=host `claudeCommand`와 동일 argv(`ContainerArgv` 단일 진실원), host가 JANUS task를 컨테이너 stdin에 미주입(`StartWithoutStdin`, worldadapter의 task-via-stdin은 무손상), worldLauncher가 claudecode에만 ContainerArgv 적용. 테스트 강화(drift 차단·실 broker 종단·argv 분기). Rhizome 계약 ② 무개정. 실 claude 종단은 [H] smoke 잔여.
 
 ## 이후 (T20+, 착수 전 사람 판단 필요)
 - pi / OpenClaw / 사내 에이전트 어댑터 (contracts 안정성의 성적표)

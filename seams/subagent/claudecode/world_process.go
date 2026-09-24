@@ -23,7 +23,7 @@ import (
 // Claude executable is inside the world; this process only speaks the
 // host-only ProcessEndpoint and parses the native bytes it receives. The
 // direct procgroup branch remains in adapter.go for world_backend:none.
-func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cfg Config, vals *validate.Validators, w *wireWriter, approvals approvalTransport, scanner *bufio.Scanner, taskLine []byte) error {
+func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cfg Config, w *wireWriter, approvals approvalTransport, scanner *bufio.Scanner) error {
 	process, err := worldadapter.ConnectProcess(ctx, cfg.ProcessEndpoint, cfg.WorldSpanID)
 	if err != nil {
 		return fmt.Errorf("claudecode: process endpoint: %w", err)
@@ -77,7 +77,7 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 		_ = process.Stop(stopCtx, "claudecode approval failure")
 	})
 	startDone := make(chan error, 1)
-	go func() { startDone <- process.Start(ctx, taskLine) }()
+	go func() { startDone <- process.StartWithoutStdin(ctx) }()
 
 	parser := NewParser()
 	readyEmitted := false

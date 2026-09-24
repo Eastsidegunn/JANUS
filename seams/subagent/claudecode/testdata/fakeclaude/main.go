@@ -9,8 +9,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"strconv"
 	"time"
 )
@@ -27,6 +29,18 @@ func main() {
 			fmt.Fprintln(os.Stderr, "fakeclaude: args 기록:", err)
 			os.Exit(2)
 		}
+	}
+	if expected := os.Getenv("HX_CLAUDE_EXPECT_ARGS"); expected != "" {
+		var want []string
+		if err := json.Unmarshal([]byte(expected), &want); err != nil || !reflect.DeepEqual(os.Args[1:], want) {
+			fmt.Fprintln(os.Stderr, "fakeclaude: argv mismatch", os.Args[1:])
+			os.Exit(2)
+		}
+	}
+	stdin, err := io.ReadAll(os.Stdin)
+	if err != nil || len(stdin) != 0 {
+		fmt.Fprintln(os.Stderr, "fakeclaude: expected EOF with zero stdin bytes")
+		os.Exit(2)
 	}
 	f, err := os.Open(fixture)
 	if err != nil {
