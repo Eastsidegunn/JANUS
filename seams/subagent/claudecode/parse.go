@@ -363,6 +363,9 @@ func doneStatus(n nativeLine, stopRequested bool) gen.DonePayloadStatus {
 		return gen.DonePayloadStatusStopped
 	}
 	if n.Subtype == "success" {
+		if n.IsError || authenticationFailure(resultText(n)) {
+			return gen.DonePayloadStatusError
+		}
 		return gen.DonePayloadStatusOk
 	}
 	if n.TerminalReason == "aborted_streaming" || n.TerminalReason == "aborted" {
