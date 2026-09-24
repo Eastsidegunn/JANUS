@@ -26,6 +26,7 @@ import (
 	"github.com/Eastsidegunn/JANUS/seams/approvalrelay"
 	sqlite "github.com/Eastsidegunn/JANUS/seams/store/sqlite"
 	"github.com/Eastsidegunn/JANUS/seams/subagent"
+	"github.com/Eastsidegunn/JANUS/seams/subagent/claudecode"
 	local "github.com/Eastsidegunn/JANUS/seams/world/local"
 )
 
@@ -465,11 +466,15 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 	if adapter.ControlMode == "container_only" {
 		controlMode = gen.SubagentSpawnPayloadControlModeContainerOnly
 	}
+	agentArgv := adapter.AgentArgv
+	if in.Request.AdapterID == "claudecode" {
+		agentArgv = claudecode.ContainerArgv(adapter.AgentArgv[0], in.Request.TaskRef.Instruction)
+	}
 	childSpan := logd.NewSpanID()
 	spawnSpec := world.NewSpawnSpec(
 		world.NewEffectivePolicy(in.Sandbox),
 		world.NewImageReference(adapter.Image.Repository, adapter.Image.Digest),
-		adapter.AgentArgv, 0, in.TraceID, childSpan,
+		agentArgv, 0, in.TraceID, childSpan,
 		world.AgentIdentity{UID: adapter.Image.UID, GID: adapter.Image.GID}, nil,
 	)
 	// Plaintext gateway URL and access key from operator-owned config (T23).

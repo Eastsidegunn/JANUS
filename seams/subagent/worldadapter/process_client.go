@@ -214,6 +214,18 @@ func (c *processClient) Start(ctx context.Context, taskLine []byte) error {
 	return c.request(ctx, processwire.KindWait, nil)
 }
 
+// StartWithoutStdin starts an argv-driven one-shot CLI and closes stdin without
+// sending any bytes. Start retains the JANUS task-via-stdin protocol.
+func (c *processClient) StartWithoutStdin(ctx context.Context) error {
+	if err := c.request(ctx, processwire.KindStart, nil); err != nil {
+		return err
+	}
+	if err := c.request(ctx, processwire.KindStdinClose, nil); err != nil {
+		return err
+	}
+	return c.request(ctx, processwire.KindWait, nil)
+}
+
 func (c *processClient) SendLine(ctx context.Context, line []byte) error {
 	data := append(append([]byte(nil), line...), '\n')
 	return c.request(ctx, processwire.KindStdinData, data)

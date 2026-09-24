@@ -158,6 +158,15 @@
 - 비범위: CLIProxyAPI 배치·OAuth 로그인·cloaking 설정은 운영자([H]/리뷰어). JANUS는 "표준 API 엔드포인트가 거기 있다"만 안다. Rhizome 계약 무개정.
 - 검증 대상: claude-code CLI가 CLIProxyAPI 뒤에서 "로그인됨"으로 인식하는 최소 조건(ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN). 미검증, [H] smoke 필요.
 
+## T24. 컨테이너-모드 실 claude 통합 완성 (FR-ADP-10 "T15 잔여")
+- 내용: 컨테이너 안 실 claude와 host 어댑터 프로토콜 연결. 근본원인(리뷰어 실증): host 모드(adapter.go:238)는 claudeCommand(`claude -p <instruction> --output-format stream-json --verbose --no-session-persistence --permission-mode manual --setting-sources project,local --settings <hxapprove>`)로 정상 작동하나, 컨테이너 모드(world_process.go)는 이를 안 쓰고 PID1=bare claude(agent_argv=["claude"], local.go:443)에 host가 JANUS task JSON을 stdin으로 보냄 → claude가 못 읽어 turns=0. 기존 world 테스트는 fake claude가 JANUS 프로토콜을 흉내내 통과했을 뿐 — 실 claude 관통은 미완(T15 잔여).
+- 대상: FR-ADP-10, FR-SBX-01(Claude Code 컨테이너 경로) — traceability "T15 잔여" 종결.
+- 근거: [H] 실 토큰 smoke(T23 배선 위) 실증 — auth·CLIProxyAPI·접수·spawn·overlay 관통, 컨테이너 실 claude 구동만 미완. claude-code·정확한 claudeCommand 모두 컨테이너에서 직접 실행 시 정상(리뷰어 확인).
+- 완료 기준: 종단 smoke에서 hx replay turns≥1·messages≥1, CLIProxyAPI 로그에 요청 도착, ls /workspace 결과(data.txt·README.txt 요약). 승인 relay(hxapprove→HX_APPROVAL_SOCKET)·stream-json→§5.2 정규화가 실 claude 출력에 작동. macOS `make ci` green(단위·fake 경로 무손상). 실 claude 종단은 [H] smoke(서버 T23 아티팩트 위).
+- 방향(JANUS 재량, direction 1 권고): 컨테이너 PID1을 full claudeCommand로 실행(instruction·플래그·hxapprove settings 포함), host는 task-JSON-to-stdin 중단·stdout stream-json만 파싱. bare claude에 JANUS task 전송 경로 제거.
+- 계약: Rhizome 계약 무개정 예상(어댑터 내부 배선). 어긋나면 구현 전 회신.
+- 완료(리뷰어 검증): 구현자(codex astra) 산출 → 리뷰어 검토·`make ci` green(boundarylint 40패키지 linux+darwin·fixtures fingerprint 일치). 컨테이너 PID1=host `claudeCommand`와 동일 argv(`ContainerArgv` 단일 진실원), host가 JANUS task를 컨테이너 stdin에 미주입(`StartWithoutStdin`, worldadapter의 task-via-stdin은 무손상), worldLauncher가 claudecode에만 ContainerArgv 적용. 테스트 강화(drift 차단·실 broker 종단·argv 분기). Rhizome 계약 ② 무개정. 실 claude 종단은 [H] smoke 잔여.
+
 ## 이후 (T20+, 착수 전 사람 판단 필요)
 - pi / OpenClaw / 사내 에이전트 어댑터 (contracts 안정성의 성적표)
 - exec 감사(eBPF), Postgres store, 규칙 엔진 — 전부 명세 부록 A의 미결 확정 후.

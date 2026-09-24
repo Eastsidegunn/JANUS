@@ -842,3 +842,13 @@ func TestTokenExpiryMonitorStopsOnlyAtDeadline(t *testing.T) {
 	default:
 	}
 }
+
+func TestContainerArgvMatchesHostCommand(t *testing.T) {
+	instruction := "ls /workspace\n한글 'quoted' $HOME"
+	want := []string{"/opt/bin/claude", "-p", instruction, "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--permission-mode", "manual", "--setting-sources", "project,local", "--settings", `{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"hxapprove","timeout":600}]}]}}`}
+	container := ContainerArgv(want[0], instruction)
+	host := claudeCommand(Config{ClaudeBin: want[0]}, gen.TaskPayload{Instruction: instruction})
+	if !reflect.DeepEqual(container, want) || !reflect.DeepEqual(host, want) {
+		t.Fatalf("argv drift: container=%q host=%q want=%q", container, host, want)
+	}
+}

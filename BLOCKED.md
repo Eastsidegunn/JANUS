@@ -129,3 +129,29 @@ T20 컨테이너 게이트(`surfaces/hx/t20_integration_test.go`)에서 종단 �
 운영자 통제 하의 실 라우팅 공인 엔드포인트로 관측한다. 어느 쪽도 프로덕션 코드
 변경 없이 테스트 아티팩트 계층에서만 구성 가능하나, 상당한 배관과 [H] 실행
 검증이 필요해 이번 범위에서 제외하고 기록만 남긴다.
+
+## T24 후속 — 무자격증명 실 claude가 성공으로 오분류 (t15-linux-gate 회귀, PR #84)
+T24가 컨테이너 실 claude를 진짜로 구동하자, 과거 broken 경로(bare claude에 JANUS
+task를 stdin 주입 → claude가 실행조차 못 함)가 가리던 결함이 드러났다:
+무자격증명 claude가 `{"type":"result","subtype":"success","result":"Not logged in ·
+Please run /login"}`를 방출 → 파서 `doneStatus`가 `subtype=="success"`만 보고
+(`is_error` 무시) `done{status=ok}`로 매핑 → t15-integration의 불변식 "tokenless
+Claude 실행이 성공으로 보고되면 안 됨"(t15_integration_test.go:103,
+run_production_integration_test.go:106) 위반.
+
+flake 양상(attempt 1·4 통과, 2·3·5 실패)의 정체: claude가 ready 전에 일찍
+실패하면 기존 auth 게이트(world_process.go:197 `!readyEmitted && terminalErr!=nil`)가
+`done{error}`로 잡아 통과, full stream까지 가서 result를 내면 위 경로로 ok가 되어
+실패. 타이밍 의존이며 근본은 실제 오분류.
+
+방향(리뷰어 권고, [H] 머지 시 auth-model 재량): 인증실패 result는 claude가
+`subtype=success`로 내도 성공으로 보고하면 안 된다. (1) 파서 `doneStatus`가
+`is_error`를 존중(기존 골든 8건 모두 subtype↔is_error 정합이라 무변화), (2) result
+텍스트가 not-logged-in/auth-failure 시그니처(기존 `authenticationFailure()` 재사용)면
+`done{error}`로 분류 — ready 후·clean-result 경로도 포함. 테스트 약화 없이 어댑터/
+파서에서 수정. 실 claude 종단(정상 자격증명 시 turns≥1)은 여전히 [H] smoke.
+
+**해소**: PR #84 후속 커밋 — `parse.go doneStatus`의 `subtype=="success"` 분기에
+`if n.IsError || authenticationFailure(resultText(n)) { return Error }` 추가(분기
+국한이라 08-interrupted=stopped·성공 골든 8건=ok 무변화). `make ci` green.
+실 claude 정상경로(자격증명 시 turns≥1)는 [H] smoke 잔여.
