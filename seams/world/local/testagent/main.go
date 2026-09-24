@@ -33,30 +33,11 @@ type scenario struct {
 	DirectAddress string `json:"direct_address"`
 	FloodCount    int    `json:"flood_count"`
 	Secret        string `json:"secret"`
-	// T20 proxy-held-credential gate fields. InjectionForwardURL is a plaintext
-	// http URL for the declared injection domain (the agent forwards to it through
-	// the proxy carrying NO credential of its own). InjectionConnectURL is an https
-	// URL for the same domain whose CONNECT the proxy must deny (bypass closure).
-	InjectionForwardURL string `json:"injection_forward_url"`
-	InjectionConnectURL string `json:"injection_connect_url"`
 }
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--descendant" {
 		time.Sleep(30 * time.Second)
-		return
-	}
-	if len(os.Args) == 2 && os.Args[1] == "--dumpenv" {
-		// Live dump of PID 1's real environment (the running agent process), read
-		// from /proc so it is the ground truth regardless of how `podman exec`
-		// seeds an exec'd process's own environment. Used by the T20 host harness
-		// to prove no credential value or name is present in the agent container.
-		data, err := os.ReadFile("/proc/1/environ")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "dumpenv:", err)
-			os.Exit(1)
-		}
-		_, _ = os.Stdout.Write(data)
 		return
 	}
 	if err := run(); err != nil {
@@ -93,8 +74,6 @@ func run() error {
 	switch cfg.Mode {
 	case "normal":
 		return runNormal(task.Workspace, cfg, startedNS)
-	case "t20proxy":
-		return runT20Proxy(cfg)
 	case "abnormal":
 		os.Exit(7)
 	case "stop":
@@ -295,67 +274,6 @@ func runNormal(workspace string, cfg scenario, startedNS int64) error {
 		return err
 	}
 	return emit(gen.EventKindSubagentDone, gen.DonePayload{Status: gen.DonePayloadStatusOk, Result: "world integration complete"})
-}
-
-// runT20Proxy exercises the proxy-held-credential paths from inside the real
-// agent container. The agent holds NO credential and sets no credential header:
-// (1) it CONNECTs to the declared injection domain and must be denied (bypass
-// closure); (2) it forwards plaintext http to an allowed non-injection domain
-// through the static-alias proxy (proving HTTP_PROXY=http://hx-egress-proxy
-// resolves and the forward path reaches the proxy); (3) it forwards plaintext
-// http to the injection domain, again carrying no credential. It then floods to
-// trigger writer backpressure, holding the container alive so the host harness
-// can `podman exec env` and inspect while paused.
-func runT20Proxy(cfg scenario) error {
-	// CONNECT to the injection domain must be refused by the proxy so no opaque
-	// TLS tunnel can skip header injection.
-	httpsClient := &http.Client{Transport: &http.Transport{
-		Proxy:           http.ProxyFromEnvironment,
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- integration transport probe only
-	}, Timeout: 10 * time.Second}
-	if resp, err := httpsClient.Get(cfg.InjectionConnectURL); err == nil {
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusForbidden {
-			return fmt.Errorf("injection CONNECT status=%d, want denied", resp.StatusCode)
-		}
-	}
-	if err := emitMessage("injection-connect-denied"); err != nil {
-		return err
-	}
-
-	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}, Timeout: 10 * time.Second}
-	// Forward to an allowed non-injection domain through the static-alias proxy.
-	allowResp, err := client.Post(cfg.AllowURL, "text/plain", strings.NewReader("hello"))
-	if err != nil {
-		return fmt.Errorf("allowed forward through static-alias proxy 실패: %w", err)
-	}
-	allowResp.Body.Close()
-	if err := emitMessage("allowed-forward-status=" + strconv.Itoa(allowResp.StatusCode)); err != nil {
-		return err
-	}
-	// Forward to the injection domain carrying NO credential. The agent must not
-	// set any authorization header; the proxy supplies the credential (or denies).
-	injResp, err := client.Post(cfg.InjectionForwardURL, "text/plain", strings.NewReader("{}"))
-	status := "err"
-	if err == nil {
-		status = strconv.Itoa(injResp.StatusCode)
-		injResp.Body.Close()
-	}
-	if err := emitMessage("injection-forward-status=" + status); err != nil {
-		return err
-	}
-
-	// Flood to trigger writer backpressure, holding the container alive for the
-	// host harness to `podman exec env` / inspect while the writer gate is closed.
-	if err := emitMessage("flood-start"); err != nil {
-		return err
-	}
-	for i := 0; i < cfg.FloodCount; i++ {
-		if err := emitMessage(fmt.Sprintf("flood-%05d-%s", i, strings.Repeat("x", 2048))); err != nil {
-			return err
-		}
-	}
-	return emit(gen.EventKindSubagentDone, gen.DonePayload{Status: gen.DonePayloadStatusOk, Result: "t20 proxy gate complete"})
 }
 
 func requestApproval(raw []byte) (approvalrelaywire.Decision, error) {

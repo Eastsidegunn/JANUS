@@ -94,6 +94,8 @@ opaque 디렉터리와 directory-path whiteout을 baseline의 모든 잎 삭제�
 
 ## T20-② — 컨테이너 게이트에서 업스트림 헤더 수신 실증 (2026-09-23 — 문서화, 우회 안 함)
 
+**2026-09-24: T23으로 대체·외부화 — 현재 차단 아님.** 헤더 주입·TLS 재발신·credential broker 자체를 제거했으므로 이 항목의 해결 후보를 구현하지 않는다. 아래 내용은 T20 당시의 이력이다. T23의 남은 검증은 외부 CLIProxyAPI + 실 claude 종단 [H] smoke이며 `docs/t17-20-smoke-runbook.md`를 따른다. private IP 차단은 여전히 유지되므로 운영자 endpoint는 현재 egress 규칙을 만족해야 한다.
+
 완료 기준 ②의 "가짜 TLS 업스트림이 `<header>: <prefix><sentinel>` 수신"을
 T20 컨테이너 게이트(`surfaces/hx/t20_integration_test.go`)에서 종단 실증하지
 못했다. 사유(우회·목업 대신 기록):

@@ -153,10 +153,10 @@
 - 내용: JANUS는 벤더 인증에서 손을 뗀다. 컨테이너 에이전트는 표준 API(OpenAI/Anthropic 호환)로만 통신하고, 구독 인증·OAuth 봉투(claude ?beta=true+anthropic-beta+identity system prompt+도구명 remap)·토큰 refresh는 JANUS 밖 CLIProxyAPI(운영자가 서버 배치, github.com/router-for-me/CLIProxyAPI)가 전담. egress proxy는 격리·audit·redaction만 — 벤더 봉투/Authorization 생성 책임 제거. 컨테이너 upstream=CLIProxyAPI 주소(world-config), egress allowlist=CLIProxyAPI 엔드포인트만(격리 유지). 구독 토큰은 JANUS가 아예 취급 안 함(CLIProxyAPI에만). 컨테이너는 CLIProxyAPI 접근키(로컬 문지기 키, 저위험)만 필요.
 - 대상: FR-SBX-03(egress 격리), FR-COL-03(audit) — T20/T22 벤더 인증 특화 제거·재편
 - 근거: [H] 승인 gate q-8e7b4dc5. 실 토큰 smoke 실측 — 구독 OAuth raw Bearer 401, 봉투 필요. 봉투를 JANUS proxy가 재현하는 건 비공개 서식·파손 리스크 → CLIProxyAPI가 cloaking 담당. 관심사 분리.
-- T20~T22 처분: credential broker(T20) 구조 재활용 여부는 JANUS 판단(접근키 주입). proxy Authorization replace+placeholder env(T22) 제거/단순화(테스트·traceability 정리 동반). lifecycle·overlay·accept·audit(T17/T21) 무변경.
-- 완료 기준: (a) 컨테이너 에이전트가 CLIProxyAPI를 표준 API로 호출→모델 응답(파수꾼/실토큰 smoke), egress proxy가 CLIProxyAPI 외 목적지 차단 유지, (b) 구독 토큰·CLIProxyAPI 접근키가 JANUS 코드·컨테이너 env·argv·로그·inspect 부재(파수꾼 스캔), (c) 벤더 교체가 CLIProxyAPI 설정만으로(여력 시). — `make ci` green.
+- T20~T22 처분: credential broker(T20)·ttysecret·proxy Authorization replace·placeholder(T22)는 제거. CLIProxyAPI 접근키는 world-config env 평문으로 전달(확정). 테스트·traceability 이력 정리 동반. lifecycle·overlay·accept·audit(T17/T21) 무변경.
+- 완료 기준: (a) 컨테이너 에이전트가 CLIProxyAPI를 표준 API로 호출→모델 응답(파수꾼/실토큰 smoke), egress proxy가 CLIProxyAPI 외 목적지 차단 유지, (b) 구독 토큰은 T23 생산 경로에서 취급하지 않음. CLIProxyAPI 접근키는 운영자 world-config·컨테이너 env(따라서 inspect.Config.Env) 및 전달용 호스트 메모리/자식 env에만 허용하고 argv·로그·metadata·그 외 inspect 필드에 값 부재(파수꾼 스캔), (c) 벤더 교체가 CLIProxyAPI 설정만으로(여력 시). — `make ci` green.
 - 비범위: CLIProxyAPI 배치·OAuth 로그인·cloaking 설정은 운영자([H]/리뷰어). JANUS는 "표준 API 엔드포인트가 거기 있다"만 안다. Rhizome 계약 무개정.
-- 검증 대상: claude-code CLI가 CLIProxyAPI 뒤에서 "로그인됨"으로 인식하는 최소 조건(placeholder 필요 여부).
+- 검증 대상: claude-code CLI가 CLIProxyAPI 뒤에서 "로그인됨"으로 인식하는 최소 조건(ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN). 미검증, [H] smoke 필요.
 
 ## 이후 (T20+, 착수 전 사람 판단 필요)
 - pi / OpenClaw / 사내 에이전트 어댑터 (contracts 안정성의 성적표)

@@ -1,8 +1,8 @@
-# T17~20 실 토큰 smoke 런북 — 접수→관측→승인→중단 관통 ([H] 전용)
+# T17~19 + T23 외부 gateway smoke 런북 — 접수→관측→승인→중단 관통 ([H] 전용)
 
-목적: 접수(T17)→관측→승인 relay(T18)→중단(T19)→proxy 주입(T20) 전체 사슬을 실 토큰 단일 세션으로 1회 관통.
+목적: 접수(T17)→관측→승인 relay(T18)→중단(T19)과 CLIProxyAPI 표준 API 호출(T23)을 단일 세션으로 관통. T20/T22 주입·placeholder 절차는 T23으로 대체·외부화됐다.
 
-> **[H] 전용.** 되돌릴 수 없는 실 토큰·외부 효과이므로 사람이 직접 수행한다(결정 10번). 에이전트에 위임하지 않는다. 실 토큰은 world-config JSON 파일 안에만 두고 CI·원격에 보내지 않는다.
+> **[H] 전용.** 되돌릴 수 없는 실 토큰·외부 효과이므로 사람이 직접 수행한다(결정 10번). 에이전트에 위임하지 않는다. 구독 OAuth 토큰은 CLIProxyAPI에만 두고 JANUS에 전달하지 않는다. world-config에는 CLIProxyAPI 접근키만 평문으로 두며 저장소·CI에 올리지 않는다.
 >
 > 이 문서는 실제 CLI 플래그(`cmd/smoke/main.go`, `surfaces/hx/main.go`·`stop.go`, `cmd/rhizome/main.go`)와 대조해 재구성했다(2026-09-15). 어느 단계든 실패하면 그대로 멈추고 출력 전문을 리뷰어에게. 모든 단계 재실행 안전.
 
@@ -20,7 +20,7 @@ cd ~/Gunnsplayground/JANUS && git pull
 go build -o /tmp/hx ./surfaces/hx
 HX=/tmp/hx
 PROFILE=<정책 YAML 절대경로>        # T16 때 쓴 프로파일
-WORLD=<world-config JSON 절대경로>  # T20: 토큰 없음. env(평문)+inject 규칙(credential 이름만)만
+WORLD=<world-config JSON 절대경로>  # T23: gateway URL + 접근키 env(평문), inject 없음
 SMOKE=~/rhizome-smoke && mkdir -p "$SMOKE/accept"
 SOCK=$SMOKE/approval.sock            # 소켓 부모 디렉터리는 0700이어야 함(peer fail-closed)
 chmod 700 "$SMOKE"
@@ -47,27 +47,37 @@ echo "$PHASH"
 ```
 > profile/overlay 파일이 이 시점 이후 바뀌면 hx가 `POLICY_CHANGED`로 거부한다 — pin은 실행 순간의 파일 내용에 고정된다.
 
-### 1-T20. proxy 보유 자격증명 (T20/T22 — 실 토큰은 world-config에 없다, 컨테이너엔 placeholder만)
+### 1-T23. 외부 CLIProxyAPI + 접근키 env
 
-T20 이후 **실 토큰은 world-config JSON에 넣지 않는다.** hx run이 `/dev/tty`(ECHO off)로 값을 직접 받아 proxy에만 전달하고, 컨테이너/argv/log 어디에도 **실 토큰 값**이 없다.
+CLIProxyAPI 배치·OAuth 로그인·refresh·벤더 봉투는 운영자 책임이다. JANUS는 실행하거나 인증하지 않으며 표준 Anthropic API endpoint만 사용한다. 아래는 기존 world-config의 어댑터 항목에 넣는 **env 부분**이다. 예시 키는 실제 키가 아니다.
 
-**T22 보정(중요):** 컨테이너의 claude-code는 `CLAUDE_CODE_OAUTH_TOKEN` env가 **없으면** "Not logged in"으로 API 요청 자체를 만들지 않는다([H] 실측: dummy 값을 주면 401 = env를 읽어 `Authorization: Bearer …` 요청을 실제로 생성). 그래서 컨테이너 env에 **비밀이 아닌 placeholder** `CLAUDE_CODE_OAUTH_TOKEN`을 준다 → claude가 로그인 판정을 통과해 `Authorization: Bearer <placeholder>` 요청을 만든다 → **proxy가 그 Authorization을 실 토큰으로 replace**(`proxy.go`의 `Header.Set`이 이미 replace이므로 proxy 코드 변경 없음). 결과: **컨테이너엔 placeholder 값만, 실 토큰 값은 proxy만 보유**하는 무비밀 원칙 유지. placeholder는 sentinel(실 토큰)과 명백히 다른 고정 비밀-아닌 문자열이어야 한다.
-
-world-config의 어댑터 항목은 이름·설정·placeholder만:
 ```json
-"claudecode": {
-  "bin": "...", "image": {...}, "agent_argv": ["claude"], "control_mode": "tool_approval",
-  "env": [
-    "HTTP_PROXY=http://hx-egress-proxy:3128",
-    "ANTHROPIC_BASE_URL=http://api.anthropic.com",
-    "CLAUDE_CODE_OAUTH_TOKEN=hx-proxy-injected-placeholder"
-  ],
-  "inject": [{ "domain": "api.anthropic.com", "header": "Authorization", "value_prefix": "Bearer ", "credential": "CLAUDE_CODE_OAUTH_TOKEN" }]
-}
+"env": [
+  "ANTHROPIC_BASE_URL=http://cliproxy.operator.example:8317",
+  "ANTHROPIC_AUTH_TOKEN=REPLACE_WITH_CLIPROXY_ACCESS_KEY"
+]
 ```
-- `env`: 평문·비밀 아님만. `HTTP_PROXY`는 **정적 alias `hx-egress-proxy`**(:3128), `ANTHROPIC_BASE_URL`은 **평문 http + 실 도메인**(주입 대상은 CONNECT deny라 평문 forward로 proxy에 닿아야 함), `CLAUDE_CODE_OAUTH_TOKEN`은 **placeholder 값**(로그인 판정 통과용, 실 토큰 아님).
-- `inject[].credential`은 **이름만**. 값은 hx run 실행 중 `/dev/tty` 프롬프트로 입력해 proxy가 placeholder를 이 실 토큰으로 replace한다. env의 placeholder와 inject의 credential이 같은 이름(`CLAUDE_CODE_OAUTH_TOKEN`)이어도 무방하다 — env는 placeholder 값(컨테이너), inject는 실 값(proxy 전용)으로 **출처·저장소가 완전히 독립**이다(`worldAdapterConfig`의 `env`/`inject`는 별개 필드).
-- **열린 항목(리뷰어/드라이버 확인 필요)**: hx run은 tty 프롬프트를 띄우는데, smoke 드라이버(`cmd/smoke`→janusadapter가 hx run을 서브프로세스로 실행)가 그 tty 프롬프트를 [H] 터미널로 통과시키는지 미확인. 통과 안 되면 (a) 드라이버가 tty를 상속·전달하도록 하거나, (b) hx run을 smoke start와 분리해 [H]가 직접 실행. 서버 검증 전 이 경로 확정 필요.
+
+`ANTHROPIC_AUTH_TOKEN`을 선택한 근거: [Claude Code 공식 gateway 문서](https://code.claude.com/docs/en/llm-gateway-connect)는 이 변수를 `Authorization: Bearer`로, `ANTHROPIC_API_KEY`를 `x-api-key`로 전달한다고 명시한다(2026-09-24 확인). JANUS proxy는 클라이언트 헤더를 그대로 전달한다. gateway가 x-api-key를 요구하면 API_KEY로 바꿀 수 있지만 서로 다른 키 두 개를 동시에 선언하지 않는다. 중복 env 이름·NUL·`CLAUDE_CODE_OAUTH_TOKEN`은 설정 오류다. `inject` 필드는 제거되어 기존 설정은 명시적으로 거부된다. tty 입력·placeholder·replace는 없다.
+
+profile의 `egress`에는 CLIProxyAPI의 전용 DNS 이름만 선언한다:
+
+```yaml
+egress:
+  - cliproxy.operator.example
+```
+
+기존 proxy 설정은 유지된다. agent는 per-span internal network에만 연결되고 HTTP_PROXY/HTTPS_PROXY는 JANUS sidecar를 가리킨다. BASE_URL은 **CLIProxyAPI** 주소이며 sidecar 주소가 아니다. proxy는 DNS 결과를 고정해 dial하며 private/loopback/link-local/metadata/IP literal을 계속 거부한다. 따라서 `localhost`, RFC1918 서버 주소로는 이 경로가 성립하지 않는다. 운영자가 현재 규칙에 맞는 공인 IP로 해석되는 endpoint를 제공해야 한다. HTTP forward는 지정 포트를 유지하며 TLS로 자동 전환하지 않는다. HTTPS를 쓰면 기존 CONNECT 443 경로를 이용한다. HTTP 예시의 접근키는 gateway까지 평문으로 전송되므로 전송 구간 선택 역시 운영자 설정이다.
+
+allowlist는 기존대로 도메인과 그 label-boundary 하위 도메인을 허용한다. 전용 gateway 도메인을 사용하고 상위 공용 도메인이나 벤더 직접 도메인을 추가하지 않는다. 코드가 CLIProxyAPI라는 제품을 식별하거나 특정 주소를 하드코딩하지는 않는다.
+
+파수꾼 판정:
+
+- 구독 토큰은 T23 생산 경로에 입력하지 않는다. JANUS에는 구독 OAuth 수령·refresh·봉투 생성 경로가 없고, 기존 T15 전용 capability/smoke는 회귀 보존용으로만 남아 생산 launcher에서 사용하지 않는다. 따라서 저장소 전체에서 OAuth 문자열/옛 하네스까지 삭제됐다는 뜻은 아니다.
+- 접근키의 허용 위치는 운영자 world-config, 전달 중 호스트 메모리·Podman 자식 env, 컨테이너 env와 그 표현인 `inspect.Config.Env`다. **inspect 전체 값 부재를 주장하지 않는다.** 그 밖의 argv·spawn metadata·audit·로그에는 키가 없어야 한다. env 값은 Podman argv에 넣지 않고 `--env NAME`으로 전달한다. stdout/stderr는 기존 stream redactor를 경유한다.
+- 단위 파수꾼은 실제 키 대신 sentinel로 env 전달·argv/metadata 부재·분할 출력 redaction을 검사한다. 실제 컨테이너 env/inspect, session/replay, adapter argv, proxy audit는 [H]가 키 값을 화면이나 공유 로그에 출력하지 않고 값 포함 여부만 검사한다. env 예외는 agent에만 적용하고 proxy env에는 접근키가 없어야 한다. 구독 토큰은 어느 JANUS 산출물에도 없어야 한다.
+
+**미검증, [H] smoke 필요:** 고정한 claude 이미지가 위 env만으로 로그인 인식 → `/v1/messages` 생성 → CLIProxyAPI 모델 응답을 받는지 확인한다. 이미지에 구독 로그인 파일을 넣거나 호스트 인증 디렉터리를 마운트하지 않는다. CLIProxyAPI 외 목적지는 거부되어야 한다. 이 검증이 완료되기 전에는 실 claude 종단 완료로 기록하지 않는다. tty 전달 문제는 T23에서 경로 자체가 제거되어 더 이상 차단 사항이 아니다.
 
 ## 2. Rhizome 준비
 
