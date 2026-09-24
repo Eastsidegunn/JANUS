@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: lint test smoke fixtures codegen codegen-drift world-integration extensions-integration otel-integration t15-integration t20-integration ci ci-linux
+.PHONY: lint test smoke fixtures codegen codegen-drift world-integration extensions-integration otel-integration t15-integration ci ci-linux
 
 codegen:
 	$(GO) run ./tools/schemagen -out contracts/gen contracts/events.schema.json:EventRecord contracts/wire.schema.json
@@ -96,19 +96,6 @@ t15-integration:
 	fi
 	@command -v podman >/dev/null || { echo "t15-integration: podman 없음, skip 금지"; exit 1; }
 	$(GO) test -tags t15integration -count=1 -timeout=25m ./surfaces/hx -run '^(TestWorldIntegration|TestClaudeWorldIntegration|TestProductionRunClaudeIntegration)$$'
-
-# T20 §proxy-held-credential: real rootless-Podman gate for the proxy-held
-# credential plumbing (credentialBroker + proxy injection + agent), driven with
-# a decoy (fake) credential — no real token. Overlay flavour is not asserted
-# (fuse-overlayfs/native both accepted); this is an [H]-server first-pass plumbing
-# gate, NOT the podman-5.x representative gate, so it is intentionally left out of
-# .github/workflows/ci.yml — CI inclusion is a separate reviewer decision.
-t20-integration:
-	@if [ "$$($(GO) env GOOS)" != "linux" ]; then \
-		echo "t20-integration은 Linux 실물 게이트다 — 현재 $$($(GO) env GOOS), skip 금지"; exit 1; \
-	fi
-	@command -v podman >/dev/null || { echo "t20-integration: podman 없음, skip 금지"; exit 1; }
-	$(GO) test -tags t20integration -count=1 -timeout=15m ./surfaces/hx -run '^TestProxyHeldCredentialIntegration$$'
 
 ci: lint test smoke fixtures codegen-drift
 

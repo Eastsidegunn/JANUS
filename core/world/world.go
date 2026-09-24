@@ -12,8 +12,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"regexp"
-	"strings"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/core/logd"
@@ -324,87 +322,6 @@ func (c SecretCapability) GoString() string { return "<redacted>" }
 // represented by an empty object rather than by its environment name/value.
 func (c SecretCapability) MarshalJSON() ([]byte, error) { return []byte(`{}`), nil }
 
-// proxyCredentialNamePattern constrains the non-secret credential NAME to an
-// environment-variable shape. The name is allowed in files, argv, and logs
-// (it identifies which secret a proxy injection rule consumes); only the value
-// is forbidden everywhere. Keeping the name generalized (not one hardcoded
-// vendor) is what lets a second vendor be enabled by a config change alone
-// (T20 완료 기준 ③), while the shape check still blocks nonsense names.
-var proxyCredentialNamePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{2,63}$`)
-
-// ProxyInjection is a non-secret rule instructing the egress proxy to attach a
-// credential header to forward-path requests for one target domain and to
-// re-send them upstream over TLS (T20 요구조건 3). Only NAMES live here — the
-// domain, the header name, an optional value prefix, and the name of the
-// credential whose value fills the header. The credential VALUE is never a
-// field of this type: it reaches the proxy exclusively over a host-only socket
-// (see ProxyCredential). This type is safe to place in Podman argv and logs.
-type ProxyInjection struct {
-	Domain         string
-	Header         string
-	ValuePrefix    string
-	CredentialName string
-}
-
-// Validate checks that a rule carries only well-formed, non-secret names.
-func (r ProxyInjection) Validate() error {
-	if r.Domain == "" || strings.ContainsAny(r.Domain, " \t\r\n|") {
-		return fmt.Errorf("world: proxy injection domain이 유효하지 않음")
-	}
-	if r.Header == "" || strings.ContainsAny(r.Header, " \t\r\n:|") {
-		return fmt.Errorf("world: proxy injection header 이름이 유효하지 않음")
-	}
-	if strings.ContainsAny(r.ValuePrefix, "\r\n|") {
-		return fmt.Errorf("world: proxy injection value prefix에 개행·구분자 금지")
-	}
-	if !proxyCredentialNamePattern.MatchString(r.CredentialName) {
-		return fmt.Errorf("world: proxy injection credential 이름이 env-name 형식이 아님")
-	}
-	return nil
-}
-
-// ProxyCredential is a host-only, non-serializable credential VALUE consumed
-// only by the egress proxy process (T20 요구조건 1). It never enters the agent
-// container environment, Podman argv, SpawnMetadata, or any event. The world
-// backend hands the value to the proxy over a mounted Unix socket; the bytes
-// travel that socket and are never written to a file. Its redaction methods
-// make accidental logging or serialization harmless.
-type ProxyCredential struct {
-	name            string
-	value           string
-	expiresAtUnixMs int64
-}
-
-// NewProxyCredential validates the non-secret name shape and requires a value
-// with a future expiry. The value is read by hx from /dev/tty (never a file,
-// argv, or inherited env) and wrapped here immediately.
-func NewProxyCredential(name, value string, expiresAtUnixMs int64) (ProxyCredential, error) {
-	if !proxyCredentialNamePattern.MatchString(name) {
-		return ProxyCredential{}, fmt.Errorf("world: proxy credential 이름이 env-name 형식이 아님")
-	}
-	if value == "" {
-		return ProxyCredential{}, fmt.Errorf("world: proxy credential 값이 비어 있음")
-	}
-	if expiresAtUnixMs <= 0 {
-		return ProxyCredential{}, fmt.Errorf("world: proxy credential 만료 시각이 유효하지 않음")
-	}
-	return ProxyCredential{name: name, value: value, expiresAtUnixMs: expiresAtUnixMs}, nil
-}
-
-func (c ProxyCredential) IsZero() bool {
-	return c.name == "" && c.value == "" && c.expiresAtUnixMs == 0
-}
-func (c ProxyCredential) Name() string           { return c.name }
-func (c ProxyCredential) ExpiresAtUnixMs() int64 { return c.expiresAtUnixMs }
-
-// Value is intentionally narrow: only a world backend may read it while
-// handing the credential to the proxy over the credential socket.
-func (c ProxyCredential) Value() string { return c.value }
-
-func (c ProxyCredential) String() string               { return "<redacted>" }
-func (c ProxyCredential) GoString() string             { return "<redacted>" }
-func (c ProxyCredential) MarshalJSON() ([]byte, error) { return []byte(`{}`), nil }
-
 // SpawnSpec is an immutable request to open an execution world. The policy is
 // already merged and narrowed before construction; world has no policy merge
 // API. AgentArgv and Credentials are defensively copied.
@@ -419,15 +336,8 @@ type SpawnSpec struct {
 	credentials []CredentialHandle
 	secret      SecretCapability
 	bundle      ExtensionBundle
-	// agentEnv is non-secret plaintext environment declared in world-config
-	// (e.g. ANTHROPIC_BASE_URL=http://api.anthropic.com). It never carries a
-	// credential value; secrets reach only the proxy, never the container.
+	// agentEnv contains operator-configured gateway env, never subscription tokens.
 	agentEnv []string
-	// proxyInjections/proxyCredentials are host-only. Injection rules (names)
-	// may be logged; credential values are delivered to the proxy over a
-	// socket and are absent from argv, env, metadata, and events.
-	proxyInjections  []ProxyInjection
-	proxyCredentials []ProxyCredential
 }
 
 func NewSpawnSpec(
@@ -468,34 +378,13 @@ func (s SpawnSpec) WithSecretCapability(capability SecretCapability) SpawnSpec {
 
 func (s SpawnSpec) SecretCapability() SecretCapability { return s.secret }
 
-// WithAgentEnv returns a copy carrying non-secret plaintext container env
-// declared by the operator's world-config. A NAME=VALUE entry must not carry a
-// credential value; secrets travel only to the proxy.
+// WithAgentEnv copies plaintext gateway configuration, including its access key.
 func (s SpawnSpec) WithAgentEnv(env []string) SpawnSpec {
 	s.agentEnv = append([]string(nil), env...)
 	return s
 }
 
 func (s SpawnSpec) AgentEnv() []string { return append([]string(nil), s.agentEnv...) }
-
-// WithProxyCredential returns a copy that routes a host-only credential to the
-// egress proxy (never to the container). Injection rules (non-secret names)
-// declare which domains receive which credential header. This is the T20
-// proxy-held-credential path; it deliberately does not touch SecretCapability
-// (the legacy container-env path preserved for the T15 gate).
-func (s SpawnSpec) WithProxyCredential(rules []ProxyInjection, credentials []ProxyCredential) SpawnSpec {
-	s.proxyInjections = append([]ProxyInjection(nil), rules...)
-	s.proxyCredentials = append([]ProxyCredential(nil), credentials...)
-	return s
-}
-
-func (s SpawnSpec) ProxyInjections() []ProxyInjection {
-	return append([]ProxyInjection(nil), s.proxyInjections...)
-}
-
-func (s SpawnSpec) ProxyCredentials() []ProxyCredential {
-	return append([]ProxyCredential(nil), s.proxyCredentials...)
-}
 
 // ExtensionBundle is a host-only, immutable handle to a verified provisioning
 // result. It is intentionally opaque: callers can pass it to a world backend
