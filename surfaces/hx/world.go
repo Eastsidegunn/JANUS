@@ -35,6 +35,8 @@ type worldLaunch struct {
 	Depth          int64
 	ProfileID      string
 	Approval       subagent.Spec
+	// SessionMode: 빈 값 = oneshot(spawn 기록에 필드 없음, T24 바이트 무변경).
+	SessionMode gen.SubagentSpawnPayloadSessionMode
 }
 
 type activeWorldSubagent struct {
@@ -93,9 +95,19 @@ func startProductionWorld(ctx context.Context, launch worldLaunch) (_ *activeWor
 	if launch.AdapterName == "codex" && launch.ControlMode != gen.SubagentSpawnPayloadControlModeContainerOnly {
 		return nil, fmt.Errorf("hx: codex world spawn은 container_only control_mode가 필요함")
 	}
+	sessionSpec := subagent.Spec{SessionMode: launch.SessionMode}
+	switch launch.SessionMode {
+	case "", gen.SubagentSpawnPayloadSessionModeOneshot:
+	case gen.SubagentSpawnPayloadSessionModeMultiturn:
+		if launch.AdapterName != "claudecode" {
+			return nil, fmt.Errorf("hx: session_mode multiturn은 claudecode만 지원 (adapter %q)", launch.AdapterName)
+		}
+	default:
+		return nil, fmt.Errorf("hx: 미지 session_mode %q", launch.SessionMode)
+	}
 	payload, err := json.Marshal(gen.SubagentSpawnPayload{
-		ControlMode: launch.ControlMode,
-		Adapter:     launch.AdapterName, Instruction: launch.Instruction, Depth: launch.Depth,
+		ControlMode: launch.ControlMode, SessionMode: sessionSpec.SpawnSessionMode(),
+		Adapter: launch.AdapterName, Instruction: launch.Instruction, Depth: launch.Depth,
 		Budget: gen.SpawnBudget{
 			Tokens: launch.Budget.Tokens, TimeMs: launch.Budget.TimeMs, MaxDepth: launch.Budget.MaxDepth,
 		},
@@ -134,6 +146,7 @@ func startProductionWorld(ctx context.Context, launch worldLaunch) (_ *activeWor
 	spec.Stderr = launch.AdapterStderr
 	spec.Instruction, spec.Workspace = launch.Instruction, launch.Workspace
 	spec.Budget, spec.Depth, spec.ProfileID = launch.Budget, launch.Depth, launch.ProfileID
+	spec.SessionMode = launch.SessionMode
 	if secret := launch.SpawnSpec.SecretCapability(); !secret.IsZero() {
 		spec.TokenExpiresAtUnixMs = secret.ExpiresAtUnixMs()
 	}

@@ -13,9 +13,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,6 +46,37 @@ type Spec struct {
 	// TokenExpiresAtUnixMs is non-secret timing metadata for the Claude adapter.
 	// The token value itself is never held by the adapter or this spec.
 	TokenExpiresAtUnixMs int64
+	// SessionMode는 spawn payload session_mode다(SCP-T25-001 §2). 빈 값 =
+	// oneshot이며 spawn payload에도 기록하지 않는다(T24 바이트 무변경).
+	// multiturn이면 spawn 기록에 값을 남기고 어댑터에 SessionModeEnv로 알리며
+	// Send가 후속 user 메시지 주입을 수용한다.
+	SessionMode gen.SubagentSpawnPayloadSessionMode
+}
+
+// SessionModeEnv는 어댑터 프로세스에 session_mode를 전달하는 환경 변수다.
+// 어댑터(claudecode)는 같은 이름을 읽는다.
+const SessionModeEnv = "HX_SESSION_MODE"
+
+// Send의 결정적 거부 사유. 호출자(제어 표면)는 errors.Is로 구조화된 오류
+// 코드에 사상한다.
+var (
+	ErrNotMultiturn    = errors.New("subagent: multiturn 세션이 아님")
+	ErrSessionTerminal = errors.New("subagent: 종료된 세션")
+)
+
+// Multiturn은 spec의 session_mode가 multiturn인지 여부다.
+func (s Spec) Multiturn() bool {
+	return s.SessionMode == gen.SubagentSpawnPayloadSessionModeMultiturn
+}
+
+// SpawnSessionMode는 spawn payload에 기록할 session_mode다. oneshot(부재
+// 포함)은 nil — 기존 spawn 레코드와 바이트 단위로 같다.
+func (s Spec) SpawnSessionMode() *gen.SubagentSpawnPayloadSessionMode {
+	if !s.Multiturn() {
+		return nil
+	}
+	mode := gen.SubagentSpawnPayloadSessionModeMultiturn
+	return &mode
 }
 
 // Subagent는 실행 중인 어댑터 프로세스 핸들이다.
@@ -56,6 +89,15 @@ type Subagent struct {
 	approvals     *approvalCoordinator
 	doneObserved  atomic.Bool
 	stopRequested atomic.Bool
+	pumpFinished  atomic.Bool
+
+	// multiturn Send 경로: user/message durable 기록 → message 명령 전달을
+	// sendMu로 직렬화해 로그 순서와 전달 순서가 어긋나지 않게 한다.
+	multiturn  bool
+	writer     *logd.Writer
+	traceID    string
+	parentSpan string
+	sendMu     sync.Mutex
 }
 
 type waitResult struct {
@@ -89,6 +131,7 @@ func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n in
 		},
 		WorldBackend: gen.SubagentSpawnPayloadWorldBackendNone,
 		ControlMode:  gen.SubagentSpawnPayloadControlModeToolApproval,
+		SessionMode:  spec.SpawnSessionMode(),
 	})
 	if err != nil {
 		return nil, err
@@ -132,6 +175,13 @@ func spawnPrepared(ctx context.Context, w *logd.Writer, traceID, parentSpan, chi
 	if spec.TokenExpiresAtUnixMs > 0 {
 		adapterEnv = replaceEnv(adapterEnv, "HX_CLAUDE_TOKEN_EXPIRES_AT_MS", fmt.Sprintf("%d", spec.TokenExpiresAtUnixMs))
 	}
+	switch spec.SessionMode {
+	case "", gen.SubagentSpawnPayloadSessionModeOneshot:
+	case gen.SubagentSpawnPayloadSessionModeMultiturn:
+		adapterEnv = replaceEnv(adapterEnv, SessionModeEnv, string(spec.SessionMode))
+	default:
+		return nil, fmt.Errorf("subagent: 미지 session_mode %q", spec.SessionMode)
+	}
 	proc, err := procgroup.Start(ctx, procgroup.Options{Command: spec.Command, Env: adapterEnv, Stderr: spec.Stderr})
 	if err != nil {
 		return nil, fmt.Errorf("subagent: 어댑터 실행: %w", err)
@@ -140,6 +190,7 @@ func spawnPrepared(ctx context.Context, w *logd.Writer, traceID, parentSpan, chi
 	s := &Subagent{
 		actor: actor, proc: proc, vals: vals,
 		doneCh: make(chan waitResult, 1), childSpn: childSpan,
+		multiturn: spec.Multiturn(), writer: w, traceID: traceID, parentSpan: parentSpan,
 	}
 	s.approvals = newApprovalCoordinator(ctx, s, w, traceID, parentSpan, spec)
 	if err := s.sendCommand(gen.CommandCmdTask, gen.TaskPayload{
@@ -167,10 +218,40 @@ func replaceEnv(env []string, key, value string) []string {
 	return append(out, prefix+value)
 }
 
-// Send는 추가 입력을 어댑터에 전달한다 (§5.2 message).
-func (s *Subagent) Send(text string) error {
-	return s.sendCommand(gen.CommandCmdMessage, gen.MessagePayload{Text: text})
+// Send는 multiturn 세션에 후속 user 메시지를 주입한다 (§5.2 message,
+// SCP-T25-001). 모델 가시 입력이므로 전달 전에 child span의 user/message로
+// writer를 경유해 durable 기록한다(FR-LOG-03) — 기록 실패 시 전달하지 않는다.
+// 반환값은 그 user/message의 seq다. 비-multiturn·종료 세션은 결정적 거부.
+// 후속 턴의 tool_use는 기존 승인 coordinator를 그대로 경유한다.
+func (s *Subagent) Send(ctx context.Context, text string) (int64, error) {
+	if !s.multiturn {
+		return 0, ErrNotMultiturn
+	}
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if s.doneObserved.Load() || s.stopRequested.Load() || s.pumpFinished.Load() {
+		return 0, ErrSessionTerminal
+	}
+	payload, err := json.Marshal(gen.UserMessagePayload{Text: text})
+	if err != nil {
+		return 0, err
+	}
+	parent := s.parentSpan
+	seq, err := s.writer.Submit(ctx, gen.EventRecord{
+		Ts: now(), TraceID: s.traceID, SpanID: s.childSpn, ParentSpanID: &parent,
+		Kind: gen.KindUserMessage, Actor: "parent", Payload: payload,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("subagent: user/message 기록: %w", err)
+	}
+	if err := s.sendCommand(gen.CommandCmdMessage, gen.MessagePayload{Text: text}); err != nil {
+		return seq, fmt.Errorf("subagent: message 전달: %w", err)
+	}
+	return seq, nil
 }
+
+// Multiturn은 이 세션이 후속 메시지 주입을 수용하는지 여부다.
+func (s *Subagent) Multiturn() bool { return s.multiturn }
 
 // Stop은 중단을 요청한다 (§5.2 stop). 어댑터는 done(stopped)으로 응답해야 한다.
 func (s *Subagent) Stop(reason gen.StopPayloadReason) error {
@@ -288,6 +369,7 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string) {
 		return nil
 	})
 
+	s.pumpFinished.Store(true)
 	approvalErr := s.approvals.fatal()
 	switch {
 	case approvalErr != nil:

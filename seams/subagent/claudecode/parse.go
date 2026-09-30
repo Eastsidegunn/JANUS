@@ -43,11 +43,47 @@ type Parser struct {
 	// disposition은 직전 ParseLine이 이벤트를 만들지 않은 경우의 사유다.
 	// 골든에 기록해 "의도적 무시"와 "조용한 누락"을 구분한다(제안서 §8.1).
 	disposition string
+
+	// multiturn(SCP-T25-001)에서 native result는 세션 종료가 아니라 턴
+	// 종료다. 턴 result는 usage만 방출하고 마지막 것을 보관했다가, 프로세스
+	// 종료 시 TurnDone이 단 하나의 subagent/done으로 사영한다 — 신규 kind 없음.
+	multiturn  bool
+	sessionID  string
+	turns      int
+	lastResult *nativeLine
+	lastRaw    []byte
 }
 
 // NewParser는 빈 상태의 변환기를 만든다.
 func NewParser() *Parser {
 	return &Parser{rejectedEmitted: map[string]bool{}}
+}
+
+// NewMultiturnParser는 다중 턴 세션용 변환기를 만든다. oneshot 매핑(골든)은
+// NewParser가 그대로 소유한다.
+func NewMultiturnParser() *Parser {
+	p := NewParser()
+	p.multiturn = true
+	return p
+}
+
+// Turns는 multiturn에서 완료된(result를 받은) 턴 수다.
+func (p *Parser) Turns() int { return p.turns }
+
+// TurnDone은 multiturn 세션의 terminal done을 만든다: 마지막 턴 result를
+// 현재 stop 상태로 매핑한다(doneStatus 동일 규칙). 완료된 턴이 없으면 nil —
+// 호출자는 finishNative의 missing_result 합성으로 넘어간다.
+func (p *Parser) TurnDone() (*Event, error) {
+	if !p.multiturn || p.lastResult == nil || p.done {
+		return nil, nil
+	}
+	done := gen.DonePayload{Status: doneStatus(*p.lastResult, p.stopRequested.Load()), Result: resultText(*p.lastResult)}
+	ev, err := p.emit(gen.EventKindSubagentDone, done, p.lastRaw)
+	if err != nil {
+		return nil, err
+	}
+	p.done = true
+	return &ev[0], nil
 }
 
 // NoteStop은 코어가 stop 명령을 보냈음을 기록한다.
@@ -198,9 +234,16 @@ func (p *Parser) parseSystem(n nativeLine, line []byte) ([]Event, error) {
 	switch {
 	case n.Subtype == "init":
 		if p.sawInit {
+			// multiturn: 턴 경계 뒤의 init은 같은 native 세션의 재통보일 때만
+			// 소비한다(ready는 세션당 1회). 턴 도중·다른 세션 id는 여전히 위반.
+			if p.multiturn && p.turns > 0 && p.lastResult != nil && n.SessionID != "" && n.SessionID == p.sessionID {
+				p.disposition = "consumed:turn-init"
+				return nil, nil
+			}
 			return nil, fmt.Errorf("claudecode: system/init 중복 — 세션당 1회여야 함")
 		}
 		p.sawInit = true
+		p.sessionID = n.SessionID
 		return p.emit(gen.EventKindSubagentReady, gen.ReadyPayload{
 			Grade:           gen.ReadyPayloadGradeObservable,
 			NativeSessionID: strPtr(n.SessionID),
@@ -347,6 +390,16 @@ func (p *Parser) parseResult(n nativeLine, line []byte) ([]Event, error) {
 			return nil, err
 		}
 		out = append(out, ev...)
+	}
+	if p.multiturn {
+		last := n
+		p.lastResult = &last
+		p.lastRaw = append([]byte(nil), line...)
+		p.turns++
+		if len(out) == 0 {
+			p.disposition = "consumed:turn-result"
+		}
+		return out, nil
 	}
 	done := gen.DonePayload{Status: doneStatus(n, p.stopRequested.Load()), Result: resultText(n)}
 	ev, err := p.emit(gen.EventKindSubagentDone, done, line)

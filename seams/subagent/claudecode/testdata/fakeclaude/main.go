@@ -14,10 +14,15 @@ import (
 	"os/exec"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 )
 
 func main() {
+	if turns := os.Getenv("HX_CLAUDE_MULTITURN_FIXTURES"); turns != "" {
+		multiturn(strings.Split(turns, ","))
+		return
+	}
 	fixture := os.Getenv("HX_CLAUDE_FIXTURE")
 	if fixture == "" {
 		fmt.Fprintln(os.Stderr, "fakeclaude: HX_CLAUDE_FIXTURE 없음")
@@ -153,5 +158,84 @@ func main() {
 			os.Exit(2)
 		}
 		os.Exit(code)
+	}
+}
+
+// multiturn replays one recorded fixture per stream-json user turn read from
+// stdin (SCP-T25-001). It never invents native lines: turns after the first
+// only omit the fixture's system/init line, because a live session announces
+// init once. Each received user text is appended to HX_CLAUDE_TURNS_OUT. After
+// the last fixture it waits for stdin EOF (exit 0) or termination.
+func multiturn(fixtures []string) {
+	if expected := os.Getenv("HX_CLAUDE_EXPECT_ARGS"); expected != "" {
+		var want []string
+		if err := json.Unmarshal([]byte(expected), &want); err != nil || !reflect.DeepEqual(os.Args[1:], want) {
+			fmt.Fprintln(os.Stderr, "fakeclaude: argv mismatch", os.Args[1:])
+			os.Exit(2)
+		}
+	}
+	in := bufio.NewScanner(os.Stdin)
+	in.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for turn := 0; in.Scan(); turn++ {
+		var msg struct {
+			Type    string `json:"type"`
+			Message struct {
+				Role    string `json:"role"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(in.Bytes(), &msg); err != nil || msg.Type != "user" || msg.Message.Role != "user" ||
+			len(msg.Message.Content) != 1 || msg.Message.Content[0].Type != "text" {
+			fmt.Fprintf(os.Stderr, "fakeclaude: stream-json user 메시지 아님: %q\n", in.Bytes())
+			os.Exit(2)
+		}
+		if turn >= len(fixtures) {
+			fmt.Fprintln(os.Stderr, "fakeclaude: 준비된 턴 fixture 초과")
+			os.Exit(2)
+		}
+		if path := os.Getenv("HX_CLAUDE_TURNS_OUT"); path != "" {
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+			if err == nil {
+				b, _ := json.Marshal(msg.Message.Content[0].Text)
+				_, err = f.Write(append(b, '\n'))
+				_ = f.Close()
+			}
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "fakeclaude: turns 기록:", err)
+				os.Exit(2)
+			}
+		}
+		f, err := os.Open(fixtures[turn])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "fakeclaude:", err)
+			os.Exit(2)
+		}
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			var header struct {
+				Type    string `json:"type"`
+				Subtype string `json:"subtype"`
+			}
+			if turn > 0 && json.Unmarshal(line, &header) == nil && header.Type == "system" && header.Subtype == "init" {
+				continue
+			}
+			if _, err := os.Stdout.Write(append(append([]byte(nil), line...), '\n')); err != nil {
+				os.Exit(2)
+			}
+		}
+		f.Close()
+		if err := scanner.Err(); err != nil {
+			fmt.Fprintln(os.Stderr, "fakeclaude:", err)
+			os.Exit(2)
+		}
+	}
+	if err := in.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, "fakeclaude: stdin:", err)
+		os.Exit(2)
 	}
 }

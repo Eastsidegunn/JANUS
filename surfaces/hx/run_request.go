@@ -18,6 +18,7 @@ import (
 	"os"
 	"regexp"
 
+	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/core/policy"
 )
 
@@ -62,6 +63,9 @@ type runRequest struct {
 	ProfileHash          string        `json:"profile_hash"`
 	PolicyMappingVersion string        `json:"policy_mapping_version"`
 	Budget               requestBudget `json:"budget"`
+	// SessionMode는 SCP-T25-001의 다중 턴 opt-in이다. 부재 = oneshot(기존
+	// 요청과 동일). multiturn은 claudecode 전용이며 제어 socket이 필요하다.
+	SessionMode string `json:"session_mode,omitempty"`
 }
 
 // runTaskRef는 실행 의도와 승인된 입력 참조다. v1에서는 어댑터 instruction
@@ -158,6 +162,16 @@ func parseRunRequest(data []byte) (runRequest, *runError) {
 	}
 	if !approvedAdapters[req.AdapterID] {
 		return runRequest{}, newRunError(codeUnsupportedAdapter, "승인되지 않은 어댑터 %q", req.AdapterID)
+	}
+	switch gen.SubagentSpawnPayloadSessionMode(req.SessionMode) {
+	case "", gen.SubagentSpawnPayloadSessionModeOneshot:
+	case gen.SubagentSpawnPayloadSessionModeMultiturn:
+		if req.AdapterID != "claudecode" {
+			// codex 다중 턴 등가 경로는 후속 태스크(SCP-T25-001 §5).
+			return runRequest{}, newRunError(codeUnsupportedAdapter, "session_mode multiturn은 claudecode만 지원 (요청 %q)", req.AdapterID)
+		}
+	default:
+		return runRequest{}, newRunError(codeUnsupportedContract, "미지 session_mode %q (oneshot|multiturn)", req.SessionMode)
 	}
 	if req.Budget.Tokens <= 0 || req.Budget.TimeMs <= 0 || req.Budget.MaxDepth <= 0 {
 		// 무제한·미지정은 Rhizome 쪽에서 이미 거부됨 — 도달 정책은 항상
