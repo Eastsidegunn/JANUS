@@ -226,6 +226,42 @@ func (c *processClient) StartWithoutStdin(ctx context.Context) error {
 	return c.request(ctx, processwire.KindWait, nil)
 }
 
+// StartWithStdinOpen starts an argv-driven CLI whose stdin carries structured
+// turns (SCP-T25-001 multiturn). It writes the initial bytes, invokes ready
+// once they are acknowledged, and leaves stdin open for later WriteStdin
+// calls. No StdinClose is ever sent on this path: the session ends only by
+// the process exiting or an explicit Stop.
+func (c *processClient) StartWithStdinOpen(ctx context.Context, initial []byte, ready func()) error {
+	if err := c.request(ctx, processwire.KindStart, nil); err != nil {
+		return err
+	}
+	if err := c.WriteStdin(ctx, initial); err != nil {
+		return err
+	}
+	if ready != nil {
+		ready()
+	}
+	return c.request(ctx, processwire.KindWait, nil)
+}
+
+// WriteStdin forwards bytes to the container stdin, split into frames no
+// larger than the wire payload bound. Each frame is acknowledged before the
+// next is sent; callers must serialize WriteStdin calls so the frames of one
+// line are never interleaved with another line's frames.
+func (c *processClient) WriteStdin(ctx context.Context, data []byte) error {
+	for len(data) > 0 {
+		n := len(data)
+		if n > processwire.MaxPayload {
+			n = processwire.MaxPayload
+		}
+		if err := c.request(ctx, processwire.KindStdinData, append([]byte(nil), data[:n]...)); err != nil {
+			return err
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
 func (c *processClient) SendLine(ctx context.Context, line []byte) error {
 	data := append(append([]byte(nil), line...), '\n')
 	return c.request(ctx, processwire.KindStdinData, data)

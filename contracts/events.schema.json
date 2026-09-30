@@ -883,6 +883,13 @@
             "container_only"
           ],
           "$comment": "이 세션의 통제 방식 (SCP-T16-001). tool_approval=툴별 부모 승인 게이트(Claude), container_only=HX 컨테이너 격리에만 의존(Codex). codex는 툴별 동기 승인 훅이 없어 강등되며, 값은 codex 능력이 아니라 HX가 의존하는 통제를 뜻한다"
+        },
+        "session_mode": {
+          "enum": [
+            "oneshot",
+            "multiturn"
+          ],
+          "$comment": "다중 턴 세션 표시 (SCP-T25-001 §2). 부재 = oneshot. multiturn이면 어댑터가 첫 result 후 stdin을 닫지 않고 send_message 주입을 수용한다"
         }
       },
       "required": [
@@ -915,6 +922,12 @@
             "control_mode": {
               "enum": [
                 "tool_approval"
+              ]
+            },
+            "session_mode": {
+              "enum": [
+                "oneshot",
+                "multiturn"
               ]
             }
           },
@@ -958,6 +971,12 @@
               "enum": [
                 "tool_approval",
                 "container_only"
+              ]
+            },
+            "session_mode": {
+              "enum": [
+                "oneshot",
+                "multiturn"
               ]
             }
           },
@@ -1014,6 +1033,12 @@
               "enum": [
                 "tool_approval",
                 "container_only"
+              ]
+            },
+            "session_mode": {
+              "enum": [
+                "oneshot",
+                "multiturn"
               ]
             }
           },

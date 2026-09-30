@@ -23,7 +23,17 @@ import (
 // Claude executable is inside the world; this process only speaks the
 // host-only ProcessEndpoint and parses the native bytes it receives. The
 // direct procgroup branch remains in adapter.go for world_backend:none.
-func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cfg Config, w *wireWriter, approvals approvalTransport, scanner *bufio.Scanner) error {
+func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cfg Config, w *wireWriter, approvals approvalTransport, scanner *bufio.Scanner, task gen.TaskPayload) error {
+	var firstTurn []byte
+	if cfg.multiturn() {
+		// multiturn: 지시는 argv가 아니라 첫 stream-json user 메시지다
+		// (ContainerArgvFor). spawn payload instruction이 그 durable 기록이다.
+		line, err := userMessageLine(task.Instruction)
+		if err != nil {
+			return fmt.Errorf("claudecode: 첫 user 메시지 인코딩: %w", err)
+		}
+		firstTurn = append(line, '\n')
+	}
 	process, err := worldadapter.ConnectProcess(ctx, cfg.ProcessEndpoint, cfg.WorldSpanID)
 	if err != nil {
 		return fmt.Errorf("claudecode: process endpoint: %w", err)
@@ -77,13 +87,21 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 		_ = process.Stop(stopCtx, "claudecode approval failure")
 	})
 	startDone := make(chan error, 1)
-	go func() { startDone <- process.StartWithoutStdin(ctx) }()
-
+	stdinReady := make(chan struct{})
 	parser := NewParser()
+	if cfg.multiturn() {
+		parser = NewMultiturnParser()
+		go func() {
+			startDone <- process.StartWithStdinOpen(ctx, firstTurn, func() { close(stdinReady) })
+		}()
+	} else {
+		go func() { startDone <- process.StartWithoutStdin(ctx) }()
+	}
+
 	readyEmitted := false
 	adapterDone := make(chan struct{})
 	commandErr := make(chan error, 1)
-	go monitorWorldCommands(scanner, parser, process, approvals, adapterDone, commandErr)
+	go monitorWorldCommands(scanner, parser, process, approvals, adapterDone, commandErr, cfg.multiturn(), stdinReady)
 
 	native := bufio.NewScanner(stdoutR)
 	native.Buffer(make([]byte, 0, 64*1024), MaxLineBytes)
@@ -169,6 +187,14 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 	select {
 	case cmdErr = <-commandErr:
 	default:
+	}
+	if pendingDone == nil && handlerErr == nil {
+		// multiturn: 마지막 턴 result가 세션의 terminal done이 된다.
+		turnDone, err := parser.TurnDone()
+		if err != nil {
+			handlerErr = err
+		}
+		pendingDone = turnDone
 	}
 	drain := procgroup.DrainResult{HandlerErr: handlerErr, ScanErr: scanErr, ExitErr: exitErr}
 	doneEvent, finishErr := finishNative(drain, pendingDone, parser.StopRequested())
@@ -279,7 +305,7 @@ func monitorTokenExpiry(expiresAtUnixMs int64, processDone <-chan struct{}, stop
 	}
 }
 
-func monitorWorldCommands(scanner *bufio.Scanner, parser *Parser, process *worldadapter.ProcessClient, approvals approvalTransport, adapterDone <-chan struct{}, result chan<- error) {
+func monitorWorldCommands(scanner *bufio.Scanner, parser *Parser, process *worldadapter.ProcessClient, approvals approvalTransport, adapterDone <-chan struct{}, result chan<- error, multiturn bool, stdinReady <-chan struct{}) {
 	fail := func(err error) {
 		approvals.denyAll("어댑터 command 오류", true)
 		result <- err
@@ -319,8 +345,32 @@ func monitorWorldCommands(scanner *bufio.Scanner, parser *Parser, process *world
 				return
 			}
 		case gen.CommandCmdMessage:
-			fail(fmt.Errorf("claudecode: %w — Claude 단발 print 세션에서 지원되지 않음", errMessageUnsupported))
-			return
+			if !multiturn {
+				fail(fmt.Errorf("claudecode: %w — Claude 단발 print 세션에서 지원되지 않음", errMessageUnsupported))
+				return
+			}
+			var message gen.MessagePayload
+			if err := json.Unmarshal(cmd.Payload, &message); err != nil {
+				fail(fmt.Errorf("claudecode: %w: %v", errInboundContract, err))
+				return
+			}
+			// 첫 턴이 stdin에 ACK된 뒤에만 후속 턴을 쓴다 — 그 전의 StdinData는
+			// broker가 상태 위반으로 거부한다. 호스트 seam은 이 명령을 보내기
+			// 전에 user/message를 durable 기록했다(FR-LOG-03).
+			select {
+			case <-stdinReady:
+			case <-adapterDone:
+				result <- nil
+				return
+			}
+			line, err := userMessageLine(message.Text)
+			if err == nil {
+				err = process.WriteStdin(context.Background(), append(line, '\n'))
+			}
+			if err != nil {
+				fail(fmt.Errorf("claudecode: %w: %v", errMessageWrite, err))
+				return
+			}
 		case gen.CommandCmdTask:
 			fail(fmt.Errorf("claudecode: %w", errDuplicateTask))
 			return

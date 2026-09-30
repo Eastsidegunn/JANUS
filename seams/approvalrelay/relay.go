@@ -33,6 +33,13 @@ func (r *UnixApprovalRelay) SetStopHandler(cb func(Message), budget func() bool,
 	}
 }
 
+// SetMessageHandler installs the session-owned send_message delivery path (T25).
+func (r *UnixApprovalRelay) SetMessageHandler(h MessageHandler) {
+	if r.server != nil {
+		r.server.SetMessageHandler(h)
+	}
+}
+
 func NewServerApprovalRelay(server *Server, cfg RelayConfig) (*UnixApprovalRelay, error) {
 	if server == nil {
 		return nil, fmt.Errorf("approval relay server is nil")

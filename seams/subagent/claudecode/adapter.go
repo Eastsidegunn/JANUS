@@ -33,6 +33,10 @@ const (
 	worldProcessLeaseEnv       = "HX_WORLD_PROCESS_LEASE_ID"
 	worldProcessControlEnv     = "HX_WORLD_PROCESS_CONTROL_CAPABILITY"
 	worldProcessOutputEnv      = "HX_WORLD_PROCESS_OUTPUT_CAPABILITY"
+	// sessionModeEnv carries the durable spawn payload session_mode
+	// (SCP-T25-001 §2) from the host seam to this adapter process. The host
+	// seam (seams/subagent) writes the same name; absence means oneshot.
+	sessionModeEnv = "HX_SESSION_MODE"
 
 	// C안(제안서 §7.2): user settings를 제외하고, 이 인라인 PreToolUse
 	// hook만 명시적으로 주입한다. --bare는 OAuth/keychain을 읽지 않으므로
@@ -53,6 +57,7 @@ var (
 	errApprovalHandshake  = errors.New("승인 handshake 실패")
 	errDuplicateApproval  = errors.New("중복 approval_response")
 	errTokenExpired       = errors.New("token expired")
+	errMessageWrite       = errors.New("후속 메시지 주입 실패")
 )
 
 // Config contains host-controlled process settings. ClaudeBin is a single
@@ -66,6 +71,13 @@ type Config struct {
 	ApprovalEndpoint     world.ApprovalEndpoint
 	WorldSpanID          string
 	TokenExpiresAtUnixMs int64
+	// SessionMode is the spawn payload session_mode. Empty means oneshot
+	// (SCP-T25-001 §2); multiturn is accepted only on the local-podman branch.
+	SessionMode gen.SubagentSpawnPayloadSessionMode
+}
+
+func (c Config) multiturn() bool {
+	return c.SessionMode == gen.SubagentSpawnPayloadSessionModeMultiturn
 }
 
 type approvalTransport interface {
@@ -121,17 +133,18 @@ func ConfigFromEnv() Config {
 		worldApprovalSpanEnv, worldAdapterSpanEnv, approvalSocketEnv,
 		worldProcessNetworkEnv, worldProcessAddressEnv, worldProcessLeaseEnv,
 		worldProcessControlEnv, worldProcessOutputEnv,
-		world.ClaudeOAuthTokenEnv,
+		world.ClaudeOAuthTokenEnv, sessionModeEnv,
 	} {
 		env = removeEnv(env, key)
 	}
+	sessionMode := gen.SubagentSpawnPayloadSessionMode(os.Getenv(sessionModeEnv))
 	// hxapprove is installed beside the adapter binary. Prepending exactly that
 	// directory keeps the approved inline hook command constant in one place.
 	if executable, err := os.Executable(); err == nil {
 		dir := filepath.Dir(executable)
 		env = replaceEnv(env, "PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
-	return Config{ClaudeBin: bin, Env: env, ProcessEndpoint: processEndpoint, ApprovalEndpoint: endpoint, WorldSpanID: spanID, TokenExpiresAtUnixMs: tokenExpiry}
+	return Config{ClaudeBin: bin, Env: env, ProcessEndpoint: processEndpoint, ApprovalEndpoint: endpoint, WorldSpanID: spanID, TokenExpiresAtUnixMs: tokenExpiry, SessionMode: sessionMode}
 }
 
 func replaceEnv(env []string, key, value string) []string {
@@ -199,6 +212,17 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 	if cfg.TokenExpiresAtUnixMs < 0 {
 		return fmt.Errorf("claudecode: token expiry metadata is invalid")
 	}
+	switch cfg.SessionMode {
+	case "", gen.SubagentSpawnPayloadSessionModeOneshot:
+	case gen.SubagentSpawnPayloadSessionModeMultiturn:
+		// 다중 턴은 컨테이너 모드(SCP-T25-001) 전용이다. world_backend:none
+		// host procgroup 분기에는 stdin 주입 경로를 만들지 않는다.
+		if cfg.ProcessEndpoint == (world.ProcessEndpoint{}) {
+			return fmt.Errorf("claudecode: session_mode multiturn은 local-podman process endpoint에서만 지원")
+		}
+	default:
+		return fmt.Errorf("claudecode: 미지 session_mode %q", cfg.SessionMode)
+	}
 	vals, err := validate.New()
 	if err != nil {
 		return err
@@ -225,7 +249,7 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 	}
 	defer approvals.Close()
 	if cfg.ProcessEndpoint != (world.ProcessEndpoint{}) {
-		return runWorldProcess(ctx, in, stderr, cfg, w, approvals, scanner)
+		return runWorldProcess(ctx, in, stderr, cfg, w, approvals, scanner, task)
 	}
 
 	// task.Workspace는 policy/T10이 준비한 pristine 작업공간이다. Claude의
@@ -356,6 +380,7 @@ func terminalCause(err error) string {
 		{errDuplicateApproval, "중복 approval_response"},
 		{errAuthenticationFailed, "Claude 인증 실패"},
 		{errTokenExpired, "token expired"},
+		{errMessageWrite, "후속 메시지 주입 실패"},
 	} {
 		if errors.Is(err, item.target) {
 			return item.text
@@ -445,17 +470,48 @@ func claudeCommand(cfg Config, task gen.TaskPayload) []string {
 
 // ContainerArgv builds the in-container Claude PID1 command. Host and container
 // modes share this definition so instruction, flags, and approval hooks cannot drift.
+// It is the oneshot (T24) form; ContainerArgvFor owns the session-mode branch.
 func ContainerArgv(bin, instruction string) []string {
-	return []string{
-		bin,
-		"-p", instruction,
+	return ContainerArgvFor(bin, instruction, gen.SubagentSpawnPayloadSessionModeOneshot)
+}
+
+// ContainerArgvFor is the single source of the Claude PID1 argv for every
+// session mode (SCP-T25-001). oneshot passes the instruction as the -p prompt
+// and is byte-identical to the T24 argv. multiturn reads user turns as
+// stream-json from stdin: the instruction is not an argv prompt but the first
+// stdin user message (userMessageLine), and stdin stays open after the first
+// result so later send_message turns can be injected. Isolation flags and the
+// approval hook are identical in both modes.
+func ContainerArgvFor(bin, instruction string, mode gen.SubagentSpawnPayloadSessionMode) []string {
+	head := []string{bin, "-p", instruction}
+	if mode == gen.SubagentSpawnPayloadSessionModeMultiturn {
+		head = []string{bin, "-p", "--input-format", "stream-json"}
+	}
+	return append(head,
 		"--output-format", "stream-json",
 		"--verbose",
 		"--no-session-persistence",
 		"--permission-mode", "manual",
 		"--setting-sources", claudeSettingSources,
 		"--settings", claudeApprovalHookSettings,
+	)
+}
+
+// userMessageLine encodes one stream-json user turn for Claude's
+// `--input-format stream-json` stdin (no trailing newline).
+func userMessageLine(text string) ([]byte, error) {
+	type block struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
 	}
+	type message struct {
+		Role    string  `json:"role"`
+		Content []block `json:"content"`
+	}
+	return json.Marshal(struct {
+		Type    string  `json:"type"`
+		Message message `json:"message"`
+	}{Type: "user", Message: message{Role: "user", Content: []block{{Type: "text", Text: text}}}})
 }
 
 // finishNative fixes the DrainResult precedence at the adapter boundary:

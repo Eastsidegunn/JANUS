@@ -294,3 +294,37 @@ func TestGenTypesRoundTrip(t *testing.T) {
 		t.Errorf("생성 타입 재직렬화가 스키마를 위반: %v", err)
 	}
 }
+
+// SCP-T25-001 §2: spawn payload session_mode는 optional enum(oneshot|multiturn)
+// 이다. 부재 = oneshot(하위 호환), 미지 값·비문자열은 모든 분기에서 거부한다.
+func TestValidateSpawnSessionMode(t *testing.T) {
+	v := newV(t)
+	none := func(extra string) string {
+		return envelope(`"kind":"subagent/spawn","payload":{"adapter":"null","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"none","control_mode":"tool_approval"` + extra + `}`)
+	}
+	local := func(extra string) string {
+		return envelope(`"kind":"subagent/spawn","payload":{"adapter":"claudecode","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}]` + extra + `}`)
+	}
+	extension := func(extra string) string {
+		return envelope(`"kind":"subagent/spawn","payload":{"adapter":"claudecode","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}],"extensions":[{"name":"a","version":"1.0.0","integrity":"sha256:` + hex64 + `","source":"registry.example","artifact_digest":"sha256:` + hex64 + `"}]` + extra + `}`)
+	}
+	for name, build := range map[string]func(string) string{"none": none, "local": local, "extension": extension} {
+		for _, extra := range []string{``, `,"session_mode":"oneshot"`, `,"session_mode":"multiturn"`} {
+			if err := v.ValidateRecord([]byte(build(extra))); err != nil {
+				t.Errorf("%s %q: 유효 샘플 거부: %v", name, extra, err)
+			}
+		}
+		for _, extra := range []string{`,"session_mode":"interactive"`, `,"session_mode":""`, `,"session_mode":null`, `,"session_mode":1`, `,"session_mode":"MULTITURN"`} {
+			if err := v.ValidateRecord([]byte(build(extra))); err == nil {
+				t.Errorf("%s %q: 위반 샘플이 통과함", name, extra)
+			}
+		}
+	}
+	var p gen.SubagentSpawnPayload
+	if err := json.Unmarshal([]byte(`{"adapter":"a","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"none","control_mode":"tool_approval"}`), &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.SessionMode != nil {
+		t.Fatalf("부재 session_mode가 값으로 복원됨: %v", *p.SessionMode)
+	}
+}

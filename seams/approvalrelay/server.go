@@ -35,6 +35,8 @@ type Server struct {
 	stops          map[stopKey]Result
 	terminalRef    int64
 	connSem        chan struct{}
+	session        SessionControl
+	messageHandler MessageHandler
 }
 type PendingMeta struct {
 	RequestDigest  string `json:"request_digest"`
@@ -56,6 +58,7 @@ type Result struct {
 	ExpiresAt      int64  `json:"expires_at,omitempty"`
 	StopID         string `json:"stop_id,omitempty"`
 	TerminalRef    int64  `json:"terminal_ref,omitempty"`
+	MessageSeq     int64  `json:"message_seq,omitempty"`
 }
 type Message struct {
 	Op           string `json:"op"`
@@ -68,6 +71,10 @@ type Message struct {
 	StopID       string `json:"stop_id,omitempty"`
 	TargetSpanID string `json:"target_span_id,omitempty"`
 	EvidenceSeq  int64  `json:"evidence_seq,omitempty"`
+	// T25 send_message / events_tail. session_id is the session trace_id.
+	SessionID string `json:"session_id,omitempty"`
+	Text      string `json:"text,omitempty"`
+	FromSeq   int64  `json:"from_seq,omitempty"`
 }
 
 const maxRelayMessage = 64 * 1024
@@ -151,6 +158,17 @@ func (s *Server) serve(c net.Conn) {
 			callback(m)
 		}
 		_ = enc.Encode(r)
+		return
+	}
+	// T25 session ops, multiplexed like T19 stop. Both run without holding
+	// s.mu across the handler / log read and answer exactly one response per
+	// connection (no streaming, so a departing consumer leaves nothing open).
+	switch m.Op {
+	case "send_message":
+		_ = enc.Encode(s.handleSendMessage(m))
+		return
+	case "events_tail":
+		_ = enc.Encode(s.handleEventsTail(m))
 		return
 	}
 	s.mu.Lock()

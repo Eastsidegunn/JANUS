@@ -121,6 +121,11 @@ func runProduction(ctx context.Context, run productionRun) error {
 	reject := func(rerr *runError) error {
 		return rejectControl(run.Stdout, req.OperationID, rerr)
 	}
+	if gen.SubagentSpawnPayloadSessionMode(req.SessionMode) == gen.SubagentSpawnPayloadSessionModeMultiturn && run.ApprovalEndpoint == "" {
+		// send_message·stop은 제어 socket으로만 도달한다. socket 없는
+		// multiturn은 후속 턴도 종료 명령도 받을 수 없으므로 claim 전에 거부.
+		return reject(newRunError(codeUnsupportedContract, "session_mode multiturn에는 --approval-endpoint 제어 socket이 필요"))
+	}
 
 	// 정책 pin 재검증: 사전 dump-config 시점에 고정한 파일 내용 hash와
 	// 실행 시점의 파일이 일치해야 한다. pin 없는 사전 출력만으로 실행을
@@ -276,7 +281,7 @@ func runProduction(ctx context.Context, run productionRun) error {
 	return nil
 }
 
-func selectApprovalDecider(endpoint, traceID, policyHash string, timeoutMs int64) (policy.ApprovalDecider, io.Closer, *approvalrelay.Server, error) {
+func selectApprovalDecider(endpoint, traceID, policyHash string, timeoutMs int64, session approvalrelay.SessionControl) (policy.ApprovalDecider, io.Closer, *approvalrelay.Server, error) {
 	if endpoint == "" {
 		return policy.DenyAll{}, nil, nil, nil
 	}
@@ -285,6 +290,9 @@ func selectApprovalDecider(endpoint, traceID, policyHash string, timeoutMs int64
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// 세션 바인딩은 listen 전에 둔다 — 첫 연결부터 send_message·events_tail이
+	// 결정적으로 판정된다(T25).
+	srv.SetSession(session)
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Listen() }()
 	deadline := time.Now().Add(2 * time.Second)
@@ -451,7 +459,15 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 	if timeoutMs <= 0 || timeoutMs > 600000 {
 		timeoutMs = 600000
 	}
-	decider, closer, srv, err := selectApprovalDecider(l.approvalEndpoint, in.TraceID, in.PolicyHash, timeoutMs)
+	sessionMode := gen.SubagentSpawnPayloadSessionMode(in.Request.SessionMode)
+	multiturn := sessionMode == gen.SubagentSpawnPayloadSessionModeMultiturn
+	var events approvalrelay.EventSource
+	if in.Log != nil {
+		// events_tail은 세션 로그 Reader의 읽기 전용 사영이다 — writer 없음.
+		events = in.Log.Reader.ReadFrom
+	}
+	decider, closer, srv, err := selectApprovalDecider(l.approvalEndpoint, in.TraceID, in.PolicyHash, timeoutMs,
+		approvalrelay.SessionControl{SessionID: in.TraceID, Multiturn: multiturn, Events: events})
 	if err != nil {
 		return gen.DonePayload{}, err
 	}
@@ -468,7 +484,7 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 	}
 	agentArgv := adapter.AgentArgv
 	if in.Request.AdapterID == "claudecode" {
-		agentArgv = claudecode.ContainerArgv(adapter.AgentArgv[0], in.Request.TaskRef.Instruction)
+		agentArgv = claudecode.ContainerArgvFor(adapter.AgentArgv[0], in.Request.TaskRef.Instruction, sessionMode)
 	}
 	childSpan := logd.NewSpanID()
 	spawnSpec := world.NewSpawnSpec(
@@ -485,7 +501,7 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 		Backend: l.backend, SpawnSpec: spawnSpec, Writer: in.Log.Writer,
 		TraceID: in.TraceID, ParentSpan: in.RootSpan,
 		AdapterCommand: []string{adapter.Bin}, AdapterName: in.Request.AdapterID,
-		ControlMode: controlMode, AdapterStderr: os.Stderr,
+		ControlMode: controlMode, AdapterStderr: os.Stderr, SessionMode: sessionMode,
 		// FR-SBX-02: in.Sandbox.Workspace는 host mount 원본이며, 어댑터는
 		// local backend가 그 overlay를 노출하는 container 내부 경로를 받는다.
 		Instruction: in.Request.TaskRef.Instruction, Workspace: local.ContainerWorkspacePath,
@@ -512,6 +528,9 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 			}
 			_ = active.Subagent.Stop(reason)
 		}, nil, nil)
+		// T25 send_message: 세션 소유 subagent seam만 경유한다 — user/message
+		// durable 기록(단일 writer) → 어댑터 message 명령. 컨테이너 직접 접근 없음.
+		relay.SetMessageHandler(sessionMessageHandler(active.Subagent))
 	}
 	finalized := false
 	defer func() {
@@ -540,4 +559,22 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 		}
 	}
 	return done, nil
+}
+
+// sessionMessageHandler routes a relay send_message to the session-owned
+// subagent seam (T25): Send records user/message through the single writer and
+// only then delivers the adapter message command. The seam's sentinels map to
+// the relay's structured rejections here, keeping the seams import-free of
+// each other.
+func sessionMessageHandler(sub *subagent.Subagent) approvalrelay.MessageHandler {
+	return func(ctx context.Context, text string) (int64, error) {
+		seq, err := sub.Send(ctx, text)
+		switch {
+		case errors.Is(err, subagent.ErrNotMultiturn):
+			return seq, approvalrelay.ErrNotMultiturn
+		case errors.Is(err, subagent.ErrSessionTerminal):
+			return seq, approvalrelay.ErrSessionTerminal
+		}
+		return seq, err
+	}
 }
