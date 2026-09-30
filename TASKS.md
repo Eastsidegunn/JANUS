@@ -167,6 +167,13 @@
 - 계약: Rhizome 계약 무개정 예상(어댑터 내부 배선). 어긋나면 구현 전 회신.
 - 완료(리뷰어 검증): 구현자(codex astra) 산출 → 리뷰어 검토·`make ci` green(boundarylint 40패키지 linux+darwin·fixtures fingerprint 일치). 컨테이너 PID1=host `claudeCommand`와 동일 argv(`ContainerArgv` 단일 진실원), host가 JANUS task를 컨테이너 stdin에 미주입(`StartWithoutStdin`, worldadapter의 task-via-stdin은 무손상), worldLauncher가 claudecode에만 ContainerArgv 적용. 테스트 강화(drift 차단·실 broker 종단·argv 분기). Rhizome 계약 ② 무개정. 실 claude 종단은 [H] smoke 잔여.
 
+## T25. 다중 턴 세션 — send_message 주입 + 세션 정보 emit (SCP-T25-001)
+- 내용: Rhizome이 격리 컨테이너의 에이전트 세션을 다중 턴으로 구동한다. claudecode 어댑터에 multiturn 모드 opt-in: 컨테이너 claude를 `--input-format stream-json`으로 실행, 첫 result 후 stdin 미폐쇄, 기존 승인 소켓에 `send_message{session_id, text}` op 다중화(T19 stop 선례)로 후속 user 메시지 주입. 아웃바운드로 세션별 usage(호출별 토큰)·last-activity·상태(running|exited|exit_code)를 **세션 로그의 읽기 전용 사영**으로 emit(usage_in/out·ts·spawn/done 파생, 제2 writer 금지, seq 연속). 종료는 정상 done 또는 Rhizome이 판단해 호출하는 기존 T19 stop뿐 — **JANUS 런타임 backstop(예산/idle 강제·max_turns) 신설 금지**([H] 결정: 판단 주체=Rhizome, orphan 위험 명시 수용). 기존 접수 시점 검증(T17 BUDGET_INVALID·정책 pin)은 존치. 이벤트 kind·audit 무변경(`subagent/message`·`tool_call` 재사용), 승인 축 무손상(후속 턴 tool_use도 기존 relay 경유, DenyAll 기본 유지).
+- 대상: FR-ADP-02(§5.2 메시지)·FR-ADP-10(endpoint 경계)·FR-SBX-06(spawn 메타)·FR-LOG-01/02(emit 사영). spawn payload `session_mode` 필드는 SCP-T25-001 §2 — 스키마 커밋은 T1 조항대로 [H] 리뷰 후.
+- 근거: [H] 최종 비준 2026-09-30(Rhizome 채널 경유, docs/scp-t25-multiturn-session.md 결정 기록). 요구 확정: 갈래 A(다중 턴, 사람-셸 아님), attach-PTY 브리프 폐기. 왕복 기록은 Rhizome 세션 scratchpad janus-session-brief-reply.md.
+- 완료 기준: (a) 실행 중 multiturn 세션에 send_message → 후속 턴의 message/tool_call이 기존 kind·연속 seq로 기록, (b) 후속 턴 tool_use가 기존 승인 relay 경유(자동 allow 경로 0), (c) multiturn 세션 stop이 T19 의미론 무손상(멱등·already_terminal 포함), (d) emit 사영 == 세션 로그 재계산(순수 함수, T18 Rebuild 방식)·제2 writer 부재, (e) oneshot 경로(T24 배선)·비-multiturn 세션의 send_message 결정적 거부 회귀 — `make ci` green + t15 게이트 무손상. 실 claude 다중 턴 종단은 [H] smoke.
+- 주의: 계약 확장(send_message·emit)은 Rhizome 소유 스키마 — JANUS에 계약 파일 생성 금지, SCP §3을 회신으로 갈음. D-track approval 데드락은 본 태스크 범위 밖(재현 자료 Rhizome→JANUS 대기). codex 다중 턴은 후속.
+
 ## 이후 (T20+, 착수 전 사람 판단 필요)
 - pi / OpenClaw / 사내 에이전트 어댑터 (contracts 안정성의 성적표)
 - exec 감사(eBPF), Postgres store, 규칙 엔진 — 전부 명세 부록 A의 미결 확정 후.
