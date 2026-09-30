@@ -208,6 +208,13 @@ const (
 	SubagentSpawnPayloadControlModeContainerOnly SubagentSpawnPayloadControlMode = "container_only"
 )
 
+type SubagentSpawnPayloadSessionMode string
+
+const (
+	SubagentSpawnPayloadSessionModeOneshot   SubagentSpawnPayloadSessionMode = "oneshot"
+	SubagentSpawnPayloadSessionModeMultiturn SubagentSpawnPayloadSessionMode = "multiturn"
+)
+
 type SubagentSpawnPayloadWorldBackend string
 
 const (
@@ -225,6 +232,7 @@ type SubagentSpawnPayload struct {
 	Instruction  string                           `json:"instruction"`
 	Mounts       []SubagentSpawnMount             `json:"mounts,omitempty"`
 	ProfileID    *string                          `json:"profile_id,omitempty"`
+	SessionMode  *SubagentSpawnPayloadSessionMode `json:"session_mode,omitempty"`
 	WorldBackend SubagentSpawnPayloadWorldBackend `json:"world_backend"`
 }
 
