@@ -26,6 +26,19 @@ T23은 벤더 게이트웨이(CLIProxyAPI)를 "운영자가 JANUS 밖에 배치"
 [H]는 프록시 우회가 아니라 **격리를 켠 채 증명**하기를 결정했다(B). 대안 A(게이트웨이 공개
 배치)는 JANUS 무변경이지만 구독 게이트웨이를 인터넷에 노출하는 영구적 자세 변경이라 기각.
 
+### 1.1 선행 조건 — 본 SCP만으로는 프록시-ON이 돌지 않는다 (Run C ②, 2026-10-02)
+marker에서 agent 컨테이너는 `hx-<span>-internal`에만, proxy는 `hx-<span>-egress`에만 붙어
+**공유 네트워크가 없었다**(agent→proxy alias EAI_AGAIN, →10.89.11.2 EHOSTUNREACH). 그래서
+Run A의 "Request timed out"은 CGNAT 거부가 아니라 **프록시 미도달**이었고, collector/egress
+이벤트 0건도 그 때문이다(audit 경로 결함 아님). local.go:554의 설계는 proxy를
+`--network internal --network egress` 양쪽에 붙이지만, **podman 3.4.x의 `--network`는
+단일 플래그라 반복 시 마지막 값만 남는다**(4.0+에서 반복 가능). CI(podman 5.8)의 T10 게이트는
+agent→proxy→egress 관통을 증명하므로 설계 결함이 아닌 marker 환경 결함이다.
+→ 프록시-ON 종단은 **(1) marker 도달성 수리(podman 4.x+ 업그레이드 권고, 또는 로컬 패치) 선행
++ (2) 본 SCP** 둘 다 필요하다. (1)은 main 코드 과제가 아니며(3.4 호환을 main에 들이지 않는
+기존 결정 유지) [H] 환경 결정 사항. (1) 완료 판정: proxy Networks 2개 + Run C ②가
+403 + collector/egress deny 1건(가드 발화 확인).
+
 ## 2. 현황 사실 (코드)
 
 - 사이드카 = `hxegressproxy` 컨테이너 이미지(world-config `proxy_image` digest 핀). 인자:
@@ -110,5 +123,6 @@ durable 근거는 운영자 world-config 파일이다. spawn metadata에 pins를
 ## 8. 연관
 
 - D-track(world-모드 tool_use 정지)·합성 API 에러 정규화·컨테이너 tool_use 관통 게이트는 **별건
-  T27 후보**로 분리(본 SCP와 독립). Run C ②(비핀 deny + audit 0건 수수께끼)는 본 SCP와 독립이며
-  구현 전에 먼저 수행 권고 — audit 경로 결함이면 같은 사이클에 수리.
+  T27 후보**로 분리(본 SCP와 독립). Run C ②는 수행 완료(§1.1) — audit 경로 결함 없음 확인,
+  대신 marker 네트워크 도달성 결함 발견. 도달성 수리 후 Run C ②를 재수행해 가드 발화를 확인한
+  뒤, 본 SCP 재배포 후 Run C ①.
