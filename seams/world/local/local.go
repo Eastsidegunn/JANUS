@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,6 +117,10 @@ type Config struct {
 	ProxyIdentity        world.AgentIdentity
 	AuditQueueCapacity   int
 	ApprovalCapacity     int
+	// EgressPins are operator-declared gateway pins (SCP-T26-001, world-config
+	// egress_pins). They are passed to the sidecar as --pin and must lie
+	// within every spawn's merged egress allowlist (checked in Prepare).
+	EgressPins map[string]netip.AddrPort
 }
 
 // Backend owns the rootless Podman runtime, per-spawn networks, the trusted
@@ -127,6 +132,7 @@ type Backend struct {
 	proxyIdentity    world.AgentIdentity
 	auditCapacity    int
 	approvalCapacity int
+	egressPins       map[string]netip.AddrPort
 	runner           commandRunner
 	deviceID         func(string) (uint64, error)
 	newEffectBroker  auditBrokerFactory
@@ -169,6 +175,10 @@ func newBackend(config Config, runner commandRunner, deviceID func(string) (uint
 	if config.ApprovalCapacity < 0 {
 		return nil, fmt.Errorf("world/local: approval broker 설정 위반")
 	}
+	egressPins, err := normalizePinMap(config.EgressPins)
+	if err != nil {
+		return nil, fmt.Errorf("world/local: egress pins: %w", err)
+	}
 	resolved, err := filepath.EvalSymlinks(stateRoot)
 	if err != nil {
 		return nil, fmt.Errorf("world/local: state root 실경로: %w", err)
@@ -184,7 +194,7 @@ func newBackend(config Config, runner commandRunner, deviceID func(string) (uint
 		stateRoot: resolved, proxyRepository: config.ProxyImageRepository,
 		proxyDigest: config.ProxyImageDigest, proxyIdentity: config.ProxyIdentity,
 		auditCapacity: config.AuditQueueCapacity, approvalCapacity: config.ApprovalCapacity,
-		runner: runner, deviceID: deviceID,
+		runner: runner, deviceID: deviceID, egressPins: egressPins,
 		newEffectBroker: brokerFactory,
 	}, nil
 }
@@ -260,6 +270,9 @@ func (b *Backend) Prepare(ctx context.Context, spec world.SpawnSpec) (prepared w
 	allowlist, err := egressproxy.NormalizeAllowlist(spec.Policy().Egress())
 	if err != nil {
 		return nil, fmt.Errorf("world/local: egress policy: %w", err)
+	}
+	if err := egressPinsWithinAllowlist(b.egressPins, allowlist); err != nil {
+		return nil, fmt.Errorf("world/local: %w", err)
 	}
 	if len(spec.Policy().Extensions()) > 0 && spec.ExtensionBundle().IsZero() {
 		return nil, fmt.Errorf("world/local: 확장 선언은 검증된 provisioning bundle이 필요함")
@@ -566,6 +579,10 @@ func (b *Backend) proxyCreateArgs(
 		"--listen", ":"+proxyListenPort, "--audit-socket", proxySocketPath)
 	for _, domain := range allowlist {
 		args = append(args, "--allow", domain)
+	}
+	// SCP-T26-001: with no pins the argv is byte-identical to the pre-pin form.
+	for _, domain := range egressproxy.PinDomains(b.egressPins) {
+		args = append(args, "--pin", domain+"="+b.egressPins[domain].String())
 	}
 	return args
 }

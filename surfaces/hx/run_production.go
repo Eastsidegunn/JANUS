@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"time"
 
@@ -64,6 +65,12 @@ func runProductionCmd(requestPath, profilePath string, overlayPaths []string, ac
 // 생산 구현은 worldLauncher 하나뿐이며 startProductionWorld만 경유한다.
 type sessionLauncher interface {
 	Launch(ctx context.Context, in sessionLaunch) (gen.DonePayload, error)
+}
+
+// preClaimChecker는 launcher가 실효 sandbox와 자기 운영자 설정의 정합을
+// key claim 이전에 검사하는 선택적 단계다(SCP-T26-001 §3.3).
+type preClaimChecker interface {
+	CheckBeforeClaim(sandbox policy.SandboxConfig) error
 }
 
 type sessionLaunch struct {
@@ -173,6 +180,14 @@ func runProduction(ctx context.Context, run productionRun) error {
 			"요청 budget %+v가 병합 정책 budget %+v를 초과", req.Budget, sandbox.Budget))
 	}
 	sandbox.Budget = gen.Budget{Tokens: req.Budget.Tokens, TimeMs: req.Budget.TimeMs, MaxDepth: req.Budget.MaxDepth}
+	// SCP-T26-001 §3.3: 운영자 설정(egress_pins)과 병합 정책의 정합은 key
+	// claim 이전에 검사한다 — 어긋난 설정이 key를 소모하지 않는다(T17 P1).
+	// Backend.Prepare가 같은 검사를 다시 수행한다(fail-closed 이중화).
+	if checker, ok := run.Launcher.(preClaimChecker); ok {
+		if err := checker.CheckBeforeClaim(sandbox); err != nil {
+			return reject(newRunError(codePolicyDenied, "%v", err))
+		}
+	}
 
 	registry, err := accept.Open(run.AcceptRoot)
 	if err != nil {
@@ -378,6 +393,22 @@ type worldConfig struct {
 	StateRoot  string                        `json:"state_root"`
 	ProxyImage worldImageConfig              `json:"proxy_image"`
 	Adapters   map[string]worldAdapterConfig `json:"adapters"`
+	// EgressPins는 선언 게이트웨이 핀이다(SCP-T26-001, FR-SBX-03). 부재 =
+	// 빈 목록. 핀은 정책 allowlist를 넓히지 못하며 주소 해석 방식만 바꾼다.
+	EgressPins []worldEgressPin `json:"egress_pins,omitempty"`
+}
+
+type worldEgressPin struct {
+	Domain  string `json:"domain"`
+	Address string `json:"address"`
+}
+
+func (cfg worldConfig) egressPins() (map[string]netip.AddrPort, error) {
+	entries := make([]local.EgressPinConfig, 0, len(cfg.EgressPins))
+	for _, pin := range cfg.EgressPins {
+		entries = append(entries, local.EgressPinConfig{Domain: pin.Domain, Address: pin.Address})
+	}
+	return local.NormalizeEgressPins(entries)
 }
 
 type worldImageConfig struct {
@@ -429,6 +460,9 @@ func parseWorldConfig(data []byte) (worldConfig, error) {
 			return worldConfig{}, fmt.Errorf("world config: 어댑터 %q: %w", name, err)
 		}
 	}
+	if _, err := cfg.egressPins(); err != nil {
+		return worldConfig{}, fmt.Errorf("world config: egress_pins: %w", err)
+	}
 	return cfg, nil
 }
 
@@ -442,16 +476,31 @@ type worldLauncher struct {
 }
 
 func newWorldLauncher(cfg worldConfig) (*worldLauncher, error) {
+	pins, err := cfg.egressPins()
+	if err != nil {
+		return nil, fmt.Errorf("world config: egress_pins: %w", err)
+	}
 	backend, err := local.NewBackend(local.Config{
 		StateRoot:            cfg.StateRoot,
 		ProxyImageRepository: cfg.ProxyImage.Repository,
 		ProxyImageDigest:     cfg.ProxyImage.Digest,
 		ProxyIdentity:        world.AgentIdentity{UID: cfg.ProxyImage.UID, GID: cfg.ProxyImage.GID},
+		EgressPins:           pins,
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &worldLauncher{backend: backend, config: cfg}, nil
+}
+
+// CheckBeforeClaim는 핀 domain이 병합 정책 egress allowlist 안에 있는지
+// key claim 이전에 확인한다(SCP-T26-001 §3.3). Prepare가 같은 규칙을 재검사한다.
+func (l *worldLauncher) CheckBeforeClaim(sandbox policy.SandboxConfig) error {
+	pins, err := l.config.egressPins()
+	if err != nil {
+		return fmt.Errorf("world config: egress_pins: %w", err)
+	}
+	return local.ValidateEgressPinsWithinPolicy(pins, sandbox.Egress)
 }
 
 func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DonePayload, error) {
