@@ -3,8 +3,11 @@
 작성 2026-10-02, 리뷰어 세션. 근거 smoke: Run A(2026-10-02, marker) — 모든 턴이
 claude-code 합성 에러 "Request timed out"으로 종료, 원인은 egress proxy의 설계된 거부.
 
-> **결정 상태: [H] 방향 결정 B(2026-10-02, Rhizome 채널 경유) — 본 문안 비준 대기.**
-> 비준 기록 시 승인 주체 표기는 사실대로(`unverified-local-operator:H`). 비준 전 구현 금지.
+> **결정: 승인** (2026-10-02, 승인 주체 `unverified-local-operator:H` — [H] 지시 "PR #87
+> 처리해라"가 Rhizome 세션(rhizome-15) 경유로 전달됨, 리뷰어가 사실대로 기록). 선행 조건
+> 충족: §1.1 도달성은 marker podman 4.9.3/netavark 전환으로 해소, §6 Run C②는 runc4 세션에서
+> 충족(collector/egress deny 4건 — CGNAT 가드 발화·audit 정상 실증). 구현은 JANUS 구현자/
+> 리뷰어 분리 규율로, 코드 변경은 PR·CI green 후 머지.
 > contracts/·이벤트 스키마·Rhizome 계약 무변경. 변경은 world-config 형식(JANUS 소유
 > 운영자 설정)과 FR-SBX-03 가드의 선언적 예외 의미론이다.
 
