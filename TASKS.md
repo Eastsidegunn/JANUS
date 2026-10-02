@@ -174,6 +174,13 @@
 - 완료 기준: (a) 실행 중 multiturn 세션에 send_message → 후속 턴의 message/tool_call이 기존 kind·연속 seq로 기록, (b) 후속 턴 tool_use가 기존 승인 relay 경유(자동 allow 경로 0), (c) multiturn 세션 stop이 T19 의미론 무손상(멱등·already_terminal 포함), (d) emit 사영 == 세션 로그 재계산(순수 함수, T18 Rebuild 방식)·제2 writer 부재, (e) oneshot 경로(T24 배선)·비-multiturn 세션의 send_message 결정적 거부 회귀 — `make ci` green + t15 게이트 무손상. 실 claude 다중 턴 종단은 [H] smoke.
 - 주의: 계약 확장(send_message·emit)은 Rhizome 소유 스키마 — JANUS에 계약 파일 생성 금지, SCP §3을 회신으로 갈음. D-track approval 데드락은 본 태스크 범위 밖(재현 자료 Rhizome→JANUS 대기). codex 다중 턴은 후속.
 
+## T26. egress proxy 선언 게이트웨이 핀 예외 — world-config `egress_pins` (SCP-T26-001)
+- 내용: `isPublicIP`의 CGNAT(100.64/10) 거부로 사설/Tailscale 배치 게이트웨이(CLIProxyAPI)가 프록시 경유 불가한 제품 결함의 정식 수정. world-config optional `egress_pins[{domain,address}]`(claim 이전 `parseWorldConfig` 검증: domain은 `normalizeDomain`·IP 리터럴 금지·중복 금지, address는 정확한 ip:port·loopback/link-local/multicast/unspecified 거부, 상한 4). 사이드카 `--pin domain=ip:port` 전달. `authorize`는 **핀 도메인만** DNS 생략·핀 주소 dial·요청 port 일치 강제·`isPublicIP` 미적용; **allowlist 통과는 여전히 필수**(핀은 정책을 넓힐 수 없음). `Prepare`에서 핀 domain ∉ 병합 정책 allowlist → 거부(claim 이전). 비핀 경로 바이트 동일. CONNECT 443 규칙·audit 무변경. 핀은 정책 프로파일/overlay에 두지 않는다.
+- 대상: FR-SBX-03(기본차단·강제 프록시의 선언적 예외), FR-COL-03(audit 무변경), FR-SBX-05(백엔드 설정). contracts·egressPayload·Rhizome 계약 무변경.
+- 근거: docs/scp-t26-egress-pin.md — [H] 비준 2026-10-02(`unverified-local-operator:H`, Rhizome 경유). Run C②(runc4)로 가드 발화·audit 정상 실증, marker podman 4.9.3/netavark 전환으로 도달성 선행 조건 해소.
+- 완료 기준: (a) 핀 도메인 요청에서 Resolver 호출 0회·핀 주소 dial·allow audit 1건, (b) 핀 port 불일치 deny·비핀 CGNAT deny(기존 규칙), (c) 핀 domain ∉ allowlist → `Prepare` 거부·claim 미소모, (d) 불량 핀(loopback·호스트명·IP 리터럴 domain·중복·상한 초과) world-config 거부, (e) 비핀 회귀 — 기존 `proxy_test`·`local_test` 무수정 green, 핀 없을 때 `proxyCreateArgs` argv 바이트 동일 — `make ci` green + t15 게이트 무손상. 실물: Run C①(핀 게이트웨이 통과 + collector/egress allow 1건, 토큰 0, marker).
+- 주의: 비범위 = IP 리터럴 BASE_URL 허용·와일드카드 핀·프로파일 핀·프록시 우회 플래그·`isPublicIP` 규칙 완화(SCP §5). 배포 = hxegressproxy 이미지 재빌드(digest 갱신) + hx 재설치(Rhizome 세션). D-track·합성 API 에러 정규화·컨테이너 tool_use 관통 게이트는 T27 후보(별건).
+
 ## 이후 (T20+, 착수 전 사람 판단 필요)
 - pi / OpenClaw / 사내 에이전트 어댑터 (contracts 안정성의 성적표)
 - exec 감사(eBPF), Postgres store, 규칙 엔진 — 전부 명세 부록 A의 미결 확정 후.
