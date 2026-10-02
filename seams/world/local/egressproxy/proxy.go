@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,10 +53,15 @@ type Config struct {
 	Resolver  Resolver
 	Dial      DialContext
 	Now       func() time.Time
+	// Pins are operator-declared gateway pins (SCP-T26-001, world-config
+	// egress_pins). A pinned domain skips DNS and dials only the pinned
+	// address; it never widens Allowlist. New re-validates them fail-closed.
+	Pins map[string]netip.AddrPort
 }
 
 type Proxy struct {
 	allowlist []string
+	pins      map[string]netip.AddrPort
 	audit     AuditSink
 	resolver  Resolver
 	dial      DialContext
@@ -67,6 +73,14 @@ func New(config Config) (*Proxy, error) {
 		return nil, errors.New("egressproxy: audit sink가 없음")
 	}
 	allowlist, err := NormalizeAllowlist(config.Allowlist)
+	if err != nil {
+		return nil, fmt.Errorf("egressproxy: %w", err)
+	}
+	pinList := make([]Pin, 0, len(config.Pins))
+	for domain, address := range config.Pins {
+		pinList = append(pinList, Pin{Domain: domain, Address: address})
+	}
+	pins, err := NormalizePins(pinList)
 	if err != nil {
 		return nil, fmt.Errorf("egressproxy: %w", err)
 	}
@@ -84,7 +98,7 @@ func New(config Config) (*Proxy, error) {
 		now = time.Now
 	}
 	return &Proxy{
-		allowlist: allowlist, audit: config.Audit, resolver: resolver, dial: dial, now: now,
+		allowlist: allowlist, pins: pins, audit: config.Audit, resolver: resolver, dial: dial, now: now,
 	}, nil
 }
 
@@ -221,6 +235,9 @@ func (p *Proxy) authorize(ctx context.Context, target, method string, size int64
 	if !p.allowed(domain) {
 		return "", "", nil, false, p.auditDeny(ctx, domain, method, size, "domain이 allowlist 밖")
 	}
+	if pin, pinned := p.pins[domain]; pinned {
+		return p.authorizePinned(ctx, domain, port, method, size, pin)
+	}
 	addresses, err := p.resolver.LookupIPAddr(ctx, domain)
 	if err != nil || len(addresses) == 0 {
 		reason := "DNS 결과 없음"
@@ -245,6 +262,27 @@ func (p *Proxy) authorize(ctx context.Context, target, method string, size int64
 		return "", "", nil, false, err
 	}
 	return domain, port, addresses[0].IP, true, nil
+}
+
+// authorizePinned is the SCP-T26-001 declared-gateway exception. It runs only
+// after the allowlist check passed: no DNS lookup, the pinned IP replaces the
+// resolved one (the pin's own validation replaces isPublicIP), the request
+// port must equal the pinned port, and CONNECT stays 443-only.
+func (p *Proxy) authorizePinned(ctx context.Context, domain, port, method string, size int64, pin netip.AddrPort) (string, string, net.IP, bool, error) {
+	if port != strconv.FormatUint(uint64(pin.Port()), 10) {
+		return "", "", nil, false, p.auditDeny(ctx, domain, method, size, "pinned port 불일치")
+	}
+	if method == http.MethodConnect && port != connectPort {
+		return "", "", nil, false, p.auditDeny(ctx, domain, method, size, "CONNECT는 port 443만 허용")
+	}
+	attempt := Attempt{
+		Domain: domain, Method: method, RequestBytes: size,
+		AtUnixMs: p.now().UnixMilli(), Decision: DecisionAllow,
+	}
+	if err := p.audit.Submit(ctx, attempt); err != nil {
+		return "", "", nil, false, err
+	}
+	return domain, port, net.IP(pin.Addr().AsSlice()), true, nil
 }
 
 func (p *Proxy) auditDeny(ctx context.Context, domain, method string, size int64, reason string) error {
