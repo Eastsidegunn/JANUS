@@ -1,0 +1,330 @@
+package validate
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/Eastsidegunn/JANUS/contracts/gen"
+)
+
+func newV(t *testing.T) *Validators {
+	t.Helper()
+	v, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+const (
+	trace = `"11111111111111111111111111111111"`
+	span  = `"2222222222222222"`
+)
+
+// envelope은 유효한 공통 필드 위에 kind/payload/추가 필드를 얹는다.
+func envelope(rest string) string {
+	return `{"seq":1,"ts":1700000000000,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"parent",` + rest + `}`
+}
+
+func TestValidateRecordValid(t *testing.T) {
+	v := newV(t)
+	cases := map[string]string{
+		"열린 kind":              envelope(`"kind":"session/start","payload":{}`),
+		"열린 kind + 자유 payload": envelope(`"kind":"assistant/message","payload":{"text":"hi"}`),
+		"subagent actor":       `{"seq":2,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"parent_span_id":` + span + `,"actor":"subagent:claude-code:1","kind":"subagent/ready","payload":{"grade":"observable"}}`,
+		"raw와 usage":           envelope(`"kind":"tool/result","payload":{"status":"ok","output":{"stdout":"x"}},"raw":"aGVsbG8=","usage_in":10,"usage_out":20`),
+		// T5 확정 payload (2026-08-17 [H] 승인)
+		"user/message":         envelope(`"kind":"user/message","payload":{"text":"질문"}`),
+		"assistant/message":    envelope(`"kind":"assistant/message","payload":{"text":"응답"}`),
+		"tool/call":            envelope(`"kind":"tool/call","payload":{"name":"bash","args":{"cmd":"ls"}}`),
+		"tool/result rejected": envelope(`"kind":"tool/result","payload":{"status":"rejected","reason":"훅 거부"}`),
+		"tool/result error":    envelope(`"kind":"tool/result","payload":{"status":"error","error":"실행 실패"}`),
+		"turn 경계 빈 객체":         envelope(`"kind":"turn/start","payload":{}`),
+		// T9 확정 subagent payload (2026-08-18 [H] 승인)
+		"subagent/ready":                envelope(`"kind":"subagent/ready","payload":{"grade":"observable","model":"claude-opus-5"}`),
+		"subagent/message":              envelope(`"kind":"subagent/message","payload":{"text":"진행 중"}`),
+		"subagent/tool_call":            envelope(`"kind":"subagent/tool_call","payload":{"call_id":"toolu_1","name":"Bash","args":{"command":"ls"}}`),
+		"subagent/tool_result ok":       envelope(`"kind":"subagent/tool_result","payload":{"call_id":"toolu_1","status":"ok","output":{"stdout":"x"}}`),
+		"subagent/tool_result rejected": envelope(`"kind":"subagent/tool_result","payload":{"call_id":"toolu_1","status":"rejected","reason":"정책 거부"}`),
+		"subagent/approval_request":     envelope(`"kind":"subagent/approval_request","payload":{"request_id":"req-1","call_id":"toolu_1","name":"Write","args":{"path":"/x"}}`),
+		// T10 SCP-T10-001 확정 spawn payload (2026-08-21 [H] 승인)
+		"subagent/spawn none":                    envelope(`"kind":"subagent/spawn","payload":{"adapter":"null","instruction":"테스트","depth":0,"budget":{"tokens":100,"time_ms":1000,"max_depth":1},"world_backend":"none","control_mode":"tool_approval"}`),
+		"subagent/spawn codex container_only":    envelope(`"kind":"subagent/spawn","payload":{"adapter":"codex","instruction":"수정","depth":1,"budget":{"tokens":100,"time_ms":1000,"max_depth":2},"world_backend":"local-podman","control_mode":"container_only","profile_id":"sandbox-default","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/workspace/source","target_path":"/workspace","mode":"overlay","upper_ref":"world/trace/span/overlay/upper"}]}`),
+		"subagent/spawn local-podman":            envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"수정","depth":1,"budget":{"tokens":100,"time_ms":1000,"max_depth":2},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"sandbox-default","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/workspace/source","target_path":"/workspace","mode":"overlay","upper_ref":"world/trace/span/overlay/upper"}]}`),
+		"subagent/spawn local extension one":     envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"확장","depth":1,"budget":{"tokens":100,"time_ms":1000,"max_depth":2},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"sandbox-default","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/workspace/source","target_path":"/workspace","mode":"overlay","upper_ref":"world/trace/span/overlay/upper"}],"extensions":[{"name":"mcp-a","version":"1.2.3","integrity":"sha256:` + hex64 + `","source":"registry.example","artifact_digest":"sha256:` + hex64 + `"}]}`),
+		"subagent/spawn local extensions sorted": envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"확장","depth":1,"budget":{"tokens":100,"time_ms":1000,"max_depth":2},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"sandbox-default","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/workspace/source","target_path":"/workspace","mode":"overlay","upper_ref":"world/trace/span/overlay/upper"}],"extensions":[{"name":"mcp-a","version":"1.2.3","integrity":"sha256:` + hex64 + `","source":"registry.example","artifact_digest":"sha256:` + hex64 + `"},{"name":"mcp-b","version":"1.0.0","integrity":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","source":"registry.example","artifact_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}`),
+		"step 경계 빈 객체":                           envelope(`"kind":"step/end","payload":{}`),
+		"session/fork":                           envelope(`"kind":"session/fork","payload":{"origin_trace_id":` + trace + `,"origin_seq":42}`),
+		"hook continue":                          envelope(`"kind":"hook/verdict","payload":{"point":"pre_step","verdict":"continue"}`),
+		"hook rewrite":                           envelope(`"kind":"hook/verdict","payload":{"point":"pre_tool","verdict":"rewrite","rewrite":{"args":{"path":"/x"}},"reason":"경로 교정"}`),
+		"hook reject":                            envelope(`"kind":"hook/verdict","payload":{"point":"turn_stopping","verdict":"reject","reason":"예산 초과"}`),
+		"subagent/done":                          envelope(`"kind":"subagent/done","payload":{"status":"ok","result":"완료 요약"}`),
+		"policy/decision":                        envelope(`"kind":"policy/decision","payload":{"decision":"deny","profile_id":"opaque-default","reason":"egress 미허용"}`),
+		"policy/decision audit fields":           envelope(`"kind":"policy/decision","payload":{"decision":"allow","profile_id":"p","request_id":"r1","response_id":"resp1","operation_id":"op1","actor_ref":"unverified-local-operator","human_intent_id":"h1","correlation_id":"c1","decision_source":"relay"}`),
+		"collector/fs_changed":                   `{"seq":9,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/fs_changed","payload":{"changes":[{"path":"a/b.txt","hash":"sha256:` + hex64 + `","change_type":"modified"}]}}`,
+		"collector/egress allow":                 `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"registry.npmjs.org","method":"GET","size_bytes":1024,"at_ms":1700000000001,"decision":"allow"}}`,
+		"collector/egress deny":                  `{"seq":11,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"blocked.example","method":"CONNECT","size_bytes":0,"at_ms":1700000000002,"decision":"deny","reason":"도메인이 허용 목록 밖임"}}`,
+		"int64 최대값":                              envelope(`"kind":"session/end","payload":{},"usage_in":9223372036854775807`),
+	}
+	for name, sample := range cases {
+		if err := v.ValidateRecord([]byte(sample)); err != nil {
+			t.Errorf("%s: 유효 샘플이 거부됨: %v", name, err)
+		}
+	}
+}
+
+const hex64 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestValidateRecordInvalid(t *testing.T) {
+	v := newV(t)
+	allZeroTrace := `"00000000000000000000000000000000"`
+	allZeroSpan := `"0000000000000000"`
+	cases := map[string]string{
+		// OTel all-zero ID 거부 — [H] 리뷰가 지정한 영구 테스트 대상
+		"all-zero trace_id": `{"seq":1,"ts":1,"trace_id":` + allZeroTrace + `,"span_id":` + span + `,"actor":"parent","kind":"session/start","payload":{}}`,
+		"all-zero span_id":  `{"seq":1,"ts":1,"trace_id":` + trace + `,"span_id":` + allZeroSpan + `,"actor":"parent","kind":"session/start","payload":{}}`,
+		"대문자 trace_id":      `{"seq":1,"ts":1,"trace_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","span_id":` + span + `,"actor":"parent","kind":"session/start","payload":{}}`,
+		"짧은 span_id":        `{"seq":1,"ts":1,"trace_id":` + trace + `,"span_id":"22222","actor":"parent","kind":"session/start","payload":{}}`,
+
+		"미지의 kind":    envelope(`"kind":"session/pause","payload":{}`),
+		"actor 누락":    `{"seq":1,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"kind":"session/start","payload":{}}`,
+		"잘못된 actor":   `{"seq":1,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"observer","kind":"session/start","payload":{}}`,
+		"미지 필드":       envelope(`"kind":"session/start","payload":{},"extra":true`),
+		"seq 0":       `{"seq":0,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"parent","kind":"session/start","payload":{}}`,
+		"int64 초과":    envelope(`"kind":"session/end","payload":{},"usage_in":9223372036854775808`),
+		"raw 비base64": envelope(`"kind":"tool/result","payload":{"status":"ok","output":{}},"raw":"@@@@"`),
+		// T5 확정 payload의 위반 샘플 (2026-08-17 [H] 승인 — 폐쇄화)
+		"user/message text 누락":        envelope(`"kind":"user/message","payload":{}`),
+		"user/message 여분 필드":          envelope(`"kind":"user/message","payload":{"text":"x","extra":1}`),
+		"tool/call args 누락":           envelope(`"kind":"tool/call","payload":{"name":"bash"}`),
+		"tool/call 빈 이름":              envelope(`"kind":"tool/call","payload":{"name":"","args":{}}`),
+		"tool/result 미지 status":       envelope(`"kind":"tool/result","payload":{"status":"partial","output":{}}`),
+		"tool/result ok에 output 누락":   envelope(`"kind":"tool/result","payload":{"status":"ok"}`),
+		"tool/result 비객체 output":      envelope(`"kind":"tool/result","payload":{"status":"ok","output":"스칼라"}`),
+		"turn/start 비어 있지 않은 payload": envelope(`"kind":"turn/start","payload":{"note":"x"}`),
+		// T9 확정 subagent payload의 위반 샘플 (2026-08-18 [H] 승인)
+		"ready grade 누락":                  envelope(`"kind":"subagent/ready","payload":{"model":"m"}`),
+		"ready 미지 grade":                  envelope(`"kind":"subagent/ready","payload":{"grade":"semi"}`),
+		"tool_call call_id 누락":            envelope(`"kind":"subagent/tool_call","payload":{"name":"Bash","args":{}}`),
+		"tool_call args 누락":               envelope(`"kind":"subagent/tool_call","payload":{"call_id":"t1","name":"Bash"}`),
+		"tool_result status 누락":           envelope(`"kind":"subagent/tool_result","payload":{"call_id":"t1","output":{}}`),
+		"tool_result call_id 누락":          envelope(`"kind":"subagent/tool_result","payload":{"status":"ok","output":{}}`),
+		"tool_result ok에 output 없음":       envelope(`"kind":"subagent/tool_result","payload":{"call_id":"t1","status":"ok"}`),
+		"tool_result ok에 error 동시":        envelope(`"kind":"subagent/tool_result","payload":{"call_id":"t1","status":"ok","output":{},"error":"실패"}`),
+		"tool_result ok에 reason 동시":       envelope(`"kind":"subagent/tool_result","payload":{"call_id":"t1","status":"ok","output":{},"reason":"거부"}`),
+		"tool_result error에 output 동시":    envelope(`"kind":"subagent/tool_result","payload":{"call_id":"t1","status":"error","error":"실패","output":{}}`),
+		"tool_result rejected에 output 동시": envelope(`"kind":"subagent/tool_result","payload":{"call_id":"t1","status":"rejected","reason":"거부","output":{}}`),
+		"tool_result rejected 빈 사유":       envelope(`"kind":"subagent/tool_result","payload":{"call_id":"t1","status":"rejected","reason":""}`),
+		"approval_request call_id 누락":     envelope(`"kind":"subagent/approval_request","payload":{"request_id":"r1","name":"W","args":{}}`),
+		// T10 SCP-T10-001: backend 판별 분기와 분기별 폐쇄
+		"spawn control_mode 누락":                    envelope(`"kind":"subagent/spawn","payload":{"adapter":"null","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"none"}`),
+		"spawn control_mode 미지값":                   envelope(`"kind":"subagent/spawn","payload":{"adapter":"codex","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"none","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}]}`),
+		"spawn none에 container_only":               envelope(`"kind":"subagent/spawn","payload":{"adapter":"null","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"none","control_mode":"container_only"}`),
+		"spawn 미지 backend 분기":                      envelope(`"kind":"subagent/spawn","payload":{"adapter":"null","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"remote-microvm"}`),
+		"spawn 분기 혼입":                              envelope(`"kind":"subagent/spawn","payload":{"adapter":"null","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"none","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}]}`),
+		"spawn digest가 tag":                        envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"alpine:3.20","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}]}`),
+		"spawn digest 형식 오류":                       envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:abc","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}]}`),
+		"spawn none에 sandbox 필드":                   envelope(`"kind":"subagent/spawn","payload":{"adapter":"null","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"none","control_mode":"tool_approval","profile_id":"p"}`),
+		"spawn local profile_id 누락":                envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}]}`),
+		"spawn local image_digest 누락":              envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}]}`),
+		"spawn local mounts 누락":                    envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `"}`),
+		"spawn none 여분 필드":                         envelope(`"kind":"subagent/spawn","payload":{"adapter":"null","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"none","control_mode":"tool_approval","extra":true}`),
+		"spawn local 여분 필드":                        envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}],"extra":true}`),
+		"spawn none에 extensions":                   envelope(`"kind":"subagent/spawn","payload":{"adapter":"null","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"none","control_mode":"tool_approval","extensions":[{"name":"a","version":"1.0.0","integrity":"sha256:` + hex64 + `","source":"registry.example","artifact_digest":"sha256:` + hex64 + `"}]}`),
+		"spawn local extension artifact_digest 누락": envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}],"extensions":[{"name":"a","version":"1.0.0","integrity":"sha256:` + hex64 + `","source":"registry.example"}]}`),
+		"spawn local extension integrity md5":      envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}],"extensions":[{"name":"a","version":"1.0.0","integrity":"md5:abc","source":"registry.example","artifact_digest":"sha256:` + hex64 + `"}]}`),
+		"spawn local extension integrity short":    envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}],"extensions":[{"name":"a","version":"1.0.0","integrity":"sha256:abc","source":"registry.example","artifact_digest":"sha256:` + hex64 + `"}]}`),
+		"spawn local extension version 누락":         envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}],"extensions":[{"name":"a","integrity":"sha256:` + hex64 + `","source":"registry.example","artifact_digest":"sha256:` + hex64 + `"}]}`),
+		"spawn local extension duplicate":          envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}],"extensions":[{"name":"a","version":"1.0.0","integrity":"sha256:` + hex64 + `","source":"registry.example","artifact_digest":"sha256:` + hex64 + `"},{"name":"a","version":"1.0.0","integrity":"sha256:` + hex64 + `","source":"registry.example","artifact_digest":"sha256:` + hex64 + `"}]}`),
+		"spawn local extension reverse order":      envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}],"extensions":[{"name":"b","version":"1.0.0","integrity":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","source":"registry.example","artifact_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},{"name":"a","version":"1.2.3","integrity":"sha256:` + hex64 + `","source":"registry.example","artifact_digest":"sha256:` + hex64 + `"}]}`),
+		"spawn local extension unknown field":      envelope(`"kind":"subagent/spawn","payload":{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}],"extensions":[{"name":"a","version":"1.0.0","integrity":"sha256:` + hex64 + `","source":"registry.example","artifact_digest":"sha256:` + hex64 + `","token":"secret"}]}`),
+		"spawn world_backend 누락":                   envelope(`"kind":"subagent/spawn","payload":{"adapter":"null","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1}}`),
+		"fork 원본참조 누락":                             envelope(`"kind":"session/fork","payload":{"origin_trace_id":` + trace + `}`),
+		"rewrite에 대체값 없음":                          envelope(`"kind":"hook/verdict","payload":{"point":"pre_tool","verdict":"rewrite","reason":"x"}`),
+		"reject에 빈 사유":                             envelope(`"kind":"hook/verdict","payload":{"point":"pre_tool","verdict":"reject","reason":""}`),
+		"continue에 대체값":                            envelope(`"kind":"hook/verdict","payload":{"point":"pre_step","verdict":"continue","rewrite":{}}`),
+		"done result 누락":                           envelope(`"kind":"subagent/done","payload":{"status":"ok"}`),
+		"fs_changed 잘못된 해시":                        `{"seq":9,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/fs_changed","payload":{"changes":[{"path":"a","hash":"md5:abc","change_type":"added"}]}}`,
+		"egress allow에 reason":                     `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"x","method":"GET","size_bytes":1,"at_ms":1,"decision":"allow","reason":"사유"}}`,
+		"egress deny reason 누락":                    `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"x","method":"GET","size_bytes":1,"at_ms":1,"decision":"deny"}}`,
+		"egress 미지 decision":                       `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"x","method":"GET","size_bytes":1,"at_ms":1,"decision":"maybe"}}`,
+		"egress decision 누락":                       `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"x","method":"GET","size_bytes":1,"at_ms":1}}`,
+		"egress 분기 혼입":                             `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"x","method":"GET","size_bytes":1,"at_ms":1,"decision":"deny","reason":"거부","extra":"혼입"}}`,
+		"egress reason 513자":                       `{"seq":10,"ts":1,"trace_id":` + trace + `,"span_id":` + span + `,"actor":"collector","kind":"collector/egress","payload":{"domain":"x","method":"GET","size_bytes":1,"at_ms":1,"decision":"deny","reason":"` + strings.Repeat("x", 513) + `"}}`,
+		"policy decision source invalid":           envelope(`"kind":"policy/decision","payload":{"decision":"deny","profile_id":"p","decision_source":"remote"}`),
+		"policy decision request id empty":         envelope(`"kind":"policy/decision","payload":{"decision":"deny","profile_id":"p","request_id":""}`),
+	}
+	for name, sample := range cases {
+		if err := v.ValidateRecord([]byte(sample)); err == nil {
+			t.Errorf("%s: 위반 샘플이 통과함", name)
+		}
+	}
+}
+
+func TestValidateCommand(t *testing.T) {
+	v := newV(t)
+	valid := map[string]string{
+		"task":                    `{"v":1,"cmd":"task","payload":{"instruction":"fix bug","workspace":"/ws","budget":{"tokens":100000,"time_ms":600000,"max_depth":2},"depth":0}}`,
+		"task+extensions":         `{"v":1,"cmd":"task","payload":{"instruction":"x","workspace":"/ws","budget":{"tokens":1,"time_ms":1,"max_depth":1},"depth":1,"extensions":[{"name":"mcp-fs","version":"1.2.3","integrity":"sha256:` + hex64 + `","source":"registry.npmjs.org","egress":["api.example.com"]}]}}`,
+		"message":                 `{"v":1,"cmd":"message","payload":{"text":"추가 지시"}}`,
+		"stop":                    `{"v":1,"cmd":"stop","payload":{"reason":"budget_exceeded"}}`,
+		"approval_response allow": `{"v":1,"cmd":"approval_response","payload":{"request_id":"r1","decision":"allow"}}`,
+		"approval_response deny":  `{"v":1,"cmd":"approval_response","payload":{"request_id":"r1","decision":"deny","reason":"정책 위반"}}`,
+	}
+	for name, s := range valid {
+		if err := v.ValidateCommand([]byte(s)); err != nil {
+			t.Errorf("%s: 유효 샘플이 거부됨: %v", name, err)
+		}
+	}
+	invalid := map[string]string{
+		"v 불일치":                           `{"v":2,"cmd":"message","payload":{"text":"x"}}`,
+		"미지 cmd":                          `{"v":1,"cmd":"pause","payload":{}}`,
+		"budget 축 누락":                     `{"v":1,"cmd":"task","payload":{"instruction":"x","workspace":"/ws","budget":{"tokens":1,"max_depth":1},"depth":0}}`,
+		"budget 자체 누락":                    `{"v":1,"cmd":"task","payload":{"instruction":"x","workspace":"/ws","depth":0}}`,
+		"extension 해시 누락":                 `{"v":1,"cmd":"task","payload":{"instruction":"x","workspace":"/ws","budget":{"tokens":1,"time_ms":1,"max_depth":1},"depth":0,"extensions":[{"name":"a","version":"1.0.0","source":"r"}]}}`,
+		"stop 미지 사유":                      `{"v":1,"cmd":"stop","payload":{"reason":"tired"}}`,
+		"deny인데 reason 없음":                `{"v":1,"cmd":"approval_response","payload":{"request_id":"r1","decision":"deny"}}`,
+		"deny인데 빈 reason":                 `{"v":1,"cmd":"approval_response","payload":{"request_id":"r1","decision":"deny","reason":""}}`,
+		"approval_response 미지 decision":   `{"v":1,"cmd":"approval_response","payload":{"request_id":"r1","decision":"maybe"}}`,
+		"approval_response request_id 누락": `{"v":1,"cmd":"approval_response","payload":{"decision":"allow"}}`,
+	}
+	for name, s := range invalid {
+		if err := v.ValidateCommand([]byte(s)); err == nil {
+			t.Errorf("%s: 위반 샘플이 통과함", name)
+		}
+	}
+}
+
+func TestValidateEvent(t *testing.T) {
+	v := newV(t)
+	valid := map[string]string{
+		// 합성 이벤트는 빈 base64("")를 명시한다 — [H] 승인 규칙
+		"ready 합성 raw": `{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}`,
+		"done":         `{"v":1,"kind":"subagent/done","payload":{"status":"error","result":"실패 요약"},"raw":"eyJ4IjoxfQ=="}`,
+		"usage":        `{"v":1,"kind":"subagent/usage","payload":{"input_tokens":100,"output_tokens":50},"raw":""}`,
+	}
+	for name, s := range valid {
+		if err := v.ValidateEvent([]byte(s)); err != nil {
+			t.Errorf("%s: 유효 샘플이 거부됨: %v", name, err)
+		}
+	}
+	invalid := map[string]string{
+		"raw 누락 (FR-ADP-04)": `{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"}}`,
+		"usage 한쪽 토큰 누락":     `{"v":1,"kind":"subagent/usage","payload":{"input_tokens":100},"raw":""}`,
+		"done status 미지값":    `{"v":1,"kind":"subagent/done","payload":{"status":"partial","result":"x"},"raw":""}`,
+		"raw 비base64":        `{"v":1,"kind":"subagent/message","payload":{},"raw":"not base64!"}`,
+	}
+	for name, s := range invalid {
+		if err := v.ValidateEvent([]byte(s)); err == nil {
+			t.Errorf("%s: 위반 샘플이 통과함", name)
+		}
+	}
+}
+
+// subagent/spawn은 core가 로그에 쓰는 kind이며 adapter→core wire event가 아니다.
+// payload 폐쇄 뒤에도 이 테스트가 필수 필드 누락으로 우연히 green이 되지 않도록,
+// 같은 none payload가 EventRecord에서는 유효하고 wire에서만 거부됨을 교차 단정한다.
+func TestValidateEventRejectsSpawnKindNotPayload(t *testing.T) {
+	v := newV(t)
+	payload := `{"adapter":"null","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"none","control_mode":"tool_approval"}`
+	if err := v.ValidateRecord([]byte(envelope(`"kind":"subagent/spawn","payload":` + payload))); err != nil {
+		t.Fatalf("전제 실패: none spawn EventRecord가 유효해야 함: %v", err)
+	}
+	wire := `{"v":1,"kind":"subagent/spawn","payload":` + payload + `,"raw":""}`
+	if err := v.ValidateEvent([]byte(wire)); err == nil {
+		t.Fatal("어댑터가 core 전용 subagent/spawn kind를 방출했는데 통과함")
+	}
+}
+
+func TestValidateEventRejectsExtensionSpawnKindNotPayload(t *testing.T) {
+	v := newV(t)
+	payload := `{"adapter":"claude-code","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}],"extensions":[{"name":"a","version":"1.0.0","integrity":"sha256:` + hex64 + `","source":"registry.example","artifact_digest":"sha256:` + hex64 + `"}]}`
+	if err := v.ValidateRecord([]byte(envelope(`"kind":"subagent/spawn","payload":` + payload))); err != nil {
+		t.Fatalf("전제 실패: extension spawn EventRecord가 유효해야 함: %v", err)
+	}
+	wire := `{"v":1,"kind":"subagent/spawn","payload":` + payload + `,"raw":""}`
+	if err := v.ValidateEvent([]byte(wire)); err == nil {
+		t.Fatal("어댑터가 extension core 전용 subagent/spawn kind를 방출했는데 통과함")
+	}
+}
+
+// T1 완료 기준 (a): §5.1 예시 이벤트가 codegen 산출 타입으로 파싱되고,
+// 재직렬화 결과도 스키마를 통과한다(타입 ↔ 스키마 정합).
+func TestGenTypesRoundTrip(t *testing.T) {
+	v := newV(t)
+	sample := envelope(`"kind":"subagent/done","payload":{"status":"ok","result":"완료"},"raw":"aGk=","usage_in":5,"usage_out":7`)
+
+	var rec gen.EventRecord
+	if err := json.Unmarshal([]byte(sample), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Kind != gen.KindSubagentDone || rec.Seq != 1 {
+		t.Fatalf("파싱 결과 이상: %+v", rec)
+	}
+	var done gen.SubagentDonePayload
+	if err := json.Unmarshal(rec.Payload, &done); err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != gen.SubagentDonePayloadStatusOk || done.Result != "완료" {
+		t.Fatalf("payload 파싱 결과 이상: %+v", done)
+	}
+
+	out, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.ValidateRecord(out); err != nil {
+		t.Errorf("생성 타입 재직렬화가 스키마를 위반: %v", err)
+	}
+
+	var cmd gen.Command
+	cmdLine := `{"v":1,"cmd":"stop","payload":{"reason":"policy"}}`
+	if err := json.Unmarshal([]byte(cmdLine), &cmd); err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Cmd != gen.CommandCmdStop {
+		t.Fatalf("cmd 파싱 이상: %+v", cmd)
+	}
+	out, err = json.Marshal(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.ValidateCommand(out); err != nil {
+		t.Errorf("생성 타입 재직렬화가 스키마를 위반: %v", err)
+	}
+}
+
+// SCP-T25-001 §2: spawn payload session_mode는 optional enum(oneshot|multiturn)
+// 이다. 부재 = oneshot(하위 호환), 미지 값·비문자열은 모든 분기에서 거부한다.
+func TestValidateSpawnSessionMode(t *testing.T) {
+	v := newV(t)
+	none := func(extra string) string {
+		return envelope(`"kind":"subagent/spawn","payload":{"adapter":"null","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"none","control_mode":"tool_approval"` + extra + `}`)
+	}
+	local := func(extra string) string {
+		return envelope(`"kind":"subagent/spawn","payload":{"adapter":"claudecode","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}]` + extra + `}`)
+	}
+	extension := func(extra string) string {
+		return envelope(`"kind":"subagent/spawn","payload":{"adapter":"claudecode","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"local-podman","control_mode":"tool_approval","profile_id":"p","image_digest":"sha256:` + hex64 + `","mounts":[{"source_path":"/src","target_path":"/workspace","mode":"overlay","upper_ref":"u"}],"extensions":[{"name":"a","version":"1.0.0","integrity":"sha256:` + hex64 + `","source":"registry.example","artifact_digest":"sha256:` + hex64 + `"}]` + extra + `}`)
+	}
+	for name, build := range map[string]func(string) string{"none": none, "local": local, "extension": extension} {
+		for _, extra := range []string{``, `,"session_mode":"oneshot"`, `,"session_mode":"multiturn"`} {
+			if err := v.ValidateRecord([]byte(build(extra))); err != nil {
+				t.Errorf("%s %q: 유효 샘플 거부: %v", name, extra, err)
+			}
+		}
+		for _, extra := range []string{`,"session_mode":"interactive"`, `,"session_mode":""`, `,"session_mode":null`, `,"session_mode":1`, `,"session_mode":"MULTITURN"`} {
+			if err := v.ValidateRecord([]byte(build(extra))); err == nil {
+				t.Errorf("%s %q: 위반 샘플이 통과함", name, extra)
+			}
+		}
+	}
+	var p gen.SubagentSpawnPayload
+	if err := json.Unmarshal([]byte(`{"adapter":"a","instruction":"x","depth":0,"budget":{"tokens":1,"time_ms":1,"max_depth":1},"world_backend":"none","control_mode":"tool_approval"}`), &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.SessionMode != nil {
+		t.Fatalf("부재 session_mode가 값으로 복원됨: %v", *p.SessionMode)
+	}
+}

@@ -1,0 +1,12 @@
+tool: claude-code 2.1.233
+command: (cd "/tmp/t8-c04.0QxuZF" && claude -p "Use the Read tool to check hello.txt. Then use the Edit tool to change its content to 'world'. Do not touch any other file." --output-format stream-json --verbose --safe-mode --no-session-persistence --permission-mode manual --tools "Read,Edit" --allowedTools "Read,Edit")
+date: 2026-10-07
+prompt: Use the Read tool to check hello.txt. Then use the Edit tool to change its content to 'world'. Do not touch any other file.
+workspace-initial: hello.txt("hello")
+exit-code: 0
+interrupt: none
+stderr: 04-edit-file.stderr.txt (separate file)
+recording-env: env -i (HOME, USER, LOGNAME, PATH, LANG=en_US.UTF-8, TERM=dumb); CLAUDE_CONFIG_DIR=<fresh dir, one-time login>; workspace under /tmp
+scenario: edit-file
+coverage:
+verify: python3 JSON scan → tool_use=2 (Read, Edit), tool_result=2, final_result contains world=1; post-run workspace check: hello.txt == world

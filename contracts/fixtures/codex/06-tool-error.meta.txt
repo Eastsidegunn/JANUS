@@ -1,0 +1,12 @@
+tool: codex-cli 0.147.0
+command: codex exec --json --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules -s workspace-write -C "/tmp/t8-x06.YBGBTi" "Use a shell command exactly once to run cat no-such-file.txt. If the file does not exist, do not create or modify anything; just report the error."
+date: 2026-10-07
+prompt: Use a shell command exactly once to run cat no-such-file.txt. If the file does not exist, do not create or modify anything; just report the error.
+workspace-initial: empty directory
+exit-code: 0
+interrupt: none
+stderr: 06-tool-error.stderr.txt (separate file)
+recording-env: env -i (HOME, USER, LOGNAME, PATH, LANG=en_US.UTF-8, TERM=dumb); CODEX_HOME=<fresh dir, one-time login>; stdin: </dev/null; workspace under /tmp
+scenario: tool-error
+coverage: error
+verify: python3 JSON scan → command_execution=1, exit_code=1, file_absent=True

@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a11509-5d64-75a2-9892-b550a3f0c0fd"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc 'ls -1'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc 'ls -1'","aggregated_output":"a.txt\nb.txt\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"a.txt\nb.txt"}}
+{"type":"turn.completed","usage":{"input_tokens":26051,"cached_input_tokens":21248,"cache_write_input_tokens":0,"output_tokens":87,"reasoning_output_tokens":20}}

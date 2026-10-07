@@ -1,0 +1,17 @@
+tool: codex-cli 0.147.0
+command: not recorded (probe from 2026-08-18; not re-run)
+date: 2026-08-18
+prompt: not recorded (probe from 2026-08-18; not re-run)
+workspace-initial: not recorded (probe from 2026-08-18; not re-run)
+exit-code: not recorded (meta-only skip)
+interrupt: none
+stderr: none (no recording)
+scenario: approval-denied
+coverage:
+recording: meta-only skip
+counted: no
+verify: not recorded (probe from 2026-08-18; not re-run)
+reason: codex exec --json does not surface an approval UI, so no approval-denied stream can be captured
+evidence: with -a untrusted the probe still showed no approval screen
+evidence: /tmp is writable in workspace-write mode, so the requested write executed
+action: do not use this as a valid approval-denied fixture

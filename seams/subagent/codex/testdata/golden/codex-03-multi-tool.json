@@ -1,0 +1,90 @@
+{
+  "fixture": "03-multi-tool.ndjson",
+  "events": [
+    {
+      "kind": "subagent/ready",
+      "payload": {
+        "grade": "observable",
+        "native_session_id": "01a11509-7fae-7583-8fe1-78a78b70cd93"
+      },
+      "raw_b64": "eyJ0eXBlIjoidGhyZWFkLnN0YXJ0ZWQiLCJ0aHJlYWRfaWQiOiIwMWExMTUwOS03ZmFlLTc1ODMtOGZlMS03OGE3OGI3MGNkOTMifQ=="
+    },
+    {
+      "kind": "subagent/message",
+      "payload": {
+        "text": "I’ll create the file with one command, then verify it with a separate command."
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8wIiwidHlwZSI6ImFnZW50X21lc3NhZ2UiLCJ0ZXh0IjoiSeKAmWxsIGNyZWF0ZSB0aGUgZmlsZSB3aXRoIG9uZSBjb21tYW5kLCB0aGVuIHZlcmlmeSBpdCB3aXRoIGEgc2VwYXJhdGUgY29tbWFuZC4ifX0="
+    },
+    {
+      "kind": "subagent/tool_call",
+      "payload": {
+        "args": {
+          "command": "/bin/zsh -lc \"printf '%s\\\\n' 'hello' \u003e hello.txt\""
+        },
+        "call_id": "item_1",
+        "name": "command_execution"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5zdGFydGVkIiwiaXRlbSI6eyJpZCI6Iml0ZW1fMSIsInR5cGUiOiJjb21tYW5kX2V4ZWN1dGlvbiIsImNvbW1hbmQiOiIvYmluL3pzaCAtbGMgXCJwcmludGYgJyVzXFxcXG4nICdoZWxsbycgPiBoZWxsby50eHRcIiIsImFnZ3JlZ2F0ZWRfb3V0cHV0IjoiIiwiZXhpdF9jb2RlIjpudWxsLCJzdGF0dXMiOiJpbl9wcm9ncmVzcyJ9fQ=="
+    },
+    {
+      "kind": "subagent/tool_result",
+      "payload": {
+        "call_id": "item_1",
+        "output": {
+          "value": ""
+        },
+        "status": "ok"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8xIiwidHlwZSI6ImNvbW1hbmRfZXhlY3V0aW9uIiwiY29tbWFuZCI6Ii9iaW4venNoIC1sYyBcInByaW50ZiAnJXNcXFxcbicgJ2hlbGxvJyA+IGhlbGxvLnR4dFwiIiwiYWdncmVnYXRlZF9vdXRwdXQiOiIiLCJleGl0X2NvZGUiOjAsInN0YXR1cyI6ImNvbXBsZXRlZCJ9fQ=="
+    },
+    {
+      "kind": "subagent/tool_call",
+      "payload": {
+        "args": {
+          "command": "/bin/zsh -lc 'cat hello.txt'"
+        },
+        "call_id": "item_2",
+        "name": "command_execution"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5zdGFydGVkIiwiaXRlbSI6eyJpZCI6Iml0ZW1fMiIsInR5cGUiOiJjb21tYW5kX2V4ZWN1dGlvbiIsImNvbW1hbmQiOiIvYmluL3pzaCAtbGMgJ2NhdCBoZWxsby50eHQnIiwiYWdncmVnYXRlZF9vdXRwdXQiOiIiLCJleGl0X2NvZGUiOm51bGwsInN0YXR1cyI6ImluX3Byb2dyZXNzIn19"
+    },
+    {
+      "kind": "subagent/tool_result",
+      "payload": {
+        "call_id": "item_2",
+        "output": {
+          "value": "hello\n"
+        },
+        "status": "ok"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8yIiwidHlwZSI6ImNvbW1hbmRfZXhlY3V0aW9uIiwiY29tbWFuZCI6Ii9iaW4venNoIC1sYyAnY2F0IGhlbGxvLnR4dCciLCJhZ2dyZWdhdGVkX291dHB1dCI6ImhlbGxvXG4iLCJleGl0X2NvZGUiOjAsInN0YXR1cyI6ImNvbXBsZXRlZCJ9fQ=="
+    },
+    {
+      "kind": "subagent/message",
+      "payload": {
+        "text": "Created `hello.txt` and confirmed its contents:\n\n```text\nhello\n```"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8zIiwidHlwZSI6ImFnZW50X21lc3NhZ2UiLCJ0ZXh0IjoiQ3JlYXRlZCBgaGVsbG8udHh0YCBhbmQgY29uZmlybWVkIGl0cyBjb250ZW50czpcblxuYGBgdGV4dFxuaGVsbG9cbmBgYCJ9fQ=="
+    },
+    {
+      "kind": "subagent/usage",
+      "payload": {
+        "input_tokens": 39233,
+        "output_tokens": 165
+      },
+      "raw_b64": "eyJ0eXBlIjoidHVybi5jb21wbGV0ZWQiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjM5MjMzLCJjYWNoZWRfaW5wdXRfdG9rZW5zIjozNjM1MiwiY2FjaGVfd3JpdGVfaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjoxNjUsInJlYXNvbmluZ19vdXRwdXRfdG9rZW5zIjowfX0="
+    },
+    {
+      "kind": "subagent/done",
+      "payload": {
+        "result": "Created `hello.txt` and confirmed its contents:\n\n```text\nhello\n```",
+        "status": "ok"
+      },
+      "raw_b64": "eyJ0eXBlIjoidHVybi5jb21wbGV0ZWQiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjM5MjMzLCJjYWNoZWRfaW5wdXRfdG9rZW5zIjozNjM1MiwiY2FjaGVfd3JpdGVfaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjoxNjUsInJlYXNvbmluZ19vdXRwdXRfdG9rZW5zIjowfX0="
+    }
+  ],
+  "unmapped_native_lines": [
+    "turn.started → ignored:turn.started"
+  ]
+}

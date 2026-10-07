@@ -1,0 +1,61 @@
+{
+  "fixture": "02-single-tool.ndjson",
+  "events": [
+    {
+      "kind": "subagent/ready",
+      "payload": {
+        "grade": "observable",
+        "native_session_id": "01a11509-5d64-75a2-9892-b550a3f0c0fd"
+      },
+      "raw_b64": "eyJ0eXBlIjoidGhyZWFkLnN0YXJ0ZWQiLCJ0aHJlYWRfaWQiOiIwMWExMTUwOS01ZDY0LTc1YTItOTg5Mi1iNTUwYTNmMGMwZmQifQ=="
+    },
+    {
+      "kind": "subagent/tool_call",
+      "payload": {
+        "args": {
+          "command": "/bin/zsh -lc 'ls -1'"
+        },
+        "call_id": "item_0",
+        "name": "command_execution"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5zdGFydGVkIiwiaXRlbSI6eyJpZCI6Iml0ZW1fMCIsInR5cGUiOiJjb21tYW5kX2V4ZWN1dGlvbiIsImNvbW1hbmQiOiIvYmluL3pzaCAtbGMgJ2xzIC0xJyIsImFnZ3JlZ2F0ZWRfb3V0cHV0IjoiIiwiZXhpdF9jb2RlIjpudWxsLCJzdGF0dXMiOiJpbl9wcm9ncmVzcyJ9fQ=="
+    },
+    {
+      "kind": "subagent/tool_result",
+      "payload": {
+        "call_id": "item_0",
+        "output": {
+          "value": "a.txt\nb.txt\n"
+        },
+        "status": "ok"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8wIiwidHlwZSI6ImNvbW1hbmRfZXhlY3V0aW9uIiwiY29tbWFuZCI6Ii9iaW4venNoIC1sYyAnbHMgLTEnIiwiYWdncmVnYXRlZF9vdXRwdXQiOiJhLnR4dFxuYi50eHRcbiIsImV4aXRfY29kZSI6MCwic3RhdHVzIjoiY29tcGxldGVkIn19"
+    },
+    {
+      "kind": "subagent/message",
+      "payload": {
+        "text": "a.txt\nb.txt"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8xIiwidHlwZSI6ImFnZW50X21lc3NhZ2UiLCJ0ZXh0IjoiYS50eHRcbmIudHh0In19"
+    },
+    {
+      "kind": "subagent/usage",
+      "payload": {
+        "input_tokens": 26051,
+        "output_tokens": 87
+      },
+      "raw_b64": "eyJ0eXBlIjoidHVybi5jb21wbGV0ZWQiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjI2MDUxLCJjYWNoZWRfaW5wdXRfdG9rZW5zIjoyMTI0OCwiY2FjaGVfd3JpdGVfaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjo4NywicmVhc29uaW5nX291dHB1dF90b2tlbnMiOjIwfX0="
+    },
+    {
+      "kind": "subagent/done",
+      "payload": {
+        "result": "a.txt\nb.txt",
+        "status": "ok"
+      },
+      "raw_b64": "eyJ0eXBlIjoidHVybi5jb21wbGV0ZWQiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjI2MDUxLCJjYWNoZWRfaW5wdXRfdG9rZW5zIjoyMTI0OCwiY2FjaGVfd3JpdGVfaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjo4NywicmVhc29uaW5nX291dHB1dF90b2tlbnMiOjIwfX0="
+    }
+  ],
+  "unmapped_native_lines": [
+    "turn.started → ignored:turn.started"
+  ]
+}

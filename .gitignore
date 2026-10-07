@@ -1,0 +1,8 @@
+/bin/
+*.test
+*.out
+.DS_Store
+.claude/
+# local agent instruction files (kept private)
+CLAUDE.md
+AGENTS.md

@@ -1,0 +1,12 @@
+tool: codex-cli 0.147.0
+command: codex exec --json --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules -s workspace-write -C "/tmp/t8-x08.sEkuBq" "Use a shell command to run tail -f /dev/null. Keep waiting in the foreground. Running it in the background or running any other command is forbidden."
+date: 2026-10-07
+prompt: Use a shell command to run tail -f /dev/null. Keep waiting in the foreground. Running it in the background or running any other command is forbidden.
+workspace-initial: empty directory
+exit-code: 1
+interrupt: one SIGINT (Ctrl-C equivalent) about 15s after start
+stderr: 08-interrupted.stderr.txt (separate file)
+recording-env: env -i (HOME, USER, LOGNAME, PATH, LANG=en_US.UTF-8, TERM=dumb); CODEX_HOME=<fresh dir, one-time login>; stdin: </dev/null; workspace under /tmp
+scenario: interrupted
+coverage: interrupted
+verify: python3 JSON scan → final item=command_execution/in_progress, turn.completed=0 (SIGINT interruption recorded)

@@ -1,0 +1,12 @@
+id: example-profile
+fs_scope:
+  - /srv/janus/workspace
+egress:
+  - gateway.example
+allowed_extensions: []
+allowed_registries: []
+budget:
+  tokens: 100000
+  time_ms: 600000
+  max_depth: 1
+approval: manual

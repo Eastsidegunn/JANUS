@@ -1,0 +1,44 @@
+{
+  "state_root": "/var/lib/janus",
+  "proxy_image": {
+    "repository": "registry.example/janus-egress-proxy",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "uid": 1000,
+    "gid": 1000
+  },
+  "redaction_patterns": ["CUSTOM_REDACTION_[A-Za-z0-9_-]{8,}"],
+  "adapters": {
+    "claudecode": {
+      "bin": "/usr/local/bin/claude",
+      "image": {
+        "repository": "registry.example/janus-claudecode",
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "uid": 1000,
+        "gid": 1000
+      },
+      "agent_argv": ["claude"],
+      "control_mode": "tool_approval",
+      "env": [
+        "ANTHROPIC_BASE_URL=https://gateway.example",
+        "ANTHROPIC_AUTH_TOKEN=REPLACE_WITH_GATEWAY_ACCESS_KEY"
+      ],
+      "secret_env": ["ANTHROPIC_AUTH_TOKEN"]
+    },
+    "codex": {
+      "bin": "/usr/local/bin/codex",
+      "image": {
+        "repository": "registry.example/janus-codex",
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "uid": 1000,
+        "gid": 1000
+      },
+      "agent_argv": ["codex"],
+      "control_mode": "container_only",
+      "env": [
+        "OPENAI_BASE_URL=https://gateway.example",
+        "OPENAI_API_KEY=REPLACE_WITH_CODEX_GATEWAY_ACCESS_KEY"
+      ],
+      "secret_env": ["OPENAI_API_KEY"]
+    }
+  }
+}

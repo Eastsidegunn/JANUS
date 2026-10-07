@@ -1,0 +1,12 @@
+tool: codex-cli 0.147.0
+command: codex exec --json --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules -s workspace-write -C "/tmp/t8-x02.OZ30rm" "Run exactly one shell command to list the file names in the current directory, then reply with the names only."
+date: 2026-10-07
+prompt: Run exactly one shell command to list the file names in the current directory, then reply with the names only.
+workspace-initial: a.txt("alpha"), b.txt("beta")
+exit-code: 0
+interrupt: none
+stderr: 02-single-tool.stderr.txt (separate file)
+recording-env: env -i (HOME, USER, LOGNAME, PATH, LANG=en_US.UTF-8, TERM=dumb); CODEX_HOME=<fresh dir, one-time login>; stdin: </dev/null; workspace under /tmp
+scenario: single-tool
+coverage:
+verify: python3 JSON scan → command_execution started=1 (completed exit_code=0)

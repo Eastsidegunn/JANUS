@@ -1,0 +1,398 @@
+// Package subagent는 서브에이전트 seam이다: 어댑터 프로세스를 호스트 측에서
+// 실행하고(FR-ADP-10) §5.2 NDJSON 와이어 프로토콜로 대화하며, 어댑터의
+// 정규화 이벤트를 검증해 child span으로 세션 로그에 기록한다.
+//
+// 어댑터 계약은 spawn / send / events / stop의 최소 집합이다 (FR-ADP-02):
+// Spawn이 프로세스를 띄워 task를 보내고, Send가 추가 입력을, Stop이 중단을
+// 보내며, 이벤트 스트림은 내부 펌프가 writer로 흘린다. 자식의 중간 이벤트는
+// 전부 child span에 기록되지만 부모 모델 히스토리에는 subagent/done의 최종
+// 결과만 진입한다(FR-LOG-10 — logd.Replay의 프로젝션 규칙).
+package subagent
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/Eastsidegunn/JANUS/contracts/gen"
+	"github.com/Eastsidegunn/JANUS/contracts/validate"
+	"github.com/Eastsidegunn/JANUS/core/logd"
+	"github.com/Eastsidegunn/JANUS/core/policy"
+	"github.com/Eastsidegunn/JANUS/core/world"
+	"github.com/Eastsidegunn/JANUS/seams/subagent/internal/procgroup"
+)
+
+// Spec은 spawn 명세다.
+type Spec struct {
+	Adapter     string    // 어댑터 이름 — actor "subagent:{adapter}:{n}" 구성
+	Command     []string  // 어댑터 실행 파일과 인자 (호스트 측 실행)
+	Env         []string  // nil이면 host 환경 상속; world adapter에는 descriptor 환경만 전달
+	Stderr      io.Writer // 선택적 host-side 진단 sink; adapter stdout 계약과 분리
+	Instruction string
+	Workspace   string
+	Budget      gen.Budget // 정책 병합이 끝난 실효 예산 (§5.2)
+	Depth       int64      // 현재 spawn 깊이
+	ProfileID   string
+	Approval    policy.ApprovalMode
+	Decider     policy.ApprovalDecider
+	Descriptor  world.AgentDescriptor // world path only; agent container에는 직렬화하지 않음
+	// TokenExpiresAtUnixMs is non-secret timing metadata for the Claude adapter.
+	// The token value itself is never held by the adapter or this spec.
+	TokenExpiresAtUnixMs int64
+	// SessionMode는 spawn payload session_mode다(SCP-T25-001 §2). 빈 값 =
+	// oneshot이며 spawn payload에도 기록하지 않는다(T24 바이트 무변경).
+	// multiturn이면 spawn 기록에 값을 남기고 어댑터에 SessionModeEnv로 알리며
+	// Send가 후속 user 메시지 주입을 수용한다.
+	SessionMode gen.SubagentSpawnPayloadSessionMode
+}
+
+// SessionModeEnv는 어댑터 프로세스에 session_mode를 전달하는 환경 변수다.
+// 어댑터(claudecode)는 같은 이름을 읽는다.
+const SessionModeEnv = "HX_SESSION_MODE"
+
+// Send의 결정적 거부 사유. 호출자(제어 표면)는 errors.Is로 구조화된 오류
+// 코드에 사상한다.
+var (
+	ErrNotMultiturn    = errors.New("subagent: multiturn 세션이 아님")
+	ErrSessionTerminal = errors.New("subagent: 종료된 세션")
+)
+
+// Multiturn은 spec의 session_mode가 multiturn인지 여부다.
+func (s Spec) Multiturn() bool {
+	return s.SessionMode == gen.SubagentSpawnPayloadSessionModeMultiturn
+}
+
+// SpawnSessionMode는 spawn payload에 기록할 session_mode다. oneshot(부재
+// 포함)은 nil — 기존 spawn 레코드와 바이트 단위로 같다.
+func (s Spec) SpawnSessionMode() *gen.SubagentSpawnPayloadSessionMode {
+	if !s.Multiturn() {
+		return nil
+	}
+	mode := gen.SubagentSpawnPayloadSessionModeMultiturn
+	return &mode
+}
+
+// Subagent는 실행 중인 어댑터 프로세스 핸들이다.
+type Subagent struct {
+	actor         string
+	proc          *procgroup.Process
+	vals          *validate.Validators
+	doneCh        chan waitResult
+	childSpn      string
+	approvals     *approvalCoordinator
+	doneObserved  atomic.Bool
+	stopRequested atomic.Bool
+	pumpFinished  atomic.Bool
+
+	// multiturn Send 경로: user/message durable 기록 → message 명령 전달을
+	// sendMu로 직렬화해 로그 순서와 전달 순서가 어긋나지 않게 한다.
+	multiturn  bool
+	writer     *logd.Writer
+	traceID    string
+	parentSpan string
+	sendMu     sync.Mutex
+}
+
+type waitResult struct {
+	done gen.DonePayload
+	err  error
+}
+
+// wireEvent는 어댑터 → 코어 NDJSON 한 줄이다 (§5.2 event).
+type wireEvent struct {
+	V       int64           `json:"v"`
+	Kind    gen.Kind        `json:"kind"`
+	Payload json.RawMessage `json:"payload"`
+	Raw     string          `json:"raw"`
+}
+
+// Spawn은 어댑터를 실행하고 task를 보낸 뒤, 이벤트 펌프를 시작한다.
+// n은 세션 내 서브에이전트 순번이다. 모든 이벤트는 새 child span으로
+// (parent_span_id = parentSpan) writer를 경유해 기록된다.
+func Spawn(ctx context.Context, w *logd.Writer, traceID, parentSpan string, n int, spec Spec) (*Subagent, error) {
+	childSpan := logd.NewSpanID()
+
+	// T10 이전 경로는 명시적인 none backend다. schema가 none을 허용하는 것은
+	// production 권한이 아니며 production surface는 T10 world 배선에서 거부한다.
+	spawnPayload, err := json.Marshal(gen.SubagentSpawnPayload{
+		Adapter:     spec.Adapter,
+		Instruction: spec.Instruction,
+		Depth:       spec.Depth,
+		Budget: gen.SpawnBudget{
+			Tokens: spec.Budget.Tokens, TimeMs: spec.Budget.TimeMs,
+			MaxDepth: spec.Budget.MaxDepth,
+		},
+		WorldBackend: gen.SubagentSpawnPayloadWorldBackendNone,
+		ControlMode:  gen.SubagentSpawnPayloadControlModeToolApproval,
+		SessionMode:  spec.SpawnSessionMode(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.Submit(ctx, gen.EventRecord{
+		Ts: now(), TraceID: traceID, SpanID: childSpan, ParentSpanID: &parentSpan,
+		Kind: gen.KindSubagentSpawn, Actor: "parent", Payload: spawnPayload,
+	}); err != nil {
+		return nil, fmt.Errorf("subagent: spawn 기록: %w", err)
+	}
+	return spawnPrepared(ctx, w, traceID, parentSpan, childSpan, n, spec)
+}
+
+// SpawnPrepared starts a host adapter for a world whose exact spawn metadata
+// has already received a durable CommitSpawn ACK. It deliberately cannot emit
+// a second world_backend:none record; the surface supplies the child span that
+// was bound into PreparedID, SpawnReceipt, and AgentDescriptor.
+func SpawnPrepared(ctx context.Context, w *logd.Writer, traceID, parentSpan, childSpan string, n int, spec Spec) (*Subagent, error) {
+	if spec.Descriptor.SpanID() == "" || spec.Descriptor.SpanID() != childSpan ||
+		spec.Descriptor.ProcessEndpoint() == (world.ProcessEndpoint{}) ||
+		spec.Descriptor.ApprovalEndpoint() == (world.ApprovalEndpoint{}) {
+		return nil, fmt.Errorf("subagent: world descriptor와 child span 불일치")
+	}
+	return spawnPrepared(ctx, w, traceID, parentSpan, childSpan, n, spec)
+}
+
+func spawnPrepared(ctx context.Context, w *logd.Writer, traceID, parentSpan, childSpan string, n int, spec Spec) (*Subagent, error) {
+	actor := fmt.Sprintf("subagent:%s:%d", spec.Adapter, n)
+	vals, err := validate.New()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(spec.Command) == 0 {
+		return nil, fmt.Errorf("subagent: 어댑터 명령이 비어 있음")
+	}
+	// 프로세스·파이프·단일 reap·그룹 kill·EOF drain은 같은 seam의
+	// procgroup이 소유한다. exec.CommandContext를 쓰지 않아 watchCtx
+	// goroutine이 누적되지 않으며 취소는 항상 프로세스 그룹 전체에 간다.
+	adapterEnv := append([]string(nil), spec.Env...)
+	if spec.TokenExpiresAtUnixMs > 0 {
+		adapterEnv = replaceEnv(adapterEnv, "HX_CLAUDE_TOKEN_EXPIRES_AT_MS", fmt.Sprintf("%d", spec.TokenExpiresAtUnixMs))
+	}
+	switch spec.SessionMode {
+	case "", gen.SubagentSpawnPayloadSessionModeOneshot:
+	case gen.SubagentSpawnPayloadSessionModeMultiturn:
+		adapterEnv = replaceEnv(adapterEnv, SessionModeEnv, string(spec.SessionMode))
+	default:
+		return nil, fmt.Errorf("subagent: 미지 session_mode %q", spec.SessionMode)
+	}
+	proc, err := procgroup.Start(ctx, procgroup.Options{Command: spec.Command, Env: adapterEnv, Stderr: spec.Stderr})
+	if err != nil {
+		return nil, fmt.Errorf("subagent: 어댑터 실행: %w", err)
+	}
+
+	s := &Subagent{
+		actor: actor, proc: proc, vals: vals,
+		doneCh: make(chan waitResult, 1), childSpn: childSpan,
+		multiturn: spec.Multiturn(), writer: w, traceID: traceID, parentSpan: parentSpan,
+	}
+	s.approvals = newApprovalCoordinator(ctx, s, w, traceID, parentSpan, spec)
+	if err := s.sendCommand(gen.CommandCmdTask, gen.TaskPayload{
+		Instruction: spec.Instruction,
+		Workspace:   spec.Workspace,
+		Budget:      spec.Budget,
+		Depth:       spec.Depth,
+	}); err != nil {
+		proc.Kill() // 회수는 procgroup reaper가 수행
+		proc.ClosePipes()
+		return nil, err
+	}
+	go s.pump(w, traceID, parentSpan)
+	return s, nil
+}
+
+func replaceEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if !strings.HasPrefix(item, prefix) {
+			out = append(out, item)
+		}
+	}
+	return append(out, prefix+value)
+}
+
+// Send는 multiturn 세션에 후속 user 메시지를 주입한다 (§5.2 message,
+// SCP-T25-001). 모델 가시 입력이므로 전달 전에 child span의 user/message로
+// writer를 경유해 durable 기록한다(FR-LOG-03) — 기록 실패 시 전달하지 않는다.
+// 반환값은 그 user/message의 seq다. 비-multiturn·종료 세션은 결정적 거부.
+// 후속 턴의 tool_use는 기존 승인 coordinator를 그대로 경유한다.
+func (s *Subagent) Send(ctx context.Context, text string) (int64, error) {
+	if !s.multiturn {
+		return 0, ErrNotMultiturn
+	}
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if s.doneObserved.Load() || s.stopRequested.Load() || s.pumpFinished.Load() {
+		return 0, ErrSessionTerminal
+	}
+	payload, err := json.Marshal(gen.UserMessagePayload{Text: text})
+	if err != nil {
+		return 0, err
+	}
+	parent := s.parentSpan
+	seq, err := s.writer.Submit(ctx, gen.EventRecord{
+		Ts: now(), TraceID: s.traceID, SpanID: s.childSpn, ParentSpanID: &parent,
+		Kind: gen.KindUserMessage, Actor: "parent", Payload: payload,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("subagent: user/message 기록: %w", err)
+	}
+	if err := s.sendCommand(gen.CommandCmdMessage, gen.MessagePayload{Text: text}); err != nil {
+		return seq, fmt.Errorf("subagent: message 전달: %w", err)
+	}
+	return seq, nil
+}
+
+// Multiturn은 이 세션이 후속 메시지 주입을 수용하는지 여부다.
+func (s *Subagent) Multiturn() bool { return s.multiturn }
+
+// Stop은 중단을 요청한다 (§5.2 stop). 어댑터는 done(stopped)으로 응답해야 한다.
+func (s *Subagent) Stop(reason gen.StopPayloadReason) error {
+	s.stopRequested.Store(true)
+	return s.sendCommand(gen.CommandCmdStop, gen.StopPayload{Reason: reason})
+}
+
+func (s *Subagent) doneWasObserved() bool  { return s.doneObserved.Load() }
+func (s *Subagent) stopWasRequested() bool { return s.stopRequested.Load() }
+
+// Wait는 subagent/done까지 기다려 최종 결과를 반환한다. ctx가 먼저
+// 끝나면 프로세스 그룹을 kill하고 즉시 반환한다 — 회수(reap)는 reaper
+// goroutine이 정확히 한 번 수행하므로 zombie가 남지 않는다.
+func (s *Subagent) Wait(ctx context.Context) (gen.DonePayload, error) {
+	select {
+	case r := <-s.doneCh:
+		return r.done, r.err
+	case <-ctx.Done():
+		s.proc.Kill()
+		return gen.DonePayload{}, ctx.Err()
+	}
+}
+
+// sendCommand는 코어 → 어댑터 명령을 자체 검증(ValidateCommand) 후 보낸다 —
+// 코어가 계약 위반 명령을 만들면 어댑터에 도달하기 전에 실패한다.
+func (s *Subagent) sendCommand(cmd gen.CommandCmd, payload any) error {
+	p, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	line, err := json.Marshal(gen.Command{V: 1, Cmd: cmd, Payload: p})
+	if err != nil {
+		return err
+	}
+	if err := s.vals.ValidateCommand(line); err != nil {
+		return fmt.Errorf("subagent: 발신 명령이 계약 위반: %w", err)
+	}
+	return s.proc.WriteLine(line)
+}
+
+// pump는 어댑터 stdout의 NDJSON을 검증·정규화해 writer로 흘린다.
+//
+// §5.2 시퀀스 강제 (FR-ADP-03): 첫 이벤트는 반드시 subagent/ready이고,
+// ready 중복·done 중복·done 이후의 어떤 출력도 위반이다. 검증·시퀀스·
+// writer 오류는 프로세스 종료(kill) 사유다 — 계약을 어기는 어댑터는
+// 등록될 수 없다(§5.2)의 런타임 판.
+//
+// 프로세스 수명 주기: 종료 관측·회수는 reaper goroutine의 몫이다. 리더
+// 종료 시 reaper가 잔여 그룹을 즉시 죽이므로 EOF는 항상 곧 도착하고,
+// pump는 진짜 EOF까지 전량 drain한 뒤 결과를 확정하고 부모 측 파이프를
+// 닫는다. exit 오류는 결과에 보존된다.
+func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string) {
+	var (
+		sawReady bool
+		done     *gen.DonePayload
+	)
+	// 이 callback만 §5.2 adapter stdout의 ready/done 시퀀스를 검사한다.
+	// Claude CLI의 native stdout에는 §5.2 시퀀스 계약이 없으며, 해당
+	// 어댑터는 같은 procgroup drain에 native Parser callback을 연결한다.
+	drain := s.proc.DrainLines(4*1024*1024, func(line []byte) error {
+		if len(bytes.TrimSpace(line)) == 0 {
+			// "모든 메시지는 한 줄 JSON"(§5.2) — 공백 줄은 상태와 무관하게
+			// 위반이다 (post-done 공백이 시퀀스 검사를 우회하면 안 된다).
+			return fmt.Errorf("subagent: 공백 줄 출력 — §5.2 위반")
+		}
+		if done != nil {
+			return fmt.Errorf("subagent: done 이후 출력 — §5.2 시퀀스 위반")
+		}
+		if err := s.vals.ValidateEvent(line); err != nil {
+			return fmt.Errorf("subagent: 어댑터 이벤트가 §5.2 위반: %w", err)
+		}
+		var ev wireEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			return err
+		}
+		if ev.Kind == gen.KindSubagentReady {
+			if sawReady {
+				return fmt.Errorf("subagent: ready 중복 — §5.2 시퀀스 위반")
+			}
+			sawReady = true
+		} else if !sawReady {
+			return fmt.Errorf("subagent: ready 전에 %s 수신 — 첫 이벤트는 subagent/ready여야 함 (FR-ADP-03)", ev.Kind)
+		}
+		rec := gen.EventRecord{
+			Ts: now(), TraceID: traceID, SpanID: s.childSpn, ParentSpanID: &parentSpan,
+			Kind: ev.Kind, Actor: s.actor, Payload: ev.Payload, Raw: &ev.Raw,
+		}
+		if ev.Kind == gen.KindSubagentUsage {
+			var u gen.UsagePayload
+			if err := json.Unmarshal(ev.Payload, &u); err == nil {
+				rec.UsageIn, rec.UsageOut = &u.InputTokens, &u.OutputTokens
+			}
+		}
+		if _, err := w.Submit(context.Background(), rec); err != nil {
+			return fmt.Errorf("subagent: 이벤트 기록: %w", err)
+		}
+		if ev.Kind == gen.KindSubagentApprovalRequest {
+			var request gen.ApprovalRequestPayload
+			if err := json.Unmarshal(ev.Payload, &request); err != nil {
+				return err
+			}
+			if err := s.approvals.start(request); err != nil {
+				return err
+			}
+		}
+		if ev.Kind == gen.KindSubagentDone {
+			var d gen.DonePayload
+			if err := json.Unmarshal(ev.Payload, &d); err != nil {
+				return err
+			}
+			done = &d
+			s.doneObserved.Store(true)
+			// callback은 성공하지만 drain은 계속된다 — done 이후 출력 감시.
+		}
+		return nil
+	})
+
+	s.pumpFinished.Store(true)
+	approvalErr := s.approvals.fatal()
+	switch {
+	case approvalErr != nil:
+		s.doneCh <- waitResult{err: approvalErr}
+	case drain.HandlerErr != nil:
+		s.doneCh <- waitResult{err: drain.HandlerErr}
+	case drain.ScanErr != nil:
+		s.doneCh <- waitResult{err: drain.ScanErr}
+	case done == nil:
+		s.doneCh <- waitResult{err: fmt.Errorf("subagent: 어댑터가 subagent/done 없이 종료함 (§5.2 위반, exit: %v)", drain.ExitErr)}
+	case drain.ExitErr != nil:
+		// A terminal error is already an explicit protocol result. An adapter
+		// may use its process exit status to mirror that failure, so do not turn
+		// a durable done{status:error} into a second protocol failure. Successful
+		// and stopped results still require a clean adapter exit.
+		if done.Status == gen.DonePayloadStatusError {
+			s.doneCh <- waitResult{done: *done}
+		} else {
+			s.doneCh <- waitResult{err: fmt.Errorf("subagent: done 이후 비정상 종료: %w", drain.ExitErr)}
+		}
+	default:
+		s.doneCh <- waitResult{done: *done}
+	}
+}
+
+func now() int64 { return time.Now().UnixMilli() }

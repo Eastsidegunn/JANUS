@@ -1,0 +1,12 @@
+tool: codex-cli 0.147.0
+command: codex exec --json --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules -s workspace-write -C "/tmp/t8-x07.Za9vm6" "Use a shell command to run sh -c 'exit 42' exactly once. Do not run any other command, and report the exit code."
+date: 2026-10-07
+prompt: Use a shell command to run sh -c 'exit 42' exactly once. Do not run any other command, and report the exit code.
+workspace-initial: empty directory
+exit-code: 0
+interrupt: none
+stderr: 07-command-fail.stderr.txt (separate file)
+recording-env: env -i (HOME, USER, LOGNAME, PATH, LANG=en_US.UTF-8, TERM=dumb); CODEX_HOME=<fresh dir, one-time login>; stdin: </dev/null; workspace under /tmp
+scenario: command-fail
+coverage: error
+verify: python3 JSON scan → command_execution=1, exit_code=42

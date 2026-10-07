@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a11509-f7a4-7003-bde8-3f9e1b1aa323"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll run exactly that one shell command and report its status."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -c \"sh -c 'exit 42'\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -c \"sh -c 'exit 42'\"","aggregated_output":"","exit_code":42,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Exit code: 42"}}
+{"type":"turn.completed","usage":{"input_tokens":26088,"cached_input_tokens":23424,"cache_write_input_tokens":0,"output_tokens":94,"reasoning_output_tokens":0}}

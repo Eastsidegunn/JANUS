@@ -1,0 +1,32 @@
+# Public allow list. Every entry must include a reason after " # ".
+
+# These are deterministic fake values used by redaction tests only. Character
+# classes keep the complete fake token out of this public allow-list itself.
+secrets core/logd/writer_test.go re:^AKIAIOSFODNN7EXAMPL[E]$ # fake AWS value in redaction tests
+secrets core/logd/writer_test.go re:^sk-ant-api03-a[b]cdefghijklmnop$ # fake Anthropic value in redaction tests
+secrets core/logd/writer_test.go re:^ghp_0123456789abcdefgh[i]j0123456789$ # fake GitHub value in redaction tests
+secrets core/logd/writer_test.go re:^xoxb-1234[5]67890-abcdefghijk$ # fake Slack value in redaction tests
+secrets tools/fixturecheck/script_test.go re:^sk-ant-api03-a[b]cdefghijklmnop$ # fake Anthropic value in fixture-check tests
+secrets tools/fixturecheck/script_test.go re:^AKIAIOSFODNN7EXAMPL[E]$ # fake AWS value in fixture-check tests
+secrets tools/fixturecheck/script_test.go re:^ghp_0123456789abcdefgh[i]j0123456789$ # fake GitHub value in fixture-check tests
+secrets core/logd/writer_test.go re:^sk[-]abcdefghijklmnopqrst$ # fake short key in redaction literal test
+secrets seams/store/sqlite/store_test.go re:^sk[-]abcdefghijklmnopqrstuvwxyz$ # fake key in storage redaction test
+
+# These addresses are placeholders in egress-pin tests, not infrastructure
+# endpoints. Regex punctuation classes keep the literals out of this file.
+private_ip seams/world/local/egresspins_test.go re:^10[.]0[.]0[.]1$ # test placeholder address
+private_ip seams/world/local/egresspins_test.go re:^100[.]64[.]0[.]10$ # CGNAT test placeholder address
+private_ip seams/world/local/egressproxy/cmd/hxegressproxy/main_test.go re:^10[.]0[.]0[.]1$ # test placeholder address
+private_ip seams/world/local/egressproxy/cmd/hxegressproxy/main_test.go re:^10[.]0[.]0[.]5$ # test placeholder address
+private_ip seams/world/local/egressproxy/cmd/hxegressproxy/main_test.go re:^100[.]64[.]0[.]10$ # CGNAT test placeholder address
+private_ip seams/world/local/egressproxy/pins_test.go re:^10[.]0[.]0[.]1$ # test placeholder address
+private_ip seams/world/local/egressproxy/pins_test.go re:^10[.]0[.]0[.]5$ # test placeholder address
+private_ip seams/world/local/egressproxy/pins_test.go re:^10[.]1[.]2[.]3$ # test placeholder address
+private_ip seams/world/local/egressproxy/pins_test.go re:^100[.]64[.]0[.]10$ # CGNAT test placeholder address
+private_ip seams/world/local/egressproxy/proxy_test.go re:^10[.]0[.]0[.]1$ # test placeholder address
+private_ip seams/world/local/egressproxy/proxy_test.go re:^192[.]168[.]1[.]1$ # private-network test placeholder address
+private_ip surfaces/hx/run_production_pins_test.go re:^10[.]0[.]0[.]1$ # test placeholder address
+private_ip surfaces/hx/run_production_pins_test.go re:^10[.]0[.]0[.]2$ # test placeholder address
+private_ip surfaces/hx/run_production_pins_test.go re:^10[.]0[.]0[.]5$ # test placeholder address
+private_ip surfaces/hx/run_production_pins_test.go re:^100[.]64[.]0[.]10$ # CGNAT test placeholder address
+private_ip docs/scp-t26-egress-pin.md re:^100[.]64[.]0[.]0$ # RFC 6598 range example in the pin design note

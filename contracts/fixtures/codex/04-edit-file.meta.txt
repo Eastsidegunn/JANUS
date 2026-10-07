@@ -1,0 +1,12 @@
+tool: codex-cli 0.147.0
+command: codex exec --json --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules -s workspace-write -C "/tmp/t8-x04.dzn3Am" "Read hello.txt, then use apply_patch to change its content to 'world'. Do not modify it with shell redirection, sed, or Python. Do not touch any other file."
+date: 2026-10-07
+prompt: Read hello.txt, then use apply_patch to change its content to 'world'. Do not modify it with shell redirection, sed, or Python. Do not touch any other file.
+workspace-initial: hello.txt("hello")
+exit-code: 0
+interrupt: none
+stderr: 04-edit-file.stderr.txt (separate file)
+recording-env: env -i (HOME, USER, LOGNAME, PATH, LANG=en_US.UTF-8, TERM=dumb); CODEX_HOME=<fresh dir, one-time login>; stdin: </dev/null; workspace under /tmp
+scenario: edit-file
+coverage:
+verify: python3 JSON scan → command_execution=1 (exit_code=0), file_change=1, final agent message contains world=1; post-run workspace check: hello.txt == world

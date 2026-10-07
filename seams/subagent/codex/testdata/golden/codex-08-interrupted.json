@@ -1,0 +1,42 @@
+{
+  "fixture": "08-interrupted.ndjson",
+  "events": [
+    {
+      "kind": "subagent/ready",
+      "payload": {
+        "grade": "observable",
+        "native_session_id": "01a1150a-1b27-7212-9393-3593ad0fe948"
+      },
+      "raw_b64": "eyJ0eXBlIjoidGhyZWFkLnN0YXJ0ZWQiLCJ0aHJlYWRfaWQiOiIwMWExMTUwYS0xYjI3LTcyMTItOTM5My0zNTkzYWQwZmU5NDgifQ=="
+    },
+    {
+      "kind": "subagent/message",
+      "payload": {
+        "text": "Starting `tail -f /dev/null` in the foreground now."
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8wIiwidHlwZSI6ImFnZW50X21lc3NhZ2UiLCJ0ZXh0IjoiU3RhcnRpbmcgYHRhaWwgLWYgL2Rldi9udWxsYCBpbiB0aGUgZm9yZWdyb3VuZCBub3cuIn19"
+    },
+    {
+      "kind": "subagent/tool_call",
+      "payload": {
+        "args": {
+          "command": "/bin/zsh -lc 'tail -f /dev/null'"
+        },
+        "call_id": "item_1",
+        "name": "command_execution"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5zdGFydGVkIiwiaXRlbSI6eyJpZCI6Iml0ZW1fMSIsInR5cGUiOiJjb21tYW5kX2V4ZWN1dGlvbiIsImNvbW1hbmQiOiIvYmluL3pzaCAtbGMgJ3RhaWwgLWYgL2Rldi9udWxsJyIsImFnZ3JlZ2F0ZWRfb3V0cHV0IjoiIiwiZXhpdF9jb2RlIjpudWxsLCJzdGF0dXMiOiJpbl9wcm9ncmVzcyJ9fQ=="
+    },
+    {
+      "kind": "subagent/done",
+      "payload": {
+        "result": "(결과 없음: interrupted command_execution)",
+        "status": "stopped"
+      },
+      "raw_b64": ""
+    }
+  ],
+  "unmapped_native_lines": [
+    "turn.started → ignored:turn.started"
+  ]
+}

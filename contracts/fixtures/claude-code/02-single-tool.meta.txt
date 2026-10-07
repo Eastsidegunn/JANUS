@@ -1,0 +1,12 @@
+tool: claude-code 2.1.233
+command: (cd "/tmp/t8-c02.TCOMp5" && claude -p "Use the Glob tool exactly once to list the file names in the current directory, then reply with the names only." --output-format stream-json --verbose --safe-mode --no-session-persistence --permission-mode manual --tools "Glob" --allowedTools "Glob")
+date: 2026-10-07
+prompt: Use the Glob tool exactly once to list the file names in the current directory, then reply with the names only.
+workspace-initial: a.txt("alpha"), b.txt("beta")
+exit-code: 0
+interrupt: none
+stderr: 02-single-tool.stderr.txt (separate file)
+recording-env: env -i (HOME, USER, LOGNAME, PATH, LANG=en_US.UTF-8, TERM=dumb); CLAUDE_CONFIG_DIR=<fresh dir, one-time login>; workspace under /tmp
+scenario: single-tool
+coverage:
+verify: python3 JSON scan → tool_use=1 (Glob), tool_result=1

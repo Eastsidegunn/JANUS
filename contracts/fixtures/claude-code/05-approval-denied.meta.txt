@@ -1,0 +1,12 @@
+tool: claude-code 2.1.233
+command: (cd "/tmp/t8-c05.uqgUM9" && claude -p "Use the Write tool to create a file note.txt with the content test outside the workspace, at /tmp/t8-outside-c05.xNspqx/note.txt." --output-format stream-json --verbose --safe-mode --no-session-persistence --permission-mode manual --tools "Write")
+date: 2026-10-07
+prompt: Use the Write tool to create a file note.txt with the content test outside the workspace, at /tmp/t8-outside-c05.xNspqx/note.txt.
+workspace-initial: empty directory; outside sibling=/tmp/t8-outside-c05.xNspqx (empty directory)
+exit-code: 0
+interrupt: none
+stderr: 05-approval-denied.stderr.txt (separate file)
+recording-env: env -i (HOME, USER, LOGNAME, PATH, LANG=en_US.UTF-8, TERM=dumb); CLAUDE_CONFIG_DIR=<fresh dir, one-time login>; workspace under /tmp
+scenario: approval-denied
+coverage: approval-denied
+verify: python3 JSON scan → tool_use=1 (Write), tool_result=1, permission_denials=1, outside_exists=False

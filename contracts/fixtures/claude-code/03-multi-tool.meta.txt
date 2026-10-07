@@ -1,0 +1,12 @@
+tool: claude-code 2.1.233
+command: (cd "/tmp/t8-c03.LldPzK" && claude -p "Use the Write tool to write hello to hello.txt. Then use the Read tool to read the file back and confirm it. You must use two separate tool calls." --output-format stream-json --verbose --safe-mode --no-session-persistence --permission-mode manual --tools "Write,Read" --allowedTools "Write,Read")
+date: 2026-10-07
+prompt: Use the Write tool to write hello to hello.txt. Then use the Read tool to read the file back and confirm it. You must use two separate tool calls.
+workspace-initial: empty directory
+exit-code: 0
+interrupt: none
+stderr: 03-multi-tool.stderr.txt (separate file)
+recording-env: env -i (HOME, USER, LOGNAME, PATH, LANG=en_US.UTF-8, TERM=dumb); CLAUDE_CONFIG_DIR=<fresh dir, one-time login>; workspace under /tmp
+scenario: multi-tool
+coverage: multi-tool
+verify: python3 JSON scan → tool_use=2 (Write, Read), tool_result=2

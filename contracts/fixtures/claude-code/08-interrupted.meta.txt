@@ -1,0 +1,12 @@
+tool: claude-code 2.1.233
+command: (cd "/tmp/t8-c08.e3xq2Q" && claude -p "Use the Bash tool to run tail -f /dev/null. You must set run_in_background to false. Keep waiting in the foreground. Do not run any other command." --output-format stream-json --verbose --safe-mode --no-session-persistence --permission-mode manual --tools "Bash" --allowedTools "Bash")
+date: 2026-10-07
+prompt: Use the Bash tool to run tail -f /dev/null. You must set run_in_background to false. Keep waiting in the foreground. Do not run any other command.
+workspace-initial: empty directory
+exit-code: 0
+interrupt: one SIGINT (Ctrl-C equivalent) about 4s after start
+stderr: 08-interrupted.stderr.txt (separate file)
+recording-env: env -i (HOME, USER, LOGNAME, PATH, LANG=en_US.UTF-8, TERM=dumb); CLAUDE_CONFIG_DIR=<fresh dir, one-time login>; workspace under /tmp
+scenario: interrupted
+coverage: interrupted
+verify: python3 JSON scan → result subtype=error_during_execution, tool_use=0 (SIGINT interruption recorded)

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "operation_id": "REPLACE_WITH_OPERATION_ID",
+  "scope": "REPLACE_WITH_SCOPE",
+  "idempotency_key": "REPLACE_WITH_IDEMPOTENCY_KEY",
+  "request_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+  "rhizome_execution_id": "REPLACE_WITH_RHIZOME_EXECUTION_ID",
+  "mission_id": "REPLACE_WITH_MISSION_ID",
+  "correlation_id": "REPLACE_WITH_CORRELATION_ID",
+  "adapter_id": "claudecode",
+  "adapter_version": "REPLACE_WITH_ADAPTER_VERSION",
+  "workspace_ref": "/srv/janus/workspace",
+  "task_ref": {
+    "instruction": "REPLACE_WITH_TASK_INSTRUCTION"
+  },
+  "profile_id": "example-profile",
+  "profile_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "policy_mapping_version": "REPLACE_WITH_POLICY_MAPPING_VERSION",
+  "budget": {
+    "tokens": 1000,
+    "time_ms": 60000,
+    "max_depth": 1
+  }
+}

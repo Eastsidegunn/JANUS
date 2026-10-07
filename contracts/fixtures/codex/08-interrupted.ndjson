@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a1150a-1b27-7212-9393-3593ad0fe948"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Starting `tail -f /dev/null` in the foreground now."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'tail -f /dev/null'","aggregated_output":"","exit_code":null,"status":"in_progress"}}

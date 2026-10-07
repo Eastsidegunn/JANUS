@@ -1,0 +1,4 @@
+# Schemas, fixtures, and CI settings — maintainer review required
+/contracts/  @Eastsidegunn
+/fixtures/   @Eastsidegunn
+/.github/    @Eastsidegunn

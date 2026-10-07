@@ -1,0 +1,66 @@
+{
+  "fixture": "06-tool-error.ndjson",
+  "events": [
+    {
+      "kind": "subagent/ready",
+      "payload": {
+        "grade": "observable",
+        "native_session_id": "01a11509-ddd5-7be2-9562-156752dc2281"
+      },
+      "raw_b64": "eyJ0eXBlIjoidGhyZWFkLnN0YXJ0ZWQiLCJ0aHJlYWRfaWQiOiIwMWExMTUwOS1kZGQ1LTdiZTItOTU2Mi0xNTY3NTJkYzIyODEifQ=="
+    },
+    {
+      "kind": "subagent/message",
+      "payload": {
+        "text": "I’ll run that exact read-only command once and report its result."
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8wIiwidHlwZSI6ImFnZW50X21lc3NhZ2UiLCJ0ZXh0IjoiSeKAmWxsIHJ1biB0aGF0IGV4YWN0IHJlYWQtb25seSBjb21tYW5kIG9uY2UgYW5kIHJlcG9ydCBpdHMgcmVzdWx0LiJ9fQ=="
+    },
+    {
+      "kind": "subagent/tool_call",
+      "payload": {
+        "args": {
+          "command": "/bin/zsh -lc 'cat no-such-file.txt'"
+        },
+        "call_id": "item_1",
+        "name": "command_execution"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5zdGFydGVkIiwiaXRlbSI6eyJpZCI6Iml0ZW1fMSIsInR5cGUiOiJjb21tYW5kX2V4ZWN1dGlvbiIsImNvbW1hbmQiOiIvYmluL3pzaCAtbGMgJ2NhdCBuby1zdWNoLWZpbGUudHh0JyIsImFnZ3JlZ2F0ZWRfb3V0cHV0IjoiIiwiZXhpdF9jb2RlIjpudWxsLCJzdGF0dXMiOiJpbl9wcm9ncmVzcyJ9fQ=="
+    },
+    {
+      "kind": "subagent/tool_result",
+      "payload": {
+        "call_id": "item_1",
+        "error": "cat: no-such-file.txt: No such file or directory\n",
+        "status": "error"
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8xIiwidHlwZSI6ImNvbW1hbmRfZXhlY3V0aW9uIiwiY29tbWFuZCI6Ii9iaW4venNoIC1sYyAnY2F0IG5vLXN1Y2gtZmlsZS50eHQnIiwiYWdncmVnYXRlZF9vdXRwdXQiOiJjYXQ6IG5vLXN1Y2gtZmlsZS50eHQ6IE5vIHN1Y2ggZmlsZSBvciBkaXJlY3RvcnlcbiIsImV4aXRfY29kZSI6MSwic3RhdHVzIjoiZmFpbGVkIn19"
+    },
+    {
+      "kind": "subagent/message",
+      "payload": {
+        "text": "`cat: no-such-file.txt: No such file or directory`\n\nExit code: `1`. Nothing was created or modified."
+      },
+      "raw_b64": "eyJ0eXBlIjoiaXRlbS5jb21wbGV0ZWQiLCJpdGVtIjp7ImlkIjoiaXRlbV8yIiwidHlwZSI6ImFnZW50X21lc3NhZ2UiLCJ0ZXh0IjoiYGNhdDogbm8tc3VjaC1maWxlLnR4dDogTm8gc3VjaCBmaWxlIG9yIGRpcmVjdG9yeWBcblxuRXhpdCBjb2RlOiBgMWAuIE5vdGhpbmcgd2FzIGNyZWF0ZWQgb3IgbW9kaWZpZWQuIn19"
+    },
+    {
+      "kind": "subagent/usage",
+      "payload": {
+        "input_tokens": 26117,
+        "output_tokens": 112
+      },
+      "raw_b64": "eyJ0eXBlIjoidHVybi5jb21wbGV0ZWQiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjI2MTE3LCJjYWNoZWRfaW5wdXRfdG9rZW5zIjoyMzQyNCwiY2FjaGVfd3JpdGVfaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjoxMTIsInJlYXNvbmluZ19vdXRwdXRfdG9rZW5zIjowfX0="
+    },
+    {
+      "kind": "subagent/done",
+      "payload": {
+        "result": "`cat: no-such-file.txt: No such file or directory`\n\nExit code: `1`. Nothing was created or modified.",
+        "status": "ok"
+      },
+      "raw_b64": "eyJ0eXBlIjoidHVybi5jb21wbGV0ZWQiLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjI2MTE3LCJjYWNoZWRfaW5wdXRfdG9rZW5zIjoyMzQyNCwiY2FjaGVfd3JpdGVfaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjoxMTIsInJlYXNvbmluZ19vdXRwdXRfdG9rZW5zIjowfX0="
+    }
+  ],
+  "unmapped_native_lines": [
+    "turn.started → ignored:turn.started"
+  ]
+}

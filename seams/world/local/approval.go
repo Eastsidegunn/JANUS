@@ -1,0 +1,731 @@
+package local
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Eastsidegunn/JANUS/core/policy"
+	"github.com/Eastsidegunn/JANUS/core/runtimedir"
+	"github.com/Eastsidegunn/JANUS/core/world"
+	"github.com/Eastsidegunn/JANUS/core/world/approvalrelaywire"
+	"github.com/Eastsidegunn/JANUS/core/world/approvaltiming"
+	"github.com/Eastsidegunn/JANUS/core/world/approvalwire"
+)
+
+const (
+	approvalHostSocketName   = "adapter.sock"
+	approvalRelaySocketName  = "approve.sock"
+	approvalRelayMount       = "/run/hx"
+	approvalRelayPath        = approvalRelayMount + "/" + approvalRelaySocketName
+	defaultApprovalCapacity  = 64
+	defaultApprovalRate      = 128
+	maxApprovalLineBytes     = approvalrelaywire.MaxLineBytes
+	maxApprovalEnvelopeBytes = 8 << 20
+	maxApprovalLifetime      = approvaltiming.ApprovalWaitMax
+)
+
+// The adapter endpoint and the container relay deliberately use different
+// protocols and sockets. Only the request-only relay is mounted into the
+// agent; capability-bearing adapter operations never cross the sandbox.
+type approvalAdapterRequest = approvalwire.Request
+type approvalAdapterResponse = approvalwire.Response
+type approvalHookDelivery = approvalwire.Hook
+type approvalAdapterDecision = approvalwire.Decision
+
+type approvalRelayRequest = approvalrelaywire.Request
+type approvalRelayDecision = approvalrelaywire.Decision
+type approvalRelayAck = approvalrelaywire.Ack
+type approvalNativeInput = approvalrelaywire.NativeInput
+
+type approvalIntent struct {
+	callID    string
+	name      string
+	canonical []byte
+	consumed  bool
+}
+
+// approvalPreIntent records a hook that was delivered to the adapter before
+// the native intent (the adapter's stdout tool_call) was observed. Real
+// claude-code runs the PreToolUse hook before it prints the assistant tool_use
+// line, so holding the hook until the intent arrives is a deterministic
+// deadlock (design decision: hook-first post-hoc correlation). The hook raw itself carries
+// tool_use_id/tool_name/tool_input, so the approval request is complete without
+// the intent; the intent is correlated post hoc and a mismatch is broker fatal
+// because a decision that was already delivered cannot be revoked.
+type approvalPreIntent struct {
+	requestID string
+	name      string
+	canonical []byte
+}
+
+type approvalPendingHook struct {
+	requestID string
+	callID    string
+	name      string
+	canonical []byte
+	raw       []byte
+	reason    *string
+	conn      net.Conn
+	decoder   *json.Decoder
+	done      chan struct{}
+	once      sync.Once
+}
+
+type approvalBroker struct {
+	spanID     string
+	capability string
+	rootDir    string
+	hostDir    string
+	relayDir   string
+	hostPath   string
+	relayPath  string
+	host       net.Listener
+	relay      net.Listener
+	capacity   int
+	rateLimit  int
+	deadline   time.Time
+
+	mu          sync.Mutex
+	intents     map[string]*approvalIntent
+	preIntents  map[string]*approvalPreIntent
+	hooks       map[string]*approvalPendingHook
+	conns       map[net.Conn]struct{}
+	deliveries  chan *approvalPendingHook
+	windowStart time.Time
+	windowCount int
+	closing     bool
+	failed      bool
+	expired     bool
+	firstErr    error
+	warnings    []string
+	warnOut     io.Writer
+	warnOnce    sync.Once
+	done        chan struct{}
+	doneOnce    sync.Once
+	wg          sync.WaitGroup
+}
+
+func startApprovalBroker(parent context.Context, _ string, spanID string, budgetMs int64, capacity int) (*approvalBroker, error) {
+	if capacity == 0 {
+		capacity = defaultApprovalCapacity
+	}
+	if capacity < 1 || !spanPattern.MatchString(spanID) || budgetMs <= 0 {
+		return nil, fmt.Errorf("world/local: approval broker 설정 위반")
+	}
+	deadline := time.Now().Add(maxApprovalLifetime)
+	if budgetMs < maxApprovalLifetime.Milliseconds() {
+		deadline = time.Now().Add(time.Duration(budgetMs) * time.Millisecond)
+	}
+	if parentDeadline, ok := parent.Deadline(); ok && parentDeadline.Before(deadline) {
+		deadline = parentDeadline
+	}
+	if !deadline.After(time.Now()) {
+		return nil, fmt.Errorf("world/local: approval deadline이 이미 만료됨")
+	}
+
+	capabilityBytes := make([]byte, 32)
+	if _, err := rand.Read(capabilityBytes); err != nil {
+		return nil, fmt.Errorf("world/local: approval capability 발급: %w", err)
+	}
+	// Darwin's Unix socket path limit is shorter than a normal t.TempDir-based
+	// world state path. A short per-lease 0700 root is also a tighter boundary:
+	// only its relay child is mounted, while the host adapter socket stays a
+	// sibling that the agent cannot traverse through that mount.
+	runtimeDir, err := runtimedir.Dir()
+	if err != nil {
+		return nil, fmt.Errorf("world/local: runtime directory: %w", err)
+	}
+	rootDir, err := os.MkdirTemp(runtimeDir, "hxa-")
+	if err != nil {
+		return nil, fmt.Errorf("world/local: approval socket root: %w", err)
+	}
+	if err := os.Chmod(rootDir, 0o700); err != nil {
+		_ = os.RemoveAll(rootDir)
+		return nil, fmt.Errorf("world/local: approval socket root mode: %w", err)
+	}
+	hostDir := rootDir
+	relayDir := filepath.Join(rootDir, "relay")
+	if err := os.Mkdir(relayDir, 0o700); err != nil {
+		_ = os.RemoveAll(rootDir)
+		return nil, fmt.Errorf("world/local: approval relay dir: %w", err)
+	}
+	b := &approvalBroker{
+		spanID: spanID, capability: hex.EncodeToString(capabilityBytes),
+		rootDir: rootDir, hostDir: hostDir, relayDir: relayDir,
+		hostPath:  filepath.Join(hostDir, approvalHostSocketName),
+		relayPath: filepath.Join(relayDir, approvalRelaySocketName),
+		capacity:  capacity, rateLimit: defaultApprovalRate, deadline: deadline,
+		intents: map[string]*approvalIntent{}, preIntents: map[string]*approvalPreIntent{},
+		hooks: map[string]*approvalPendingHook{}, deliveries: make(chan *approvalPendingHook, capacity),
+		conns: map[net.Conn]struct{}{}, warnOut: os.Stderr,
+		done: make(chan struct{}), windowStart: time.Now(),
+	}
+	b.host, err = net.Listen("unix", b.hostPath)
+	if err != nil {
+		b.removeDirs()
+		return nil, fmt.Errorf("world/local: approval host listen: %w", err)
+	}
+	b.relay, err = net.Listen("unix", b.relayPath)
+	if err != nil {
+		b.host.Close()
+		b.removeDirs()
+		return nil, fmt.Errorf("world/local: approval relay listen: %w", err)
+	}
+	for _, path := range []string{b.hostPath, b.relayPath} {
+		if err := os.Chmod(path, 0o600); err != nil {
+			b.host.Close()
+			b.relay.Close()
+			b.removeDirs()
+			return nil, fmt.Errorf("world/local: approval socket mode: %w", err)
+		}
+	}
+	b.wg.Add(2)
+	go b.acceptHost()
+	go b.acceptRelay()
+	go func() {
+		select {
+		case <-time.After(time.Until(deadline)):
+			b.expireAll()
+		case <-b.done:
+		}
+	}()
+	return b, nil
+}
+
+func (b *approvalBroker) Endpoint() world.ApprovalEndpoint {
+	return world.NewApprovalEndpoint("unix", b.hostPath, b.capability)
+}
+
+func (b *approvalBroker) RelayDir() string { return b.relayDir }
+
+func (b *approvalBroker) acceptHost() {
+	defer b.wg.Done()
+	for {
+		conn, err := b.host.Accept()
+		if err != nil {
+			if !b.isClosing() {
+				b.fail(fmt.Errorf("world/local: approval host accept: %w", err))
+			}
+			return
+		}
+		b.trackConn(conn)
+		b.wg.Add(1)
+		go func() {
+			defer b.wg.Done()
+			defer b.untrackConn(conn)
+			b.handleHost(conn)
+		}()
+	}
+}
+
+func (b *approvalBroker) handleHost(conn net.Conn) {
+	decoder := json.NewDecoder(io.LimitReader(conn, maxApprovalEnvelopeBytes+1))
+	encoder := json.NewEncoder(conn)
+	var request approvalAdapterRequest
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		b.writeHostError(encoder, "adapter request 계약 위반")
+		b.fail(fmt.Errorf("world/local: approval adapter request: %w", err))
+		return
+	}
+	if request.Capability != b.capability || request.SpanID != b.spanID {
+		b.writeHostError(encoder, "lease capability/span 불일치")
+		b.fail(fmt.Errorf("world/local: approval adapter capability/span 불일치"))
+		return
+	}
+	switch request.Operation {
+	case approvalwire.OperationIntent:
+		if err := b.registerIntent(request); err != nil {
+			b.writeHostError(encoder, err.Error())
+			b.fail(err)
+			return
+		}
+		_ = encoder.Encode(approvalAdapterResponse{OK: true})
+	case approvalwire.OperationNext:
+		b.deliverNext(conn, decoder, encoder)
+	default:
+		b.writeHostError(encoder, "허용되지 않은 adapter operation")
+		b.fail(fmt.Errorf("world/local: approval adapter operation %q", request.Operation))
+	}
+}
+
+// deliverNext hands one hook to the adapter. A hook enqueued before the
+// deadline carries no deadline mark from the broker; blocking a late allow is
+// the host Budget deadline's job (subagent), exactly as for intent-first hooks.
+func (b *approvalBroker) deliverNext(conn net.Conn, decoder *json.Decoder, encoder *json.Encoder) {
+	var hook *approvalPendingHook
+	select {
+	case hook = <-b.deliveries:
+	case <-b.done:
+		b.writeHostError(encoder, "approval broker 종료")
+		return
+	}
+	if hook == nil {
+		b.writeHostError(encoder, "approval broker 종료")
+		return
+	}
+	if err := encoder.Encode(approvalAdapterResponse{OK: true, Hook: &approvalHookDelivery{
+		RequestID: hook.requestID, Raw: hook.raw, Reason: hook.reason,
+	}}); err != nil {
+		b.failHook(hook, "adapter delivery 실패", err)
+		return
+	}
+	var decision approvalAdapterDecision
+	if err := decoder.Decode(&decision); err != nil {
+		b.failHook(hook, "adapter decision 계약 위반", err)
+		return
+	}
+	if decision.RequestID != hook.requestID || (decision.Decision != "allow" && decision.Decision != "deny") ||
+		(decision.Decision == "deny" && (decision.Reason == nil || *decision.Reason == "")) {
+		b.failHook(hook, "adapter decision 계약 위반", errors.New("request_id/decision/reason"))
+		return
+	}
+	if hook.reason != nil && decision.Decision != "deny" {
+		b.failHook(hook, "강제 deny를 adapter가 allow로 변경", errors.New("forced deny violation"))
+		return
+	}
+	if err := json.NewEncoder(hook.conn).Encode(approvalRelayDecision{Decision: decision.Decision, Reason: decision.Reason}); err != nil {
+		b.failHook(hook, "hook decision 전송 실패", err)
+		return
+	}
+	var ack approvalRelayAck
+	if err := hook.decoder.Decode(&ack); err != nil || !ack.Delivered {
+		if err == nil {
+			err = errors.New("delivered ack가 false")
+		}
+		b.failHook(hook, "hook delivery ACK 실패", err)
+		return
+	}
+	b.completeHook(hook)
+	_ = encoder.Encode(approvalAdapterResponse{OK: true, Delivered: true})
+}
+
+func (b *approvalBroker) acceptRelay() {
+	defer b.wg.Done()
+	for {
+		conn, err := b.relay.Accept()
+		if err != nil {
+			if !b.isClosing() {
+				b.fail(fmt.Errorf("world/local: approval relay accept: %w", err))
+			}
+			return
+		}
+		b.trackConn(conn)
+		b.wg.Add(1)
+		go func() {
+			defer b.wg.Done()
+			defer b.untrackConn(conn)
+			b.handleRelay(conn)
+		}()
+	}
+}
+
+func (b *approvalBroker) handleRelay(conn net.Conn) {
+	decoder := json.NewDecoder(io.LimitReader(conn, maxApprovalEnvelopeBytes+1))
+	var request approvalRelayRequest
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil || len(request.Raw) == 0 || len(request.Raw) > maxApprovalLineBytes {
+		if err == nil {
+			err = fmt.Errorf("raw 크기 %d", len(request.Raw))
+		}
+		b.fail(fmt.Errorf("world/local: approval relay request 계약 위반: %w", err))
+		return
+	}
+	var input approvalNativeInput
+	if err := json.Unmarshal(request.Raw, &input); err != nil || input.HookEventName != "PreToolUse" ||
+		input.ToolUseID == "" || input.ToolName == "" {
+		b.fail(fmt.Errorf("world/local: approval native hook 계약 위반"))
+		return
+	}
+	canonical, err := canonicalObject(input.ToolInput)
+	if err != nil {
+		b.fail(fmt.Errorf("world/local: approval hook args: %w", err))
+		return
+	}
+	requestID, err := newApprovalRequestID()
+	if err != nil {
+		b.fail(err)
+		return
+	}
+	hook := &approvalPendingHook{
+		requestID: requestID, callID: input.ToolUseID, name: input.ToolName,
+		canonical: canonical, raw: append([]byte(nil), request.Raw...), conn: conn, decoder: decoder,
+		done: make(chan struct{}),
+	}
+	if err := b.admitHook(hook); err != nil {
+		b.directDeny(hook, err.Error())
+		b.fail(err)
+		return
+	}
+	select {
+	case <-hook.done:
+	case <-b.done:
+		// fail closes done before it denies its pending snapshot; use the same
+		// reason here so a fatal is never reported as an ordinary shutdown.
+		reason := "approval broker 종료"
+		b.mu.Lock()
+		if b.failed {
+			reason = "approval relay fatal"
+		}
+		b.mu.Unlock()
+		b.directDeny(hook, reason)
+		<-hook.done
+	}
+}
+
+func (b *approvalBroker) admitHook(hook *approvalPendingHook) error {
+	b.mu.Lock()
+	if b.closing {
+		b.mu.Unlock()
+		return fmt.Errorf("approval broker 종료 중")
+	}
+	now := time.Now()
+	if now.Sub(b.windowStart) >= time.Second {
+		b.windowStart, b.windowCount = now, 0
+	}
+	b.windowCount++
+	if b.windowCount > b.rateLimit {
+		b.mu.Unlock()
+		return fmt.Errorf("approval relay 요청률 한도 초과")
+	}
+	if len(b.hooks) >= b.capacity {
+		b.mu.Unlock()
+		return fmt.Errorf("approval relay pending 한도 초과")
+	}
+	b.hooks[hook.requestID] = hook
+	if b.expired {
+		hook.reason = stringPointer("approval deadline 초과")
+		b.mu.Unlock()
+		return b.enqueue(hook)
+	}
+	intent := b.intents[hook.callID]
+	if intent == nil {
+		// hook-first: deliver now and correlate when the intent arrives
+		// (design decision: hook-first post-hoc correlation). A second hook for the same pre-intent call is the
+		// same one-shot violation as a duplicate after a consumed intent.
+		if b.preIntents[hook.callID] != nil {
+			hook.reason = stringPointer("duplicate tool intent")
+		} else {
+			if len(b.intents)+len(b.preIntents) >= b.capacity {
+				b.mu.Unlock()
+				return fmt.Errorf("approval intent ledger 포화")
+			}
+			b.preIntents[hook.callID] = &approvalPreIntent{
+				requestID: hook.requestID, name: hook.name, canonical: hook.canonical,
+			}
+		}
+		b.mu.Unlock()
+		return b.enqueue(hook)
+	}
+	b.classifyLocked(intent, hook)
+	b.mu.Unlock()
+	return b.enqueue(hook)
+}
+
+func (b *approvalBroker) registerIntent(request approvalAdapterRequest) error {
+	canonical, err := canonicalObject(request.Args)
+	if err != nil || request.CallID == "" || request.Name == "" {
+		return fmt.Errorf("world/local: approval intent 계약 위반")
+	}
+	b.mu.Lock()
+	if pre := b.preIntents[request.CallID]; pre != nil {
+		// The hook for this call was already delivered and decided before the
+		// native intent was observed. A post-hoc deny is impossible, so a
+		// mismatch fails the whole broker closed instead of being a plain deny.
+		// This runs before the closing check: hook-first means the intent always
+		// trails the decision, so a matching intent racing lease Shutdown is
+		// normal and must not become a fatal; a mismatch is fatal regardless.
+		delete(b.preIntents, request.CallID)
+		if pre.name != request.Name || !bytes.Equal(pre.canonical, canonical) {
+			b.mu.Unlock()
+			return fmt.Errorf("world/local: approval post-hoc intent mismatch %s (hook request %s)", request.CallID, pre.requestID)
+		}
+		if !b.expired && !b.closing {
+			b.intents[request.CallID] = &approvalIntent{
+				callID: request.CallID, name: request.Name, canonical: canonical, consumed: true,
+			}
+		}
+		b.mu.Unlock()
+		return nil
+	}
+	if b.closing {
+		b.mu.Unlock()
+		return fmt.Errorf("world/local: approval broker 종료 중")
+	}
+	if b.expired {
+		b.mu.Unlock()
+		return nil // deadline 뒤 intent는 권한을 만들지 않으며 hook은 강제 deny된다.
+	}
+	if _, exists := b.intents[request.CallID]; exists {
+		b.mu.Unlock()
+		return fmt.Errorf("world/local: duplicate native tool intent %s", request.CallID)
+	}
+	if len(b.intents)+len(b.preIntents) >= b.capacity {
+		b.mu.Unlock()
+		return fmt.Errorf("world/local: approval intent ledger 포화")
+	}
+	b.intents[request.CallID] = &approvalIntent{callID: request.CallID, name: request.Name, canonical: canonical}
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *approvalBroker) classifyLocked(intent *approvalIntent, hook *approvalPendingHook) {
+	switch {
+	case intent.name != hook.name || !bytes.Equal(intent.canonical, hook.canonical):
+		hook.reason = stringPointer("tool intent mismatch")
+	case intent.consumed:
+		hook.reason = stringPointer("duplicate tool intent")
+	default:
+		intent.consumed = true
+	}
+}
+
+func (b *approvalBroker) enqueue(hook *approvalPendingHook) error {
+	select {
+	case b.deliveries <- hook:
+		return nil
+	default:
+		err := fmt.Errorf("world/local: approval delivery queue 포화")
+		b.directDeny(hook, err.Error())
+		b.fail(err)
+		return err
+	}
+}
+
+// expireAll marks the deadline: every hook admitted afterwards is a forced
+// deny with "approval deadline 초과" (admitHook). No hook is parked waiting for
+// an intent any more (design decision: hook-first post-hoc correlation), so nothing is re-enqueued here.
+func (b *approvalBroker) expireAll() {
+	b.mu.Lock()
+	b.expired = true
+	b.mu.Unlock()
+}
+
+func (b *approvalBroker) failHook(hook *approvalPendingHook, reason string, cause error) {
+	b.directDeny(hook, reason)
+	b.fail(fmt.Errorf("world/local: %s: %w", reason, cause))
+}
+
+func (b *approvalBroker) directDeny(hook *approvalPendingHook, reason string) {
+	hook.once.Do(func() {
+		_ = hook.conn.SetDeadline(time.Now().Add(time.Second))
+		_ = json.NewEncoder(hook.conn).Encode(approvalRelayDecision{Decision: "deny", Reason: &reason})
+		var ack approvalRelayAck
+		_ = hook.decoder.Decode(&ack)
+		b.removeHook(hook)
+		close(hook.done)
+	})
+}
+
+func (b *approvalBroker) completeHook(hook *approvalPendingHook) {
+	hook.once.Do(func() {
+		b.removeHook(hook)
+		close(hook.done)
+	})
+}
+
+func (b *approvalBroker) removeHook(hook *approvalPendingHook) {
+	b.mu.Lock()
+	delete(b.hooks, hook.requestID)
+	b.mu.Unlock()
+}
+
+func (b *approvalBroker) fail(err error) {
+	b.mu.Lock()
+	if b.firstErr == nil {
+		b.firstErr = err
+	}
+	if b.failed {
+		b.mu.Unlock()
+		return
+	}
+	b.failed, b.closing = true, true
+	hooks := make([]*approvalPendingHook, 0, len(b.hooks))
+	for _, hook := range b.hooks {
+		hooks = append(hooks, hook)
+	}
+	b.mu.Unlock()
+	b.closeListeners()
+	b.doneOnce.Do(func() { close(b.done) })
+	for _, hook := range hooks {
+		b.directDeny(hook, "approval relay fatal")
+	}
+	b.closeConnections()
+}
+
+func (b *approvalBroker) Shutdown(ctx context.Context) error {
+	shutdownCtx, cancel := context.WithDeadline(ctx, b.deadline)
+	defer cancel()
+	defer b.reportUncorrelated()
+	b.mu.Lock()
+	if !b.closing {
+		b.closing = true
+	}
+	b.mu.Unlock()
+	if b.relay != nil {
+		_ = b.relay.Close()
+	}
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		b.mu.Lock()
+		remaining := len(b.hooks)
+		b.mu.Unlock()
+		if remaining == 0 {
+			break
+		}
+		select {
+		case <-shutdownCtx.Done():
+			b.fail(fmt.Errorf("world/local: approval durable deny drain: %w", shutdownCtx.Err()))
+			return errors.Join(shutdownCtx.Err(), b.Err())
+		case <-ticker.C:
+		}
+	}
+	b.doneOnce.Do(func() { close(b.done) })
+	if b.host != nil {
+		_ = b.host.Close()
+	}
+	b.closeConnections()
+	b.wg.Wait()
+	return b.Err()
+}
+
+func (b *approvalBroker) Err() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.firstErr
+}
+
+func (b *approvalBroker) Cleanup() error {
+	b.reportUncorrelated()
+	b.mu.Lock()
+	b.closing = true
+	b.mu.Unlock()
+	b.closeListeners()
+	b.doneOnce.Do(func() { close(b.done) })
+	b.closeConnections()
+	b.wg.Wait()
+	return b.removeDirs()
+}
+
+// Warnings returns the non-fatal observations recorded at broker shutdown.
+func (b *approvalBroker) Warnings() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.warnings...)
+}
+
+// reportUncorrelated records, once, every pre-intent hook whose native intent
+// never arrived (for example the agent died between hook and stdout). It is
+// not fatal and adds no backstop: the hook itself was already bounded by the
+// adapter decision/lease/deadline paths. The record only keeps the gap
+// observable, on stderr and through Warnings (design decision: hook-first post-hoc correlation).
+func (b *approvalBroker) reportUncorrelated() {
+	b.warnOnce.Do(func() {
+		b.mu.Lock()
+		calls := make([]string, 0, len(b.preIntents))
+		for callID, pre := range b.preIntents {
+			calls = append(calls, callID+"(request "+pre.requestID+")")
+		}
+		if len(calls) == 0 {
+			b.mu.Unlock()
+			return
+		}
+		sort.Strings(calls)
+		message := fmt.Sprintf("world/local: approval warning: pre-intent hook %d건이 native intent와 미상관 상태로 broker 종료: %s",
+			len(calls), strings.Join(calls, ", "))
+		b.warnings = append(b.warnings, message)
+		out := b.warnOut
+		b.mu.Unlock()
+		if out != nil {
+			_, _ = fmt.Fprintln(out, message)
+		}
+	})
+}
+
+func (b *approvalBroker) closeListeners() {
+	if b.host != nil {
+		_ = b.host.Close()
+	}
+	if b.relay != nil {
+		_ = b.relay.Close()
+	}
+}
+
+func (b *approvalBroker) trackConn(conn net.Conn) {
+	b.mu.Lock()
+	b.conns[conn] = struct{}{}
+	b.mu.Unlock()
+}
+
+func (b *approvalBroker) untrackConn(conn net.Conn) {
+	b.mu.Lock()
+	delete(b.conns, conn)
+	b.mu.Unlock()
+	_ = conn.Close()
+}
+
+func (b *approvalBroker) closeConnections() {
+	b.mu.Lock()
+	connections := make([]net.Conn, 0, len(b.conns))
+	for conn := range b.conns {
+		connections = append(connections, conn)
+	}
+	b.mu.Unlock()
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+}
+
+func (b *approvalBroker) removeDirs() error {
+	return os.RemoveAll(b.rootDir)
+}
+
+func (b *approvalBroker) isClosing() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.closing
+}
+
+func (b *approvalBroker) writeHostError(encoder *json.Encoder, message string) {
+	_ = encoder.Encode(approvalAdapterResponse{Error: message})
+}
+
+func canonicalObject(raw json.RawMessage) ([]byte, error) {
+	return policy.CanonicalArgs(raw)
+}
+
+func newApprovalRequestID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("world/local: approval request_id 발급: %w", err)
+	}
+	value[6] = (value[6] & 0x0f) | 0x40
+	value[8] = (value[8] & 0x3f) | 0x80
+	var out [36]byte
+	hex.Encode(out[0:8], value[0:4])
+	out[8] = '-'
+	hex.Encode(out[9:13], value[4:6])
+	out[13] = '-'
+	hex.Encode(out[14:18], value[6:8])
+	out[18] = '-'
+	hex.Encode(out[19:23], value[8:10])
+	out[23] = '-'
+	hex.Encode(out[24:36], value[10:16])
+	return string(out[:]), nil
+}
+
+func stringPointer(value string) *string { return &value }

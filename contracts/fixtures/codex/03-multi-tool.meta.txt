@@ -1,0 +1,12 @@
+tool: codex-cli 0.147.0
+command: codex exec --json --skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules -s workspace-write -C "/tmp/t8-x03.GEpyuw" "Run two separate shell commands. The first command writes hello to hello.txt. The second command reads the file back to confirm it."
+date: 2026-10-07
+prompt: Run two separate shell commands. The first command writes hello to hello.txt. The second command reads the file back to confirm it.
+workspace-initial: empty directory
+exit-code: 0
+interrupt: none
+stderr: 03-multi-tool.stderr.txt (separate file)
+recording-env: env -i (HOME, USER, LOGNAME, PATH, LANG=en_US.UTF-8, TERM=dumb); CODEX_HOME=<fresh dir, one-time login>; stdin: </dev/null; workspace under /tmp
+scenario: multi-tool
+coverage: multi-tool
+verify: python3 JSON scan → command_execution started=2 (both completed exit_code=0)
