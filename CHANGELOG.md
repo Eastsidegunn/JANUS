@@ -8,6 +8,10 @@ Entries are grouped by implementation task (T0–T32). Requirement IDs refer to 
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-08
+
+Maintenance release: two fixes found on a real deployment run. No interface or schema changes.
+
 ### Fixed
 
 - **Approval relay startup race (FR-POL-05, FR-CLI-06).** `hx run` now serializes stale-socket inspection, removal, and bind with an endpoint lock; it rejects live or non-socket owners before claim and treats the relay as ready only after `Listen` has bound successfully.
@@ -66,5 +70,6 @@ First public release, corresponding to functional spec v0.1. Pre-1.0: interfaces
 - Policy merge cannot widen permissions or budgets (property-tested).
 - Log writes cannot be updated or deleted at the storage level (triggers) or through the API.
 
-[Unreleased]: https://github.com/Eastsidegunn/JANUS/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Eastsidegunn/JANUS/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Eastsidegunn/JANUS/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Eastsidegunn/JANUS/releases/tag/v0.1.0
