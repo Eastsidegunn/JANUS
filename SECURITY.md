@@ -43,7 +43,8 @@ JANUS runs coding agents that you do not trust. The design assumes:
   the hook, while normal results and execution errors (missing-file Read,
   non-zero Bash exit, Read of a directory, Write into a read-only directory)
   all ran the hook and came back as plain text, so the wrapper cannot shield
-  a tool that actually executed (short of stdout forgery). The fixed
+  a tool that actually executed (short of stdout forgery). MCP servers are not
+  loaded (`--strict-mcp-config`; no `--mcp-config` is passed). The fixed
   container version 2.1.252 has not yet been measured and is an explicit
   assumption covered by the operator-only `smoke` build-tag test.
 - **OS-level isolation is the backstop.** The agent runs in a rootless Podman container. Network egress is denied by default and goes through an egress proxy that enforces a domain allowlist and records every allow and deny. File changes land in an overlay and are observed from outside the agent. These do not depend on the agent's cooperation.

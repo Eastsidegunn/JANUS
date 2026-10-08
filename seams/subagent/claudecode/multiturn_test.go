@@ -27,7 +27,7 @@ import (
 // explicit oneshot value and the absent (empty) mode.
 func TestContainerArgvForOneshotIsByteIdenticalToT24(t *testing.T) {
 	instruction := "ls /workspace\n한글 'quoted' $HOME"
-	want := []string{"/opt/bin/claude", "-p", instruction, "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--permission-mode", "manual", "--setting-sources", "project,local", "--settings", `{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"hxapprove || exit 2","timeout":600}]}]}}`}
+	want := []string{"/opt/bin/claude", "-p", instruction, "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--strict-mcp-config", "--permission-mode", "manual", "--setting-sources", "project,local", "--settings", `{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"hxapprove || exit 2","timeout":600}]}]}}`}
 	for _, mode := range []gen.SubagentSpawnPayloadSessionMode{"", gen.SubagentSpawnPayloadSessionModeOneshot} {
 		if got := ContainerArgvFor(want[0], instruction, mode); !reflect.DeepEqual(got, want) {
 			t.Fatalf("mode %q argv drift:\ngot:  %q\nwant: %q", mode, got, want)
@@ -43,7 +43,7 @@ func TestContainerArgvForOneshotIsByteIdenticalToT24(t *testing.T) {
 func TestContainerArgvForMultiturnKeepsIsolationFlags(t *testing.T) {
 	instruction := "첫 지시 -- --dangerous"
 	got := ContainerArgvFor("/opt/bin/claude", instruction, gen.SubagentSpawnPayloadSessionModeMultiturn)
-	want := []string{"/opt/bin/claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--permission-mode", "manual", "--setting-sources", "project,local", "--settings", `{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"hxapprove || exit 2","timeout":600}]}]}}`}
+	want := []string{"/opt/bin/claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--strict-mcp-config", "--permission-mode", "manual", "--setting-sources", "project,local", "--settings", `{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"hxapprove || exit 2","timeout":600}]}]}}`}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("multiturn argv:\ngot:  %q\nwant: %q", got, want)
 	}

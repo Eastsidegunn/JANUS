@@ -626,6 +626,7 @@ func ContainerArgvFor(bin, instruction string, mode gen.SubagentSpawnPayloadSess
 		"--output-format", "stream-json",
 		"--verbose",
 		"--no-session-persistence",
+		"--strict-mcp-config",
 		"--permission-mode", "manual",
 		"--setting-sources", claudeSettingSources,
 		"--settings", claudeApprovalHookSettings,
