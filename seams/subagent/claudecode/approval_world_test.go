@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/contracts/validate"
 	"github.com/Eastsidegunn/JANUS/core/world"
+	"github.com/Eastsidegunn/JANUS/core/world/approvalrelaywire"
 )
 
 type capturedLines struct {
@@ -29,13 +32,18 @@ func (c capturedLines) Write(value []byte) (int, error) {
 }
 
 type fakeWorldApprovalBroker struct {
-	listener net.Listener
-	intents  chan worldApprovalRequest
-	next     chan *fakeWorldNext
-	done     chan struct{}
-	mu       sync.Mutex
-	conns    map[net.Conn]struct{}
-	wg       sync.WaitGroup
+	listener       net.Listener
+	relay          net.Listener
+	intents        chan worldApprovalRequest
+	next           chan *fakeWorldNext
+	hooks          chan *fakeWorldHook
+	relayFinished  chan error
+	deliveredDelay time.Duration
+	afterDelivered func()
+	done           chan struct{}
+	mu             sync.Mutex
+	conns          map[net.Conn]struct{}
+	wg             sync.WaitGroup
 }
 
 type fakeWorldNext struct {
@@ -43,6 +51,33 @@ type fakeWorldNext struct {
 	encoder *json.Encoder
 	decoder *json.Decoder
 	done    chan struct{}
+}
+
+type fakeWorldHook struct {
+	raw       []byte
+	decision  chan fakeWorldDecisionResult
+	acked     chan error
+	delivered chan error
+}
+
+type fakeWorldDecisionResult struct {
+	decision worldApprovalDecision
+	err      error
+}
+
+type fakeWorldApprovalBrokerOption func(*fakeWorldApprovalBroker)
+
+// withFakeWorldApprovalRelay makes the approval fake own the same complete
+// relay -> next poll -> decision -> hook ACK -> Delivered exchange as the real
+// world broker. afterDelivered runs only after the adapter has consumed the
+// Delivered response and closed that poll connection.
+func withFakeWorldApprovalRelay(delay time.Duration, afterDelivered func()) fakeWorldApprovalBrokerOption {
+	return func(b *fakeWorldApprovalBroker) {
+		b.hooks = make(chan *fakeWorldHook, 1)
+		b.relayFinished = make(chan error, 1)
+		b.deliveredDelay = delay
+		b.afterDelivered = afterDelivered
+	}
 }
 
 func TestWorldApprovalClientRegistersIntentAndPreservesForcedHook(t *testing.T) {
@@ -224,6 +259,7 @@ func TestAdapterExecutableRegistersRealFixtureToolIntentWithWorldBroker(t *testi
 	bins := buildAdapterBinaries(t)
 	fixture := filepath.Join(fixtureDir, "02-single-tool.ndjson")
 	run := runFixtureProcess(t, bins, fixture, []string{
+		testApprovalGateDisabledEnv + "=1",
 		worldApprovalNetworkEnv + "=unix",
 		worldApprovalAddressEnv + "=" + broker.listener.Addr().String(),
 		worldApprovalCapabilityEnv + "=capability",
@@ -242,7 +278,7 @@ func TestAdapterExecutableRegistersRealFixtureToolIntentWithWorldBroker(t *testi
 	}
 }
 
-func newFakeWorldApprovalBroker(t *testing.T) *fakeWorldApprovalBroker {
+func newFakeWorldApprovalBroker(t *testing.T, options ...fakeWorldApprovalBrokerOption) *fakeWorldApprovalBroker {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "hx-world-client-")
 	if err != nil {
@@ -257,6 +293,19 @@ func newFakeWorldApprovalBroker(t *testing.T) *fakeWorldApprovalBroker {
 		listener: listener, intents: make(chan worldApprovalRequest, 8),
 		next: make(chan *fakeWorldNext, worldApprovalWorkers), done: make(chan struct{}),
 		conns: map[net.Conn]struct{}{},
+	}
+	for _, option := range options {
+		option(b)
+	}
+	if b.hooks != nil {
+		b.relay, err = net.Listen("unix", filepath.Join(dir, "relay.sock"))
+		if err != nil {
+			_ = listener.Close()
+			_ = os.RemoveAll(dir)
+			t.Fatal(err)
+		}
+		b.wg.Add(1)
+		go b.acceptRelay()
 	}
 	b.wg.Add(1)
 	go func() {
@@ -299,6 +348,10 @@ func (b *fakeWorldApprovalBroker) handle(conn net.Conn) {
 		b.intents <- request
 		_ = encoder.Encode(worldApprovalResponse{OK: true})
 	case "next":
+		if b.hooks != nil {
+			b.handleRelayPoll(conn, encoder, decoder)
+			return
+		}
 		session := &fakeWorldNext{conn: conn, encoder: encoder, decoder: decoder, done: make(chan struct{})}
 		select {
 		case b.next <- session:
@@ -312,6 +365,149 @@ func (b *fakeWorldApprovalBroker) handle(conn net.Conn) {
 	}
 }
 
+func (b *fakeWorldApprovalBroker) acceptRelay() {
+	defer b.wg.Done()
+	conn, err := b.relay.Accept()
+	if err == nil {
+		b.mu.Lock()
+		b.conns[conn] = struct{}{}
+		b.mu.Unlock()
+		err = b.handleRelay(conn)
+		b.mu.Lock()
+		delete(b.conns, conn)
+		b.mu.Unlock()
+		_ = conn.Close()
+	}
+	b.relayFinished <- err
+}
+
+func (b *fakeWorldApprovalBroker) handleRelay(conn net.Conn) error {
+	decoder, encoder := json.NewDecoder(conn), json.NewEncoder(conn)
+	var request approvalrelaywire.Request
+	if err := decoder.Decode(&request); err != nil {
+		return err
+	}
+	hook := &fakeWorldHook{
+		raw: append([]byte(nil), request.Raw...), decision: make(chan fakeWorldDecisionResult, 1),
+		acked: make(chan error, 1), delivered: make(chan error, 1),
+	}
+	select {
+	case b.hooks <- hook:
+	case <-b.done:
+		return errors.New("fake world approval broker closed")
+	}
+	var result fakeWorldDecisionResult
+	select {
+	case result = <-hook.decision:
+	case <-b.done:
+		return errors.New("fake world approval broker closed")
+	}
+	if result.err != nil {
+		return result.err
+	}
+	if err := encoder.Encode(approvalrelaywire.Decision{
+		Decision: result.decision.Decision, Reason: result.decision.Reason,
+	}); err != nil {
+		return err
+	}
+	var ack approvalrelaywire.Ack
+	err := decoder.Decode(&ack)
+	if err == nil && !ack.Delivered {
+		err = errors.New("hxapprove delivered ack was false")
+	}
+	hook.acked <- err
+	if err != nil {
+		return err
+	}
+	select {
+	case err = <-hook.delivered:
+		return err
+	case <-b.done:
+		return errors.New("fake world approval broker closed")
+	}
+}
+
+func (b *fakeWorldApprovalBroker) handleRelayPoll(conn net.Conn, encoder *json.Encoder, decoder *json.Decoder) {
+	var hook *fakeWorldHook
+	select {
+	case hook = <-b.hooks:
+	case <-b.done:
+		return
+	}
+	fail := func(err error) {
+		select {
+		case hook.decision <- fakeWorldDecisionResult{err: err}:
+		default:
+		}
+		select {
+		case hook.delivered <- err:
+		default:
+		}
+	}
+	const requestID = "33333333-3333-4333-8333-333333333333"
+	if err := encoder.Encode(worldApprovalResponse{OK: true, Hook: &worldApprovalHook{
+		RequestID: requestID, Raw: hook.raw,
+	}}); err != nil {
+		fail(err)
+		return
+	}
+	var decision worldApprovalDecision
+	if err := decoder.Decode(&decision); err != nil {
+		fail(err)
+		return
+	}
+	if decision.RequestID != requestID || decision.Decision != "allow" {
+		fail(errors.New("world adapter did not return allow"))
+		return
+	}
+	hook.decision <- fakeWorldDecisionResult{decision: decision}
+	select {
+	case err := <-hook.acked:
+		if err != nil {
+			fail(err)
+			return
+		}
+	case <-b.done:
+		return
+	}
+	if b.deliveredDelay > 0 {
+		timer := time.NewTimer(b.deliveredDelay)
+		select {
+		case <-timer.C:
+		case <-b.done:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		}
+	}
+	if err := encoder.Encode(worldApprovalResponse{OK: true, Delivered: true}); err != nil {
+		fail(err)
+		return
+	}
+	// Waiting for EOF makes the test process-lifecycle hook deterministic: the
+	// adapter decoded Delivered and completed pollOne before fake Claude exits.
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != nil && !errors.Is(err, io.EOF) {
+		fail(err)
+		return
+	}
+	hook.delivered <- nil
+	if b.afterDelivered != nil {
+		b.afterDelivered()
+	}
+}
+
+func (b *fakeWorldApprovalBroker) RelayAddress() string {
+	if b.relay == nil {
+		return ""
+	}
+	return b.relay.Addr().String()
+}
+
 func (b *fakeWorldApprovalBroker) Close() {
 	select {
 	case <-b.done:
@@ -320,6 +516,9 @@ func (b *fakeWorldApprovalBroker) Close() {
 		close(b.done)
 	}
 	b.listener.Close()
+	if b.relay != nil {
+		b.relay.Close()
+	}
 	b.mu.Lock()
 	connections := make([]net.Conn, 0, len(b.conns))
 	for conn := range b.conns {

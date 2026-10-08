@@ -42,6 +42,8 @@ type pendingApproval struct {
 	decision  chan hookSocketDecision
 	delivered chan struct{}
 	responded bool
+	callID    string
+	name      string
 }
 
 type approvalServer struct {
@@ -163,6 +165,7 @@ func (s *approvalServer) handle(conn net.Conn) {
 	}
 
 	decision := s.awaitDecision(pending)
+	s.writer.markApprovalDecisionSent(pending.callID, pending.name)
 	if err := s.writeDecision(conn, decision); err != nil {
 		s.report(fmt.Errorf("claudecode: hxapprove 판정 전달: %w", err))
 		return
@@ -203,7 +206,10 @@ func (s *approvalServer) begin(raw []byte, requestID string, forcedReason *strin
 			return "", nil, err
 		}
 	}
-	pending := &pendingApproval{decision: make(chan hookSocketDecision, 1), delivered: make(chan struct{})}
+	pending := &pendingApproval{
+		decision: make(chan hookSocketDecision, 1), delivered: make(chan struct{}),
+		callID: input.ToolUseID, name: input.ToolName,
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()

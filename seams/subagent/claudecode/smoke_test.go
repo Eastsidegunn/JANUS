@@ -14,10 +14,13 @@ package claudecode
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -113,6 +116,184 @@ func TestSmokeApprovalHookWithoutRelay(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(stderr.String()), "approval hook blocked") {
 		t.Fatalf("stderr lacks approval hook blocked diagnostic: %q", stderr.String())
+	}
+}
+
+// TestSmokeApprovalGateBypassExitOne is the human-run T33 probe. Real Claude
+// treats a PreToolUse command exit 1 as non-blocking, so Read may execute once;
+// the adapter must still preserve that result and close the session as error.
+func TestSmokeApprovalGateBypassExitOne(t *testing.T) {
+	claudeBin := preflight(t)
+	workspace := t.TempDir()
+	sentinelBytes := make([]byte, 16)
+	if _, err := rand.Read(sentinelBytes); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := fmt.Sprintf("JANUS-T33-%x", sentinelBytes)
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte(sentinel+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := ConfigFromEnv()
+	cfg.ClaudeBin = claudeBin
+	cfg.approvalHookSettingsForTest = `{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"exit 1","timeout":30}]}]}}`
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	in, commands := io.Pipe()
+	out, events := io.Pipe()
+	errCh := make(chan error, 1)
+	var stderr strings.Builder
+	go func() {
+		err := Run(ctx, in, events, &stderr, cfg)
+		_ = events.CloseWithError(err)
+		errCh <- err
+	}()
+	payload, err := json.Marshal(gen.TaskPayload{
+		Instruction: "Use the Read tool exactly once to read README.md, then answer DONE.",
+		Workspace:   workspace, Budget: gen.Budget{Tokens: 200000, TimeMs: 120000, MaxDepth: 1}, Depth: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := json.Marshal(gen.Command{V: 1, Cmd: gen.CommandCmdTask, Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := commands.Write(append(line, '\n')); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawContent bool
+	var done gen.DonePayload
+	scanner := bufio.NewScanner(out)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxLineBytes)
+	for scanner.Scan() {
+		var event gen.Event
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		switch event.Kind {
+		case gen.EventKindSubagentToolResult:
+			var result gen.AgentToolResultPayload
+			if err := json.Unmarshal(event.Payload, &result); err != nil {
+				t.Fatal(err)
+			}
+			sawContent = bytes.Contains(result.Output, []byte(sentinel))
+		case gen.EventKindSubagentDone:
+			if err := json.Unmarshal(event.Payload, &done); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	_ = commands.Close()
+	runErr := <-errCh
+	t.Logf("tool result contained sentinel=%v; done=%+v; err=%v; stderr=%s", sawContent, done, runErr, stderr.String())
+	if runErr == nil || done.Status != gen.DonePayloadStatusError ||
+		!strings.HasPrefix(done.Result, "approval gate bypassed: tool_result Read/") {
+		t.Fatalf("bypass was not terminal error: done=%+v err=%v", done, runErr)
+	}
+	if !sawContent {
+		t.Fatal("real Read tool_result did not preserve the sentinel content")
+	}
+}
+
+// TestSmokePreHookInputValidationExemption is the T33(c) operator probe for
+// the pinned container Claude Code 2.1.252. The exemption shape was measured
+// four times on 2.1.293; 2.1.252 is intentionally an unmeasured assumption
+// until a maintainer runs this tagged test with that binary.
+func TestSmokePreHookInputValidationExemption(t *testing.T) {
+	claudeBin := preflight(t)
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "sample.txt"), []byte("alpha\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := ConfigFromEnv()
+	cfg.ClaudeBin = claudeBin
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	in, commands := io.Pipe()
+	out, events := io.Pipe()
+	errCh := make(chan error, 1)
+	var stderr strings.Builder
+	go func() {
+		err := Run(ctx, in, events, &stderr, cfg)
+		_ = events.CloseWithError(err)
+		errCh <- err
+	}()
+	payload, err := json.Marshal(gen.TaskPayload{
+		Instruction: `Use the Edit tool exactly once on sample.txt with old_string "zzz-not-present" and new_string "replacement". Do not use another tool. After the Edit error, answer DONE.`,
+		Workspace:   workspace, Budget: gen.Budget{Tokens: 200000, TimeMs: 120000, MaxDepth: 1}, Depth: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := json.Marshal(gen.Command{V: 1, Cmd: gen.CommandCmdTask, Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := commands.Write(append(line, '\n')); err != nil {
+		t.Fatal(err)
+	}
+
+	var exemptCallID string
+	var sawApprovalRequest bool
+	var done gen.DonePayload
+	scanner := bufio.NewScanner(out)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxLineBytes)
+	for scanner.Scan() {
+		var event gen.Event
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		switch event.Kind {
+		case gen.EventKindSubagentApprovalRequest:
+			sawApprovalRequest = true
+		case gen.EventKindSubagentToolResult:
+			var result gen.AgentToolResultPayload
+			if err := json.Unmarshal(event.Payload, &result); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := base64.StdEncoding.DecodeString(event.Raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var native nativeLine
+			if err := json.Unmarshal(raw, &native); err != nil {
+				t.Fatal(err)
+			}
+			blocks, err := decodeBlocks(native.Message)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, block := range blocks {
+				if block.Type == "tool_result" && block.ToolUseID == result.CallID && isPreToolUseValidationError(block) {
+					exemptCallID = result.CallID
+				}
+			}
+		case gen.EventKindSubagentDone:
+			if err := json.Unmarshal(event.Payload, &done); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	_ = commands.Close()
+	runErr := <-errCh
+	t.Logf("pre-hook validation call_id=%s; approval_request=%v; done=%+v; err=%v; stderr=%s", exemptCallID, sawApprovalRequest, done, runErr, stderr.String())
+	if runErr != nil {
+		t.Fatalf("pre-hook validation exemption did not terminate normally: %v", runErr)
+	}
+	if sawApprovalRequest {
+		t.Fatal("Edit input validation unexpectedly reached PreToolUse")
+	}
+	if exemptCallID == "" {
+		t.Fatal("exact wrapped input-validation tool_result was not preserved in session output")
+	}
+	if done.Status != gen.DonePayloadStatusOk {
+		t.Fatalf("done=%+v, want ok", done)
+	}
+	if !strings.Contains(stderr.String(), approvalGateInputValidationDiagnostic+exemptCallID) {
+		t.Fatalf("stderr lacks exemption marker for %s: %q", exemptCallID, stderr.String())
 	}
 }
 

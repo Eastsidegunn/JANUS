@@ -30,7 +30,23 @@ type Event struct {
 	// Raw는 이 이벤트를 낳은 원본 NDJSON 한 줄(개행 제외)의 바이트다.
 	// 한 원본이 여러 이벤트를 만들면 같은 raw가 각각 붙는다 (제안서 §4).
 	Raw []byte
+	// approvalGateExemption is parser-authored evidence that a result did not
+	// cross the PreToolUse execution boundary. The writer still applies it only
+	// when its decision-send ledger has no matching call_id.
+	approvalGateExemption approvalGateExemption
 }
+
+type approvalGateExemption uint8
+
+const (
+	approvalGateExemptionNone approvalGateExemption = iota
+	// Recorded Claude Code 2.1.233 fixture 05 demonstrates the pair
+	// system/permission_denied + user.tool_result_meta[user-rejected].
+	approvalGateExemptionRejected
+	// Claude Code 2.1.293 was measured returning this validation result before
+	// PreToolUse. Its native raw form remains attached for log recomputation.
+	approvalGateExemptionInputValidation
+)
 
 // Parser는 스트림 상태를 들고 줄 단위로 변환한다. 한 세션에 하나.
 type Parser struct {
@@ -38,6 +54,9 @@ type Parser struct {
 	// rejectedEmitted는 system/permission_denied로 rejected를 이미 방출한
 	// call_id다. 후속 user.tool_result는 확인용 중복으로 소비한다(제안서 §3.3).
 	rejectedEmitted map[string]bool
+	// toolResults는 정규화 tool_result를 이미 방출한 call_id다. Claude의
+	// permission_denied 뒤 user-rejected 확인 통보만 위 예외 경로에서 소비한다.
+	toolResults map[string]bool
 	// stopRequested는 코어가 stop 명령을 보냈음을 뜻한다 — done 매핑의
 	// 1순위 근거(제안서 §8.3).
 	stopRequested atomic.Bool
@@ -69,7 +88,7 @@ type Parser struct {
 
 // NewParser는 빈 상태의 변환기를 만든다.
 func NewParser() *Parser {
-	return &Parser{rejectedEmitted: map[string]bool{}}
+	return &Parser{rejectedEmitted: map[string]bool{}, toolResults: map[string]bool{}}
 }
 
 // NewMultiturnParser는 다중 턴 세션용 변환기를 만든다. oneshot 매핑(골든)은
@@ -294,16 +313,23 @@ func (p *Parser) parseSystem(n nativeLine, line []byte) ([]Event, error) {
 		if n.ToolUseID == "" {
 			return nil, fmt.Errorf("claudecode: permission_denied에 tool_use_id 없음")
 		}
+		if err := p.noteToolResult(n.ToolUseID); err != nil {
+			return nil, err
+		}
 		reason := n.DecisionReason
 		if reason == "" {
 			reason = "권한 거부(사유 미보고)"
 		}
 		p.rejectedEmitted[n.ToolUseID] = true
-		return p.emit(gen.EventKindSubagentToolResult, gen.AgentToolResultPayload{
+		events, err := p.emit(gen.EventKindSubagentToolResult, gen.AgentToolResultPayload{
 			CallID: n.ToolUseID,
 			Status: gen.AgentToolResultPayloadStatusRejected,
 			Reason: &reason,
 		}, line)
+		if err == nil {
+			events[0].approvalGateExemption = approvalGateExemptionRejected
+		}
+		return events, err
 	}
 	return nil, fmt.Errorf("claudecode: 미지의 system subtype=%q", n.Subtype)
 }
@@ -462,6 +488,9 @@ func (p *Parser) parseUser(n nativeLine, line []byte) ([]Event, error) {
 				p.disposition = "consumed:rejection-confirmation"
 				continue // 확인용 중복 통보 — 미방출
 			}
+			if err := p.noteToolResult(b.ToolUseID); err != nil {
+				return nil, err
+			}
 			payload, err := toolResultPayload(b, rejectedIDs[b.ToolUseID])
 			if err != nil {
 				return nil, err
@@ -469,6 +498,11 @@ func (p *Parser) parseUser(n nativeLine, line []byte) ([]Event, error) {
 			ev, err := p.emit(gen.EventKindSubagentToolResult, payload, line)
 			if err != nil {
 				return nil, err
+			}
+			if payload.Status == gen.AgentToolResultPayloadStatusRejected {
+				ev[0].approvalGateExemption = approvalGateExemptionRejected
+			} else if isPreToolUseValidationError(b) {
+				ev[0].approvalGateExemption = approvalGateExemptionInputValidation
 			}
 			out = append(out, ev...)
 		case "text":
@@ -479,6 +513,43 @@ func (p *Parser) parseUser(n nativeLine, line []byte) ([]Event, error) {
 		}
 	}
 	return out, nil
+}
+
+func (p *Parser) noteToolResult(callID string) error {
+	if p.toolResults[callID] {
+		return fmt.Errorf("claudecode: call_id %s의 tool_result 중복", callID)
+	}
+	p.toolResults[callID] = true
+	return nil
+}
+
+const (
+	toolUseErrorOpen  = "<tool_use_error>"
+	toolUseErrorClose = "</tool_use_error>"
+)
+
+// isPreToolUseValidationError recognizes only the native shape measured with
+// Claude Code 2.1.293: is_error=true and content wholly wrapped by the
+// Claude-authored tool_use_error tags. For block-array content, exactly one
+// text block is required; mixed or multiple blocks fail closed.
+func isPreToolUseValidationError(b nativeBlock) bool {
+	if !b.IsError || len(b.Content) == 0 {
+		return false
+	}
+	var text string
+	if err := json.Unmarshal(b.Content, &text); err == nil {
+		return isWholeToolUseError(text)
+	}
+	var blocks []nativeBlock
+	if err := json.Unmarshal(b.Content, &blocks); err != nil || len(blocks) != 1 || blocks[0].Type != "text" {
+		return false
+	}
+	return isWholeToolUseError(blocks[0].Text)
+}
+
+func isWholeToolUseError(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	return strings.HasPrefix(trimmed, toolUseErrorOpen) && strings.HasSuffix(trimmed, toolUseErrorClose)
 }
 
 func toolResultPayload(b nativeBlock, rejected bool) (gen.AgentToolResultPayload, error) {

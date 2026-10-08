@@ -226,7 +226,10 @@ type multiturnBroker struct {
 	listener   net.Listener
 	stdinClose chan struct{}
 	stdinData  chan []byte
+	stops      chan struct{}
 	finished   chan error
+	processMu  sync.Mutex
+	process    *os.Process
 }
 
 func startMultiturnBroker(t *testing.T, ctx context.Context, argv []string, env []string) *multiturnBroker {
@@ -241,7 +244,10 @@ func startMultiturnBroker(t *testing.T, ctx context.Context, argv []string, env 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { listener.Close() })
-	b := &multiturnBroker{listener: listener, stdinClose: make(chan struct{}, 1), stdinData: make(chan []byte, 16), finished: make(chan error, 1)}
+	b := &multiturnBroker{
+		listener: listener, stdinClose: make(chan struct{}, 1), stdinData: make(chan []byte, 16),
+		stops: make(chan struct{}, 1), finished: make(chan error, 1),
+	}
 	go func() { b.finished <- b.serve(ctx, argv, env) }()
 	return b
 }
@@ -308,6 +314,9 @@ func (b *multiturnBroker) serve(ctx context.Context, argv []string, env []string
 			if err := cmd.Start(); err != nil {
 				return err
 			}
+			b.processMu.Lock()
+			b.process = cmd.Process
+			b.processMu.Unlock()
 			go func() {
 				buf := make([]byte, 32*1024)
 				for {
@@ -341,6 +350,7 @@ func (b *multiturnBroker) serve(ctx context.Context, argv []string, env []string
 			b.stdinClose <- struct{}{}
 			_ = stdin.Close()
 		case processwire.KindStop:
+			b.stops <- struct{}{}
 			_ = cmd.Process.Kill()
 		case processwire.KindWait:
 		default:
@@ -351,6 +361,16 @@ func (b *multiturnBroker) serve(ctx context.Context, argv []string, env []string
 			return err
 		}
 	}
+}
+
+func (b *multiturnBroker) signalProcess(signal os.Signal) error {
+	b.processMu.Lock()
+	process := b.process
+	b.processMu.Unlock()
+	if process == nil {
+		return fmt.Errorf("fake world process has not started")
+	}
+	return process.Signal(signal)
 }
 
 type eventStream struct {
@@ -448,11 +468,12 @@ func TestWorldProcessMultiturnInjectsFollowUpTurn(t *testing.T) {
 	var stderr bytes.Buffer
 	go func() {
 		err := Run(ctx, input, outW, &stderr, Config{
-			ClaudeBin:        "not-a-host-executable",
-			ProcessEndpoint:  world.NewProcessEndpoint("unix", broker.listener.Addr().String(), "lease", "control", "output"),
-			ApprovalEndpoint: world.NewApprovalEndpoint("unix", approvals.listener.Addr().String(), "capability"),
-			WorldSpanID:      "2222222222222222",
-			SessionMode:      gen.SubagentSpawnPayloadSessionModeMultiturn,
+			ClaudeBin:                  "not-a-host-executable",
+			ProcessEndpoint:            world.NewProcessEndpoint("unix", broker.listener.Addr().String(), "lease", "control", "output"),
+			ApprovalEndpoint:           world.NewApprovalEndpoint("unix", approvals.listener.Addr().String(), "capability"),
+			WorldSpanID:                "2222222222222222",
+			SessionMode:                gen.SubagentSpawnPayloadSessionModeMultiturn,
+			disableApprovalGateForTest: true, // test owns turn injection/intent relay, not hook execution
 		})
 		_ = outW.CloseWithError(err)
 		runErr <- err

@@ -33,7 +33,7 @@ func TestFakeClaudeHookOrderModes(t *testing.T) {
 	const callID = "toolu_015RSsY1h8UtCcm35pts1TAc"
 	for _, order := range []string{"native-first", "hook-first"} {
 		t.Run(order, func(t *testing.T) {
-			events, raw, stderr, waitErr := runOrderedFixture(t, bins, fixture, order)
+			events, raw, stderr, waitErr := runOrderedFixture(t, bins, fixture, order, gen.ApprovalResponsePayloadDecisionDeny)
 			if waitErr != nil {
 				t.Fatalf("adapter exit: %v\n%s", waitErr, stderr)
 			}
@@ -185,7 +185,7 @@ func TestFakeClaudeModelsNonBlockingHookErrors(t *testing.T) {
 	}
 }
 
-func runOrderedFixture(t *testing.T, bins adapterBinaries, fixture, order string) ([]gen.Event, []byte, string, error) {
+func runOrderedFixture(t *testing.T, bins adapterBinaries, fixture, order string, decision gen.ApprovalResponsePayloadDecision) ([]gen.Event, []byte, string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -194,7 +194,7 @@ func runOrderedFixture(t *testing.T, bins adapterBinaries, fixture, order string
 		"HX_CLAUDE_BIN="+bins.fake,
 		"HX_CLAUDE_FIXTURE="+fixture,
 		"HX_CLAUDE_HOOK_ORDER="+order,
-		"HX_CLAUDE_HOOK_EXPECT_DECISION=deny",
+		"HX_CLAUDE_HOOK_EXPECT_DECISION="+string(decision),
 	)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -240,7 +240,7 @@ func runOrderedFixture(t *testing.T, bins adapterBinaries, fixture, order string
 		if hookRaw, err = base64.StdEncoding.DecodeString(event.Raw); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := stdin.Write(approvalResponseLine(t, request.RequestID, gen.ApprovalResponsePayloadDecisionDeny)); err != nil {
+		if _, err := stdin.Write(approvalResponseLine(t, request.RequestID, decision)); err != nil {
 			t.Fatal(err)
 		}
 	}

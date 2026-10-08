@@ -135,7 +135,10 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 			if handlerErr != nil {
 				break
 			}
-			if err := w.emit(e.Kind, e.Payload, e.Raw); err != nil {
+			if err := w.emitEvent(e); err != nil {
+				if errors.Is(err, errApprovalGateBypass) {
+					fmt.Fprintln(stderr, "claudecode:", err)
+				}
 				handlerErr = err
 				break
 			}
@@ -204,14 +207,7 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 		doneEvent, finishErr = WithAPIErrorDone(doneEvent, parser.APIErrorText())
 	}
 	terminalErr := finishErr
-	select {
-	case <-tokenExpired:
-		// Expiry is a credential failure, not a normal stopped completion. The
-		// deterministic done result intentionally contains no token or response
-		// body and is emitted below once the ready gate permits a terminal event.
-		terminalErr = errTokenExpired
-	default:
-	}
+	terminalErr = applyWorldTokenExpiry(terminalErr, tokenExpired)
 	if terminalErr == nil {
 		terminalErr = cmdErr
 	}
@@ -260,6 +256,22 @@ func runWorldProcess(ctx context.Context, in io.ReadCloser, stderr io.Writer, cf
 		approvals.markReady()
 	}
 	return w.emit(doneEvent.Kind, doneEvent.Payload, doneEvent.Raw)
+}
+
+func applyWorldTokenExpiry(terminalErr error, tokenExpired <-chan struct{}) error {
+	select {
+	case <-tokenExpired:
+		// Expiry is a credential failure, not a normal stopped completion. The
+		// deterministic done result intentionally contains no token or response
+		// body and is emitted below once the ready gate permits a terminal event.
+		// A detected approval bypass is already the stronger fail-closed cause
+		// and, like emitFailureDone's stop handling, must survive this race.
+		if !errors.Is(terminalErr, errApprovalGateBypass) {
+			terminalErr = errTokenExpired
+		}
+	default:
+	}
+	return terminalErr
 }
 
 var errAuthenticationFailed = errors.New("Claude 인증 실패")

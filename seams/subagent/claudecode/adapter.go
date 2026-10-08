@@ -21,19 +21,21 @@ import (
 )
 
 const (
-	defaultClaudeExecutable    = "claude"
-	claudeSettingSources       = "project,local"
-	maxCommandBytes            = 4 << 20
-	worldApprovalNetworkEnv    = "HX_WORLD_APPROVAL_NETWORK"
-	worldApprovalAddressEnv    = "HX_WORLD_APPROVAL_ADDRESS"
-	worldApprovalCapabilityEnv = "HX_WORLD_APPROVAL_CAPABILITY"
-	worldApprovalSpanEnv       = "HX_WORLD_APPROVAL_SPAN_ID"
-	worldAdapterSpanEnv        = "HX_WORLD_SPAN_ID"
-	worldProcessNetworkEnv     = "HX_WORLD_PROCESS_NETWORK"
-	worldProcessAddressEnv     = "HX_WORLD_PROCESS_ADDRESS"
-	worldProcessLeaseEnv       = "HX_WORLD_PROCESS_LEASE_ID"
-	worldProcessControlEnv     = "HX_WORLD_PROCESS_CONTROL_CAPABILITY"
-	worldProcessOutputEnv      = "HX_WORLD_PROCESS_OUTPUT_CAPABILITY"
+	defaultClaudeExecutable               = "claude"
+	claudeSettingSources                  = "project,local"
+	maxCommandBytes                       = 4 << 20
+	worldApprovalNetworkEnv               = "HX_WORLD_APPROVAL_NETWORK"
+	worldApprovalAddressEnv               = "HX_WORLD_APPROVAL_ADDRESS"
+	worldApprovalCapabilityEnv            = "HX_WORLD_APPROVAL_CAPABILITY"
+	worldApprovalSpanEnv                  = "HX_WORLD_APPROVAL_SPAN_ID"
+	worldAdapterSpanEnv                   = "HX_WORLD_SPAN_ID"
+	worldProcessNetworkEnv                = "HX_WORLD_PROCESS_NETWORK"
+	worldProcessAddressEnv                = "HX_WORLD_PROCESS_ADDRESS"
+	worldProcessLeaseEnv                  = "HX_WORLD_PROCESS_LEASE_ID"
+	worldProcessControlEnv                = "HX_WORLD_PROCESS_CONTROL_CAPABILITY"
+	worldProcessOutputEnv                 = "HX_WORLD_PROCESS_OUTPUT_CAPABILITY"
+	testApprovalGateDisabledEnv           = "HX_CLAUDE_TEST_APPROVAL_GATE_DISABLED"
+	approvalGateInputValidationDiagnostic = "claudecode: approval gate exemption: pre-hook input validation call_id="
 	// sessionModeEnv carries the durable spawn payload session_mode
 	// (SCP-T25-001 §2) from the host seam to this adapter process. The host
 	// seam (seams/subagent) writes the same name; absence means oneshot.
@@ -59,7 +61,19 @@ var (
 	errDuplicateApproval  = errors.New("중복 approval_response")
 	errTokenExpired       = errors.New("token expired")
 	errMessageWrite       = errors.New("후속 메시지 주입 실패")
+	errApprovalGateBypass = errors.New("approval gate bypassed")
 )
+
+type approvalGateBypassError struct {
+	Name   string
+	CallID string
+}
+
+func (e *approvalGateBypassError) Error() string {
+	return fmt.Sprintf("approval gate bypassed: tool_result %s/%s without approval_request", e.Name, e.CallID)
+}
+
+func (e *approvalGateBypassError) Unwrap() error { return errApprovalGateBypass }
 
 // Config contains host-controlled process settings. ClaudeBin is a single
 // executable path, never a shell command.
@@ -75,6 +89,12 @@ type Config struct {
 	// SessionMode is the spawn payload session_mode. Empty means oneshot
 	// (SCP-T25-001 §2); multiturn is accepted only on the local-podman branch.
 	SessionMode gen.SubagentSpawnPayloadSessionMode
+	// Package tests may disable the detective gate when approval is outside
+	// their subject. ConfigFromEnv permits this only for a Fake-prefixed native
+	// executable. The hook override has no environment/production entry point.
+	disableApprovalGateForTest  bool
+	approvalHookSettingsForTest string
+	configErr                   error
 }
 
 func (c Config) multiturn() bool {
@@ -134,18 +154,27 @@ func ConfigFromEnv() Config {
 		worldApprovalSpanEnv, worldAdapterSpanEnv, approvalSocketEnv,
 		worldProcessNetworkEnv, worldProcessAddressEnv, worldProcessLeaseEnv,
 		worldProcessControlEnv, worldProcessOutputEnv,
-		world.ClaudeOAuthTokenEnv, sessionModeEnv,
+		world.ClaudeOAuthTokenEnv, sessionModeEnv, testApprovalGateDisabledEnv,
 	} {
 		env = removeEnv(env, key)
 	}
 	sessionMode := gen.SubagentSpawnPayloadSessionMode(os.Getenv(sessionModeEnv))
+	disableGate := os.Getenv(testApprovalGateDisabledEnv) == "1"
+	var configErr error
+	if disableGate && !strings.HasPrefix(strings.ToLower(filepath.Base(bin)), "fake") {
+		configErr = fmt.Errorf("claudecode: %s is restricted to Fake-prefixed test executables", testApprovalGateDisabledEnv)
+	}
 	// hxapprove is installed beside the adapter binary. Prepending exactly that
 	// directory keeps the approved inline hook command constant in one place.
 	if executable, err := os.Executable(); err == nil {
 		dir := filepath.Dir(executable)
 		env = replaceEnv(env, "PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
-	return Config{ClaudeBin: bin, Env: env, ProcessEndpoint: processEndpoint, ApprovalEndpoint: endpoint, WorldSpanID: spanID, TokenExpiresAtUnixMs: tokenExpiry, SessionMode: sessionMode}
+	return Config{
+		ClaudeBin: bin, Env: env, ProcessEndpoint: processEndpoint, ApprovalEndpoint: endpoint,
+		WorldSpanID: spanID, TokenExpiresAtUnixMs: tokenExpiry, SessionMode: sessionMode,
+		disableApprovalGateForTest: disableGate, configErr: configErr,
+	}
 }
 
 func replaceEnv(env []string, key, value string) []string {
@@ -172,12 +201,43 @@ func removeEnv(env []string, key string) []string {
 
 // wireWriter serializes and validates every adapter → core event.
 type wireWriter struct {
-	mu   sync.Mutex
-	out  io.Writer
-	vals *validate.Validators
+	mu          sync.Mutex
+	out         io.Writer
+	diagnostics io.Writer
+	vals        *validate.Validators
+	gate        *approvalGateLedger
+}
+
+type approvalGateLedger struct {
+	approved map[string]string
+	tools    map[string]string
+}
+
+func newApprovalGateLedger() *approvalGateLedger {
+	return &approvalGateLedger{approved: map[string]string{}, tools: map[string]string{}}
 }
 
 func (w *wireWriter) emit(kind gen.EventKind, payload json.RawMessage, raw []byte) error {
+	return w.emitChecked(kind, payload, raw, approvalGateExemptionNone)
+}
+
+func (w *wireWriter) emitEvent(event Event) error {
+	return w.emitChecked(event.Kind, event.Payload, event.Raw, event.approvalGateExemption)
+}
+
+// markApprovalDecisionSent records approval immediately before the decision is
+// sent to the hook. Sharing w.mu with emitChecked makes the decision send
+// precede every tool_result that the now-unblocked hook can cause Claude to
+// emit, without depending on a later delivery ACK racing native stdout.
+func (w *wireWriter) markApprovalDecisionSent(callID, name string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.gate != nil {
+		w.gate.approved[callID] = name
+	}
+}
+
+func (w *wireWriter) emitChecked(kind gen.EventKind, payload json.RawMessage, raw []byte, exemption approvalGateExemption) error {
 	line, err := json.Marshal(gen.Event{
 		V: 1, Kind: kind, Payload: payload, Raw: RawB64(raw),
 	})
@@ -190,6 +250,27 @@ func (w *wireWriter) emit(kind gen.EventKind, payload json.RawMessage, raw []byt
 	line = append(line, '\n')
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	var bypass *approvalGateBypassError
+	var exemptedInputValidation string
+	if w.gate != nil && kind == gen.EventKindSubagentToolResult {
+		var result gen.AgentToolResultPayload
+		if err := json.Unmarshal(payload, &result); err != nil {
+			return err
+		}
+		if _, ok := w.gate.approved[result.CallID]; !ok {
+			name := w.gate.tools[result.CallID]
+			if name == "" {
+				name = "unknown"
+			}
+			switch exemption {
+			case approvalGateExemptionRejected:
+			case approvalGateExemptionInputValidation:
+				exemptedInputValidation = result.CallID
+			default:
+				bypass = &approvalGateBypassError{Name: name, CallID: result.CallID}
+			}
+		}
+	}
 	for len(line) > 0 {
 		n, err := w.out.Write(line)
 		if err != nil {
@@ -200,6 +281,24 @@ func (w *wireWriter) emit(kind gen.EventKind, payload json.RawMessage, raw []byt
 		}
 		line = line[n:]
 	}
+	if w.gate != nil {
+		switch kind {
+		case gen.EventKindSubagentToolCall:
+			var call gen.AgentToolCallPayload
+			if err := json.Unmarshal(payload, &call); err != nil {
+				return err
+			}
+			w.gate.tools[call.CallID] = call.Name
+		}
+	}
+	if exemptedInputValidation != "" && w.diagnostics != nil {
+		if _, err := fmt.Fprintln(w.diagnostics, approvalGateInputValidationDiagnostic+exemptedInputValidation); err != nil {
+			return fmt.Errorf("claudecode: approval gate exemption 진단 쓰기: %w", err)
+		}
+	}
+	if bypass != nil {
+		return bypass // tool_result is written before the detective fatal.
+	}
 	return nil
 }
 
@@ -207,6 +306,9 @@ func (w *wireWriter) emit(kind gen.EventKind, payload json.RawMessage, raw []byt
 // command scanner: on some platforms closing a pipe does not interrupt an
 // already-blocked read. The process exit reclaims that goroutine and fd.
 func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Config) error {
+	if cfg.configErr != nil {
+		return cfg.configErr
+	}
 	if cfg.ClaudeBin == "" {
 		return fmt.Errorf("claudecode: Claude 실행 파일이 비어 있음")
 	}
@@ -243,7 +345,10 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 		return fmt.Errorf("claudecode: task payload: %w", err)
 	}
 
-	w := &wireWriter{out: out, vals: vals}
+	w := &wireWriter{out: out, diagnostics: stderr, vals: vals}
+	if !cfg.disableApprovalGateForTest {
+		w.gate = newApprovalGateLedger()
+	}
 	approvals, err := newApprovalTransport(w, cfg)
 	if err != nil {
 		return fmt.Errorf("claudecode: approval socket: %w", err)
@@ -295,7 +400,10 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 					return fmt.Errorf("claudecode: world intent 등록: %w", err)
 				}
 			}
-			if err := w.emit(e.Kind, e.Payload, e.Raw); err != nil {
+			if err := w.emitEvent(e); err != nil {
+				if errors.Is(err, errApprovalGateBypass) {
+					fmt.Fprintln(stderr, "claudecode:", err)
+				}
 				return err
 			}
 			if e.Kind == gen.EventKindSubagentReady {
@@ -354,11 +462,16 @@ func Run(ctx context.Context, in io.ReadCloser, out, stderr io.Writer, cfg Confi
 
 func emitFailureDone(w *wireWriter, cause error, stopRequested bool) error {
 	status := gen.DonePayloadStatusError
-	if stopRequested {
+	var bypass *approvalGateBypassError
+	if errors.As(cause, &bypass) {
+		stopRequested = false // detective fatal wins over a racing user stop.
+	} else if stopRequested {
 		status = gen.DonePayloadStatusStopped
 	}
 	result := "(어댑터 오류: " + terminalCause(cause) + ")"
-	if errors.Is(cause, errTokenExpired) {
+	if bypass != nil {
+		result = bypass.Error()
+	} else if errors.Is(cause, errTokenExpired) {
 		result = "token expired"
 	}
 	payload, err := json.Marshal(gen.DonePayload{
@@ -477,7 +590,17 @@ func monitorCommands(scanner *bufio.Scanner, vals *validate.Validators, parser *
 }
 
 func claudeCommand(cfg Config, task gen.TaskPayload) []string {
-	return ContainerArgv(cfg.ClaudeBin, task.Instruction)
+	argv := ContainerArgv(cfg.ClaudeBin, task.Instruction)
+	if cfg.approvalHookSettingsForTest == "" {
+		return argv
+	}
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "--settings" {
+			argv[i+1] = cfg.approvalHookSettingsForTest
+			break
+		}
+	}
+	return argv
 }
 
 // ContainerArgv builds the in-container Claude PID1 command. Host and container

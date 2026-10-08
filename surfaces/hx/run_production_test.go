@@ -97,6 +97,15 @@ func TestAdapterBaseEnvOmitsUnsetHXRuntimeDir(t *testing.T) {
 	}
 }
 
+func TestAdapterBaseEnvNeverEnablesClaudeApprovalGateTestMode(t *testing.T) {
+	t.Setenv("HX_CLAUDE_TEST_APPROVAL_GATE_DISABLED", "1")
+	for _, item := range adapterBaseEnv() {
+		if strings.HasPrefix(item, "HX_CLAUDE_TEST_APPROVAL_GATE_DISABLED=") {
+			t.Fatalf("production adapter environment exposed test-only gate control: %q", item)
+		}
+	}
+}
+
 func containsEnv(env []string, want string) bool {
 	for _, value := range env {
 		if value == want {

@@ -4,9 +4,18 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/) from its first tagged release, v0.1.0. Until 1.0, minor versions may contain breaking changes.
 
-Entries are grouped by implementation task (T0–T32). Requirement IDs refer to the [functional spec](docs/hx-기능명세서-v0.1.md); test evidence is in [docs/traceability.md](docs/traceability.md).
+Entries are grouped by implementation task (T0–T33). Requirement IDs refer to the [functional spec](docs/hx-기능명세서-v0.1.md); test evidence is in [docs/traceability.md](docs/traceability.md).
 
 ## [Unreleased]
+
+### Fixed
+
+- **Claude approval-gate bypass detection (FR-POL-05, FR-ADP-10).** In `tool_approval` sessions, the Claude adapter now ends the session with an error after observing a non-rejected tool result whose call ID has no preceding approval request. The result is still recorded before termination so the append-only log reflects that the tool may already have run once.
+- **Claude pre-hook input-validation results (T33 B1).** An unapproved result is exempt from the detective fatal only for the exact Claude-authored `<tool_use_error>...</tool_use_error>` whole-content shape with `is_error=true` (or a one-text-block array containing it). Other errors and successful results remain fatal, duplicate call IDs remain parser contract errors, stderr records each exemption, and the existing tool-result `raw` makes the call IDs recomputable from session logs without a schema change. Ordering and wrapper shape were measured six times with claude-code 2.1.293 (post-hook execution errors such as EISDIR/EACCES ran the hook and were not wrapped); pinned 2.1.252 remains an explicit smoke-test assumption.
+
+### Security
+
+- Host and world Claude paths share the same approval-decision-send ledger and stop the native process after a detected bypass. Parser-synthesized `permission_denied`/`user-rejected` non-execution results and the exact pre-hook input-validation shape remain valid without broad tool-name or generic-error exceptions.
 
 ## [0.1.1] - 2026-10-08
 
