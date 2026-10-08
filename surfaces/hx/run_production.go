@@ -293,6 +293,7 @@ func runProduction(ctx context.Context, run productionRun) error {
 	}
 	defer log.Close()
 	_, sessionSignals := startSessionSignals(ctx, run.SignalHooks)
+	defer sessionSignals.forceExitAfterLifecycle()
 	defer sessionSignals.stop()
 	rootSpan := logd.NewSpanID()
 	bindingPayload, err := json.Marshal(struct {
@@ -346,10 +347,6 @@ func runProduction(ctx context.Context, run productionRun) error {
 		Log: log, TraceID: traceID, RootSpan: rootSpan, Sandbox: sandbox, Request: req, PolicyHash: policyHash,
 		Redactor: redactor, Stderr: stderr, Signals: sessionSignals, approvalLock: approvalLock,
 	})
-	// A second signal becomes 128+signal only after the launcher's normal
-	// Wait → Cleanup lifecycle has returned. The real hook does not return;
-	// tests use a channel and continue through terminal-control assertions.
-	sessionSignals.forceExitAfterLifecycle()
 	// launch 성패와 무관하게 세션 종료를 durable하게 남긴다.
 	_, endErr := log.Writer.Submit(ctx, gen.EventRecord{
 		Ts: run.Now(), TraceID: traceID, SpanID: rootSpan,

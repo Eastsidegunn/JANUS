@@ -437,6 +437,83 @@ func TestSecondSignalKillsAgentThenCleansUpBeforeForcedExit(t *testing.T) {
 	}
 }
 
+func TestProductionSecondSignalEmitsTerminalAndSessionEndBeforeForcedExit(t *testing.T) {
+	fixture := newProductionFixture(t)
+	hub := &FakeSignalHub{}
+	forced := make(chan int, 1)
+	releaseForced := make(chan struct{})
+	var releaseForcedOnce sync.Once
+	release := func() { releaseForcedOnce.Do(func() { close(releaseForced) }) }
+	defer release()
+	hooks := hub.hooks(forced)
+	hooks.forceExit = func(code int) {
+		forced <- code
+		<-releaseForced
+	}
+	lifecycle := newFakeSignalLifecycle(false)
+	lifecycle.releaseOnKill = true
+	launcher := &FakeSignalLauncher{
+		lifecycle: lifecycle, started: make(chan struct{}), ctxStopped: make(chan struct{}),
+	}
+	requestBytes, err := json.Marshal(fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- runProduction(context.Background(), productionRun{
+			RequestBytes: requestBytes, ProfilePath: fixture.profilePath, AcceptRoot: fixture.acceptRoot,
+			Launcher: launcher, Stdout: &stdout, Stderr: io.Discard, SignalHooks: &hooks,
+		})
+	}()
+	<-launcher.started
+	hub.Send(syscall.SIGTERM)
+	<-lifecycle.stopCalled
+	hub.Send(syscall.SIGINT)
+
+	select {
+	case code := <-forced:
+		if code != 130 {
+			t.Fatalf("forced exit code = %d", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second signal did not request forced exit")
+	}
+
+	controls := decodeControls(t, stdout.String())
+	if len(controls) != 2 || controls[1].Status != "terminal" || controls[1].Done == nil ||
+		controls[1].Done.Status != "stopped" || controls[1].Done.Reason != "signal: SIGTERM; escalated by SIGINT" {
+		t.Fatalf("controls before forced exit = %+v", controls)
+	}
+	log, err := sqlite.Open(context.Background(), controls[0].SessionRef.SessionDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := log.Reader.ReadFrom(context.Background(), 1)
+	if err != nil {
+		_ = log.Close()
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	endCount := 0
+	for _, event := range events {
+		if event.Kind == gen.KindSessionEnd {
+			endCount++
+		}
+	}
+	if endCount != 1 {
+		t.Fatalf("session/end count before forced exit = %d; events=%+v", endCount, events)
+	}
+
+	release()
+	if err := <-runDone; err == nil || !strings.Contains(err.Error(), "status=stopped") {
+		t.Fatalf("signal run error = %v", err)
+	}
+}
+
 func TestSecondSignalFinalFallbackClosesLeaseAndForcesExit(t *testing.T) {
 	hub := &FakeSignalHub{}
 	forced := make(chan int, 1)
