@@ -8,6 +8,10 @@ Entries are grouped by implementation task (T0–T33). Requirement IDs refer to 
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-08
+
+Security release: the approval gate now detects a bypassed PreToolUse hook (T33) and the agent is started with `--strict-mcp-config`. No interface or schema changes.
+
 ### Fixed
 
 - **Claude approval-gate bypass detection (FR-POL-05, FR-ADP-10).** In `tool_approval` sessions, the Claude adapter now ends the session with an error after observing a non-rejected tool result whose call ID has no preceding approval request. The result is still recorded before termination so the append-only log reflects that the tool may already have run once.
@@ -80,6 +84,7 @@ First public release, corresponding to functional spec v0.1. Pre-1.0: interfaces
 - Policy merge cannot widen permissions or budgets (property-tested).
 - Log writes cannot be updated or deleted at the storage level (triggers) or through the API.
 
-[Unreleased]: https://github.com/Eastsidegunn/JANUS/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Eastsidegunn/JANUS/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Eastsidegunn/JANUS/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Eastsidegunn/JANUS/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Eastsidegunn/JANUS/releases/tag/v0.1.0
