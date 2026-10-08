@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -69,6 +70,7 @@ func (h *FakeSignalHub) Send(sig os.Signal) {
 
 type FakeSignalLifecycle struct {
 	releaseOnStop    bool
+	releaseOnKill    bool
 	release          chan struct{}
 	stopOnce         sync.Once
 	releaseOnce      sync.Once
@@ -77,8 +79,11 @@ type FakeSignalLifecycle struct {
 	stopReason       gen.StopPayloadReason
 	stopResult       string
 	cleanupCalls     atomic.Int64
+	killAgentCalls   atomic.Int64
 	forceCloseCalls  atomic.Int64
 	collectionEvents atomic.Int64
+	waitErrMu        sync.Mutex
+	waitErr          error
 }
 
 func newFakeSignalLifecycle(releaseOnStop bool) *FakeSignalLifecycle {
@@ -103,6 +108,12 @@ func (f *FakeSignalLifecycle) StopWithResult(reason gen.StopPayloadReason, resul
 func (f *FakeSignalLifecycle) Wait(ctx context.Context) (gen.DonePayload, error) {
 	select {
 	case <-f.release:
+		f.waitErrMu.Lock()
+		waitErr := f.waitErr
+		f.waitErrMu.Unlock()
+		if waitErr != nil {
+			return gen.DonePayload{}, waitErr
+		}
 		if f.stopResult != "" {
 			return gen.DonePayload{Status: gen.DonePayloadStatusStopped, Result: "adapter stop"}, nil
 		}
@@ -120,8 +131,22 @@ func (f *FakeSignalLifecycle) Cleanup(context.Context) error {
 	return nil
 }
 
+func (f *FakeSignalLifecycle) KillAgent(context.Context) error {
+	f.killAgentCalls.Add(1)
+	if f.releaseOnKill {
+		f.Release()
+	}
+	return nil
+}
+
 func (f *FakeSignalLifecycle) ForceClose(context.Context) error {
 	f.forceCloseCalls.Add(1)
+	// Model the production defect this seam guards against: closing the lease
+	// cuts the adapter wire before it can emit done{stopped}.
+	f.waitErrMu.Lock()
+	f.waitErr = errors.New("fake lifecycle: adapter wire cut before done")
+	f.waitErrMu.Unlock()
+	f.Release()
 	return nil
 }
 
@@ -276,6 +301,7 @@ func (l *actualSignalLifecycle) Wait(ctx context.Context) (gen.DonePayload, erro
 	return l.subagent.Wait(ctx)
 }
 
+func (l *actualSignalLifecycle) KillAgent(context.Context) error  { return nil }
 func (l *actualSignalLifecycle) ForceClose(context.Context) error { return nil }
 
 func (l *actualSignalLifecycle) Cleanup(context.Context) error {
@@ -362,11 +388,61 @@ func TestProductionSignalDoesNotCancelAdapterBeforeDurableStoppedDone(t *testing
 	}
 }
 
-func TestSecondSignalForceClosesBeforeGracefulCleanupRecordsCollection(t *testing.T) {
+func TestSecondSignalKillsAgentThenCleansUpBeforeForcedExit(t *testing.T) {
 	hub := &FakeSignalHub{}
 	forced := make(chan int, 1)
 	hooks := hub.hooks(forced)
 	ctx, signals := startSessionSignals(context.Background(), &hooks)
+	defer signals.stop()
+	lifecycle := newFakeSignalLifecycle(false)
+	lifecycle.releaseOnKill = true
+	type outcome struct {
+		done gen.DonePayload
+		err  error
+	}
+	done := make(chan outcome, 1)
+	var stderr bytes.Buffer
+	go func() {
+		got, err := runProductionLifecycle(ctx, signals, lifecycle, &stderr)
+		done <- outcome{done: got, err: err}
+		signals.forceExitAfterLifecycle()
+	}()
+	hub.Send(syscall.SIGTERM)
+	<-lifecycle.stopCalled
+	hub.Send(syscall.SIGINT)
+	result := <-done
+	select {
+	case code := <-forced:
+		if code != 130 {
+			t.Fatalf("forced exit code = %d", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second signal did not force exit")
+	}
+	if result.err != nil || result.done.Status != gen.DonePayloadStatusStopped {
+		t.Fatalf("lifecycle result=%+v err=%v", result.done, result.err)
+	}
+	if lifecycle.killAgentCalls.Load() != 1 || lifecycle.forceCloseCalls.Load() != 0 {
+		t.Fatalf("escalation calls: kill=%d close=%d", lifecycle.killAgentCalls.Load(), lifecycle.forceCloseCalls.Load())
+	}
+	if lifecycle.cleanupCalls.Load() != 1 || lifecycle.collectionEvents.Load() != 1 {
+		t.Fatalf("escalated path skipped normal cleanup: cleanup=%d collection=%d",
+			lifecycle.cleanupCalls.Load(), lifecycle.collectionEvents.Load())
+	}
+	if got := signals.terminalReason(); got != "signal: SIGTERM; escalated by SIGINT" {
+		t.Fatalf("terminal reason=%q", got)
+	}
+	if got := stderr.String(); !strings.Contains(got, "escalated") {
+		t.Fatalf("stderr diagnostic=%q", got)
+	}
+}
+
+func TestSecondSignalFinalFallbackClosesLeaseAndForcesExit(t *testing.T) {
+	hub := &FakeSignalHub{}
+	forced := make(chan int, 1)
+	hooks := hub.hooks(forced)
+	ctx, signals := startSessionSignals(context.Background(), &hooks)
+	signals.cleanupTimeout = 20 * time.Millisecond
 	defer signals.stop()
 	lifecycle := newFakeSignalLifecycle(false)
 	done := make(chan error, 1)
@@ -383,22 +459,16 @@ func TestSecondSignalForceClosesBeforeGracefulCleanupRecordsCollection(t *testin
 			t.Fatalf("forced exit code = %d", code)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("second signal did not force exit")
+		t.Fatal("fallback did not force exit")
 	}
-	if lifecycle.forceCloseCalls.Load() != 1 {
-		t.Fatalf("forced close calls = %d", lifecycle.forceCloseCalls.Load())
+	if lifecycle.killAgentCalls.Load() != 1 || lifecycle.forceCloseCalls.Load() != 1 {
+		t.Fatalf("fallback calls: kill=%d close=%d", lifecycle.killAgentCalls.Load(), lifecycle.forceCloseCalls.Load())
 	}
-	if lifecycle.cleanupCalls.Load() != 0 || lifecycle.collectionEvents.Load() != 0 {
-		t.Fatalf("forced path consumed graceful cleanup: cleanup=%d collection=%d",
-			lifecycle.cleanupCalls.Load(), lifecycle.collectionEvents.Load())
+	if lifecycle.cleanupCalls.Load() != 0 {
+		t.Fatalf("final fallback consumed normal cleanup: %d", lifecycle.cleanupCalls.Load())
 	}
-	lifecycle.Release()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if lifecycle.cleanupCalls.Load() != 1 || lifecycle.collectionEvents.Load() != 1 {
-		t.Fatalf("graceful cleanup did not record collection: cleanup=%d collection=%d",
-			lifecycle.cleanupCalls.Load(), lifecycle.collectionEvents.Load())
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "escalated lifecycle timeout") {
+		t.Fatalf("fallback lifecycle error=%v", err)
 	}
 }
 

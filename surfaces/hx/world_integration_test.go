@@ -550,6 +550,7 @@ func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts int
 		go func() {
 			got, err := runProductionLifecycle(launchCtx, signals, newActiveWorldLifecycle(active), io.Discard)
 			lifecycleDone <- lifecycleResult{done: got, err: err}
+			signals.forceExitAfterLifecycle()
 		}()
 		signalHub.Send(syscall.SIGTERM)
 		select {
@@ -559,17 +560,20 @@ func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts int
 		}
 		if mode == "signal-force" {
 			signalHub.Send(syscall.SIGINT)
+			result := <-lifecycleDone
+			done, waitErr = result.done, result.err
 			select {
 			case code := <-forced:
 				if code != 130 {
 					t.Fatalf("forced exit code=%d", code)
 				}
 			case <-time.After(20 * time.Second):
-				t.Fatal("second signal did not complete bounded cleanup")
+				t.Fatal("second signal did not report forced exit after lifecycle completion")
 			}
+		} else {
+			result := <-lifecycleDone
+			done, waitErr = result.done, result.err
 		}
-		result := <-lifecycleDone
-		done, waitErr = result.done, result.err
 	} else {
 		waitCtx, waitCancel := context.WithTimeout(ctx, 30*time.Second)
 		done, waitErr = active.Subagent.Wait(waitCtx)

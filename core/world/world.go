@@ -56,6 +56,10 @@ type ActiveLease interface {
 	ApprovalEndpoint() ApprovalEndpoint
 	UpperDir() string
 	Effects() <-chan EffectAttempt
+	// KillAgent immediately terminates only the agent container. The process
+	// broker and its wire remain alive so the adapter can observe the exit and
+	// durably seal its terminal event before Close tears the world down.
+	KillAgent(context.Context) error
 	Close(context.Context) error
 	AcknowledgeCollection(CollectionReceipt) error
 }

@@ -18,7 +18,7 @@ import (
 	"github.com/Eastsidegunn/JANUS/seams/store/sqlite"
 )
 
-func TestActiveWorldLifecycleForceCloseThenCleanupRecordsCollection(t *testing.T) {
+func TestActiveWorldLifecycleKillAgentThenCleanupRecordsCollection(t *testing.T) {
 	ctx := context.Background()
 	lower, upper := t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(upper, "created.txt"), []byte("created"), 0o600); err != nil {
@@ -43,8 +43,8 @@ func TestActiveWorldLifecycleForceCloseThenCleanupRecordsCollection(t *testing.T
 	}
 	go active.collectEffects()
 	lifecycle := newActiveWorldLifecycle(active)
-	if err := lifecycle.ForceClose(ctx); err != nil {
-		t.Fatalf("force close: %v", err)
+	if err := lifecycle.KillAgent(ctx); err != nil {
+		t.Fatalf("kill agent: %v", err)
 	}
 	if err := lifecycle.Cleanup(ctx); err != nil {
 		t.Fatalf("graceful cleanup after force close: %v", err)
@@ -61,6 +61,9 @@ func TestActiveWorldLifecycleForceCloseThenCleanupRecordsCollection(t *testing.T
 	}
 	if count != 1 {
 		t.Fatalf("collector fs_changed count = %d", count)
+	}
+	if lease.FakeKillAgentCalls() != 1 {
+		t.Fatalf("kill agent calls = %d", lease.FakeKillAgentCalls())
 	}
 }
 

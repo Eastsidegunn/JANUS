@@ -12,7 +12,7 @@ Entries are grouped by implementation task (T0–T32). Requirement IDs refer to 
 
 - **Approval relay startup race (FR-POL-05, FR-CLI-06).** `hx run` now serializes stale-socket inspection, removal, and bind with an endpoint lock; it rejects live or non-socket owners before claim and treats the relay as ready only after `Listen` has bound successfully.
 - Approval endpoint locking uses a permanent `<endpoint>.lock` file with `flock`; the lock file is deliberately not removed on shutdown.
-- **Signal-safe production shutdown (FR-CLI-06, FR-SBX-01, FR-LOG-02).** A first SIGINT/SIGTERM now reaches the adapter only through the graceful stop lifecycle, preserving the adapter-authored durable `done{stopped}` payload; a second signal closes the active lease (stopping containers, which can take tens of seconds; containers are not orphaned) and then forces exit with code 128+signal.
+- **Signal-safe production shutdown (FR-CLI-06, FR-SBX-01, FR-LOG-02).** A first SIGINT/SIGTERM reaches the adapter only through the graceful stop lifecycle. A second signal escalates that stop by immediately killing only the agent container while keeping the broker wire alive, preserving the adapter-authored durable `done{stopped}` and filesystem collection before exit code 128+signal. If the lifecycle still has not completed after 30 seconds, the final fallback closes the lease and exits immediately; terminal evidence may be absent only in that fallback.
 - Terminal control messages include the optional `done.reason` field for lifecycle-consumed signals and omit it when empty.
 
 ## [0.1.0] - 2026-10-08

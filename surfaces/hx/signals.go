@@ -16,10 +16,9 @@ import (
 
 const (
 	gracefulCleanupTimeout = 30 * time.Second
-	// forcedCleanupTimeout bounds only the wait for the lease close token. Once
-	// the forced close holds the token, each lease phase runs on its own
-	// cancellation-free context, so a second signal can still take as long as
-	// `podman stop` (tens of seconds) — containers are never orphaned.
+	// forcedCleanupTimeout bounds a single escalation command or the wait for a
+	// final-fallback Close attempt. The ordinary lifecycle retains the full
+	// gracefulCleanupTimeout in which to record done{stopped} and collection.
 	forcedCleanupTimeout = time.Second
 )
 
@@ -46,6 +45,7 @@ func defaultSignalHooks() signalHooks {
 type sessionSignals struct {
 	parent context.Context
 	first  chan os.Signal
+	second chan os.Signal
 	done   chan struct{}
 	// gracefulStarted is closed after the lifecycle has consumed the first
 	// signal. It is test-visible synchronization for the second-signal path.
@@ -54,11 +54,17 @@ type sessionSignals struct {
 	mu           sync.Mutex
 	forceCleanup func()
 	firstSignal  os.Signal
-	hooks        signalHooks
-	signalCh     chan os.Signal
-	stopContext  context.CancelFunc
-	stopOnce     sync.Once
-	gracefulOnce sync.Once
+	secondSignal os.Signal
+	pendingExit  os.Signal
+	lifecycleRun bool
+	// cleanupTimeout is injectable only through the package-local test seam.
+	// Production always initializes it to gracefulCleanupTimeout.
+	cleanupTimeout time.Duration
+	hooks          signalHooks
+	signalCh       chan os.Signal
+	stopContext    context.CancelFunc
+	stopOnce       sync.Once
+	gracefulOnce   sync.Once
 }
 
 func startSessionSignals(parent context.Context, hooks *signalHooks) (context.Context, *sessionSignals) {
@@ -68,9 +74,10 @@ func startSessionSignals(parent context.Context, hooks *signalHooks) (context.Co
 	}
 	ctx, stopContext := h.notifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	s := &sessionSignals{
-		parent: parent, first: make(chan os.Signal, 1), done: make(chan struct{}),
+		parent: parent, first: make(chan os.Signal, 1), second: make(chan os.Signal, 1), done: make(chan struct{}),
 		gracefulStarted: make(chan struct{}), hooks: h,
-		signalCh: make(chan os.Signal, 2), stopContext: stopContext,
+		cleanupTimeout: gracefulCleanupTimeout,
+		signalCh:       make(chan os.Signal, 2), stopContext: stopContext,
 	}
 	h.notify(s.signalCh, os.Interrupt, syscall.SIGTERM)
 	go s.watch()
@@ -93,6 +100,12 @@ func (s *sessionSignals) watch() {
 	select {
 	case second := <-s.signalCh:
 		s.mu.Lock()
+		if s.lifecycleRun {
+			s.secondSignal = second
+			s.mu.Unlock()
+			s.second <- second
+			return
+		}
 		cleanup := s.forceCleanup
 		s.mu.Unlock()
 		if cleanup != nil {
@@ -119,7 +132,43 @@ func (s *sessionSignals) terminalReason() string {
 	if s.firstSignal == nil {
 		return ""
 	}
-	return "signal: " + signalName(s.firstSignal)
+	reason := "signal: " + signalName(s.firstSignal)
+	if s.secondSignal != nil {
+		reason += "; escalated by " + signalName(s.secondSignal)
+	}
+	return reason
+}
+
+func (s *sessionSignals) beginLifecycle() {
+	s.mu.Lock()
+	s.lifecycleRun = true
+	s.mu.Unlock()
+}
+
+func (s *sessionSignals) endLifecycle() os.Signal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lifecycleRun = false
+	return s.secondSignal
+}
+
+func (s *sessionSignals) lifecycleTimeout() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cleanupTimeout
+}
+
+// forceExitAfterLifecycle is called by the owner immediately after Launch has
+// returned from its Wait and Cleanup path. The final fallback and the
+// pre-lifecycle path exit directly instead and never arm this handoff.
+func (s *sessionSignals) forceExitAfterLifecycle() {
+	s.mu.Lock()
+	sig := s.pendingExit
+	s.pendingExit = nil
+	s.mu.Unlock()
+	if sig != nil {
+		s.hooks.forceExit(signalExitCode(sig))
+	}
 }
 
 func (s *sessionSignals) setForceCleanup(cleanup func()) {
@@ -157,6 +206,7 @@ func signalExitCode(sig os.Signal) int {
 type productionLifecycle interface {
 	StopWithResult(gen.StopPayloadReason, string) error
 	Wait(context.Context) (gen.DonePayload, error)
+	KillAgent(context.Context) error
 	ForceClose(context.Context) error
 	Cleanup(context.Context) error
 }
@@ -174,8 +224,15 @@ func runProductionLifecycle(ctx context.Context, signals *sessionSignals, lifecy
 		stderr = io.Discard
 	}
 	waitCtx := ctx
+	lifecycleEnded := false
 	if signals != nil {
 		waitCtx = signals.parent
+		signals.beginLifecycle()
+		defer func() {
+			if !lifecycleEnded {
+				signals.endLifecycle()
+			}
+		}()
 	}
 	waited := make(chan lifecycleResult, 1)
 	go func() {
@@ -185,15 +242,42 @@ func runProductionLifecycle(ctx context.Context, signals *sessionSignals, lifecy
 
 	var result lifecycleResult
 	var stopErr error
+	var escalated os.Signal
+	var escalationTimer *time.Timer
+	var escalationDeadline <-chan time.Time
+	escalate := func(sig os.Signal) {
+		if escalated != nil {
+			return
+		}
+		escalated = sig
+		escalationTimer = time.NewTimer(signals.lifecycleTimeout())
+		escalationDeadline = escalationTimer.C
+		fmt.Fprintf(stderr, "hx run: received %s; stop escalated, killing agent container immediately\n", signalName(sig))
+		killCtx, cancel := context.WithTimeout(context.Background(), forcedCleanupTimeout)
+		if err := lifecycle.KillAgent(killCtx); err != nil {
+			fmt.Fprintf(stderr, "hx run: escalated agent kill failed; awaiting lifecycle fallback: %v\n", err)
+		}
+		cancel()
+	}
+	forceFallback := func() error {
+		fmt.Fprintln(stderr, "hx run: escalated lifecycle did not finish within 30s; final fallback closes the lease and terminal records may be absent")
+		closeCtx, cancel := context.WithTimeout(context.Background(), forcedCleanupTimeout)
+		closed := make(chan struct{})
+		go func() {
+			_ = lifecycle.ForceClose(closeCtx)
+			close(closed)
+		}()
+		select {
+		case <-closed:
+		case <-closeCtx.Done():
+		}
+		cancel()
+		signals.hooks.forceExit(signalExitCode(escalated))
+		return errors.New("escalated lifecycle timeout after final lease close")
+	}
 	if signals == nil {
 		result = <-waited
 	} else {
-		signals.setForceCleanup(func() {
-			forceCtx, cancel := context.WithTimeout(context.Background(), forcedCleanupTimeout)
-			defer cancel()
-			_ = lifecycle.ForceClose(forceCtx)
-		})
-		defer signals.setForceCleanup(nil)
 		select {
 		case result = <-waited:
 		case sig := <-signals.first:
@@ -201,13 +285,60 @@ func runProductionLifecycle(ctx context.Context, signals *sessionSignals, lifecy
 			reason := "signal: " + signalName(sig)
 			fmt.Fprintf(stderr, "hx run: received %s; stopping session\n", signalName(sig))
 			stopErr = lifecycle.StopWithResult(gen.StopPayloadReasonUser, reason)
-			result = <-waited
+		waiting:
+			for {
+				select {
+				case result = <-waited:
+					break waiting
+				case second := <-signals.second:
+					escalate(second)
+				case <-escalationDeadline:
+					return gen.DonePayload{}, forceFallback()
+				}
+			}
 		}
 	}
 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), gracefulCleanupTimeout)
-	cleanupErr := lifecycle.Cleanup(cleanupCtx)
+	cleanupDone := make(chan error, 1)
+	go func() { cleanupDone <- lifecycle.Cleanup(cleanupCtx) }()
+	var cleanupErr error
+	if signals == nil {
+		cleanupErr = <-cleanupDone
+	} else {
+	cleanup:
+		for {
+			select {
+			case cleanupErr = <-cleanupDone:
+				break cleanup
+			case second := <-signals.second:
+				escalate(second)
+			case <-escalationDeadline:
+				cancel()
+				return gen.DonePayload{}, forceFallback()
+			}
+		}
+	}
 	cancel()
+	if signals != nil {
+		second := signals.endLifecycle()
+		lifecycleEnded = true
+		// Cleanup may become ready in the same instant the watcher dispatches
+		// the second signal. Closing the lifecycle gate under the same mutex
+		// makes that race deterministic: a signal already assigned to this
+		// lifecycle is escalated here; a later one takes the direct fallback.
+		if escalated == nil && second != nil {
+			escalate(second)
+		}
+	}
+	if escalationTimer != nil {
+		escalationTimer.Stop()
+	}
+	if escalated != nil {
+		signals.mu.Lock()
+		signals.pendingExit = escalated
+		signals.mu.Unlock()
+	}
 	if result.err != nil || cleanupErr != nil {
 		var waitErr error
 		if result.err != nil {
