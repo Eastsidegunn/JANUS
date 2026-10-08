@@ -169,6 +169,8 @@ type FakeActiveLease struct {
 	closeOrder      []FakeCloseStage
 	closeDone       chan struct{}
 	closeErr        error
+	killAgentCalls  int
+	killAgentErr    error
 	collectionAcked bool
 }
 
@@ -196,6 +198,13 @@ func (f *FakeActiveLease) Effects() <-chan world.EffectAttempt {
 	}
 	close(out)
 	return out
+}
+
+func (f *FakeActiveLease) KillAgent(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.killAgentCalls++
+	return f.killAgentErr
 }
 
 func (f *FakeActiveLease) Close(ctx context.Context) error {
@@ -262,6 +271,16 @@ func (f *FakeActiveLease) FakeSetCloseError(stage FakeCloseStage, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stageErrors[stage] = err
+}
+func (f *FakeActiveLease) FakeSetKillAgentError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.killAgentErr = err
+}
+func (f *FakeActiveLease) FakeKillAgentCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.killAgentCalls
 }
 func (f *FakeActiveLease) FakeSetCloseGate(stage FakeCloseStage, gate <-chan struct{}) {
 	f.mu.Lock()

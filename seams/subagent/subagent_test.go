@@ -346,6 +346,49 @@ printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"stopped","resu
 	}
 }
 
+func TestStopWithResultPreservesAdapterDurableDone(t *testing.T) {
+	script := `read line
+printf '%s\n' '{"v":1,"kind":"subagent/ready","payload":{"grade":"observable"},"raw":""}'
+read line
+printf '%s\n' '{"v":1,"kind":"subagent/done","payload":{"status":"stopped","result":"adapter stop"},"raw":""}'`
+	store := &FakeStore{}
+	w, err := logd.NewWriter(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	sub, err := Spawn(context.Background(), w, logd.NewTraceID(), logd.NewSpanID(), 1,
+		spawnSpec([]string{"/bin/sh", "-c", script}, "instruction"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sub.StopWithResult(gen.StopPayloadReasonUser, "signal: SIGTERM"); err != nil {
+		t.Fatal(err)
+	}
+	done, err := sub.Wait(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != gen.DonePayloadStatusStopped || done.Result != "adapter stop" {
+		t.Fatalf("done = %+v", done)
+	}
+	events, err := store.ReadFrom(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var durable gen.DonePayload
+	for _, event := range events {
+		if event.Kind == gen.KindSubagentDone {
+			if err := json.Unmarshal(event.Payload, &durable); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if durable.Status != gen.DonePayloadStatusStopped || durable.Result != "adapter stop" {
+		t.Fatalf("durable done = %+v", durable)
+	}
+}
+
 func TestApprovalWriteFailureBeforeDoneIsFatal(t *testing.T) {
 	store := &FakeStore{}
 	w, err := logd.NewWriter(context.Background(), store)

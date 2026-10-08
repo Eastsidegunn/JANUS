@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
 	"github.com/Eastsidegunn/JANUS/core/policy"
 	"net"
@@ -27,6 +28,19 @@ func roundTrip(t *testing.T, s *Server, m Message) Result {
 	_ = b.Close()
 	<-done
 	return r
+}
+
+func shortServerSocket(t *testing.T, child string) string {
+	t.Helper()
+	root, err := os.MkdirTemp("/tmp", "hxr-server-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(root, child, "approval.sock")
 }
 
 func TestRelayRejectsOversizedMessage(t *testing.T) {
@@ -125,6 +139,105 @@ func TestServerRejectsInsecureSocketDirectory(t *testing.T) {
 	}
 }
 
+func TestServerReadyClosesOnlyAfterListenSucceeds(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "hxr-ready-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(filepath.Join(dir, "approval.sock"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.peerCheck = func(net.Conn) (int, error) { return os.Getuid(), nil }
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Listen() }()
+	select {
+	case <-s.Ready():
+	case err := <-errCh:
+		t.Fatalf("Listen failed before ready: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("ready was not signalled after bind")
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	conn, err := net.DialTimeout("unix", s.Endpoint, time.Second)
+	if err != nil {
+		t.Fatalf("ready socket is not accepting connections: %v", err)
+	}
+	_ = conn.Close()
+}
+
+func TestServerListenFailureLeavesReadyOpen(t *testing.T) {
+	dir := t.TempDir()
+	blocked := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := filepath.Join(blocked, "approval.sock")
+	s, err := NewServer(endpoint, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Listen(); err == nil {
+		t.Fatal("Listen unexpectedly traversed a regular file")
+	}
+	select {
+	case <-s.Ready():
+		t.Fatal("failed Listen signalled ready")
+	default:
+	}
+}
+
+func TestServerListenCreatesPrivateSocketDirectory(t *testing.T) {
+	endpoint := shortServerSocket(t, "missing")
+	s, err := NewServer(endpoint, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Listen() }()
+	select {
+	case <-s.Ready():
+	case err := <-errCh:
+		t.Fatalf("Listen failed before ready: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("ready was not signalled")
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	info, err := os.Stat(filepath.Dir(endpoint))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("socket directory mode = %o", got)
+	}
+}
+
+func TestServerCloseBeforeListenPreventsLateSocket(t *testing.T) {
+	endpoint := shortServerSocket(t, "late")
+	s, err := NewServer(endpoint, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Listen(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("late Listen error = %v", err)
+	}
+	if _, err := os.Lstat(endpoint); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("late socket remains: %v", err)
+	}
+	select {
+	case <-s.Ready():
+		t.Fatal("closed server signalled ready")
+	default:
+	}
+}
+
 func TestServerPeerVerificationFailClosed(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -191,7 +304,11 @@ func TestRelayRecorderAttachesSequence(t *testing.T) {
 }
 
 func testServer(t *testing.T) *Server {
-	s, err := NewServer(filepath.Join(t.TempDir(), "approval.sock"), time.Second)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(filepath.Join(dir, "approval.sock"), time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

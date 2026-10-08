@@ -1448,6 +1448,33 @@ func (b *processBroker) stopContainer(ctx context.Context, reason string) error 
 	return nil
 }
 
+// KillAgent escalates an already-requested stop directly at the container
+// boundary. It must not take lifecycleMu: stopContainer may be blocked inside
+// `podman stop --time`, and the purpose of this path is to interrupt that grace
+// period immediately. In particular, this method never cancels the broker or
+// closes either process-wire connection.
+func (b *processBroker) KillAgent(ctx context.Context) error {
+	b.mu.Lock()
+	if b.stopReason == "" {
+		b.stopReason = "signal escalation"
+	}
+	started := b.started
+	done := b.waitResult != nil
+	b.mu.Unlock()
+	if !started || done {
+		return nil
+	}
+	if _, err := b.runner.Run(ctx, "kill", b.containerID); err != nil {
+		b.mu.Lock()
+		done = b.waitResult != nil
+		b.mu.Unlock()
+		if !done {
+			return err
+		}
+	}
+	return nil
+}
+
 func (b *processBroker) closeStoppedAttachPipes() {
 	b.mu.Lock()
 	attach := b.attach

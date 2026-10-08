@@ -4,9 +4,16 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/) from its first tagged release, v0.1.0. Until 1.0, minor versions may contain breaking changes.
 
-Entries are grouped by implementation task (T0–T30). Requirement IDs refer to the [functional spec](docs/hx-기능명세서-v0.1.md); test evidence is in [docs/traceability.md](docs/traceability.md).
+Entries are grouped by implementation task (T0–T32). Requirement IDs refer to the [functional spec](docs/hx-기능명세서-v0.1.md); test evidence is in [docs/traceability.md](docs/traceability.md).
 
 ## [Unreleased]
+
+### Fixed
+
+- **Approval relay startup race (FR-POL-05, FR-CLI-06).** `hx run` now serializes stale-socket inspection, removal, and bind with an endpoint lock; it rejects live or non-socket owners before claim and treats the relay as ready only after `Listen` has bound successfully.
+- Approval endpoint locking uses a permanent `<endpoint>.lock` file with `flock`; the lock file is deliberately not removed on shutdown.
+- **Signal-safe production shutdown (FR-CLI-06, FR-SBX-01, FR-LOG-02).** A first SIGINT/SIGTERM reaches the adapter only through the graceful stop lifecycle. A second signal escalates that stop by killing only the agent container while keeping the broker wire alive, preserving the adapter-authored durable `done{stopped}` and filesystem collection before exit code 128+signal. The kill is immediate when Podman permits `podman kill` on a stopping container (verified in CI with Podman 5.x); otherwise Podman's 10-second stop grace completes with SIGKILL. A third signal is ignored while shutdown waits for the 30-second finalization fallback. If the lifecycle still has not completed after 30 seconds, the final fallback closes the lease and exits immediately; terminal evidence may be absent only in that fallback.
+- Terminal control messages include the optional `done.reason` field for lifecycle-consumed signals and omit it when empty.
 
 ## [0.1.0] - 2026-10-08
 

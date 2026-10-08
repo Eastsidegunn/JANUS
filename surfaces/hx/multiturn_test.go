@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -66,7 +67,7 @@ func TestProductionSessionModeAcceptance(t *testing.T) {
 	// Rejections happened before the claim: the same key still accepts.
 	req := f.request
 	req.SessionMode = "multiturn"
-	if out, err := run(req, "/tmp/unused.sock"); err != nil {
+	if out, err := run(req, shortApprovalSocket(t)); err != nil {
 		t.Fatalf("multiturn accept: %v\n%s", err, out)
 	}
 	if f.launcher.calls.Load() != 1 || f.launcher.last.Request.SessionMode != "multiturn" {
@@ -206,7 +207,7 @@ func TestMultiturnRelaySessionRoundTrip(t *testing.T) {
 	defer os.RemoveAll(sockDir)
 	sock := filepath.Join(sockDir, "control.sock")
 	decider, closer, srv, err := selectApprovalDecider(sock, trace, "policy-hash", 10000,
-		approvalrelay.SessionControl{SessionID: trace, Multiturn: true, Events: log.Reader.ReadFrom})
+		approvalrelay.SessionControl{SessionID: trace, Multiturn: true, Events: log.Reader.ReadFrom}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}

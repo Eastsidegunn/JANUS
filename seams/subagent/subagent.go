@@ -259,6 +259,14 @@ func (s *Subagent) Stop(reason gen.StopPayloadReason) error {
 	return s.sendCommand(gen.CommandCmdStop, gen.StopPayload{Reason: reason})
 }
 
+// StopWithResult keeps surface diagnostics out of the adapter-owned event
+// payload. The adapter's done event is append-only evidence and must be stored
+// byte-for-byte after validation; callers surface the stop context on their
+// diagnostic and control channels instead.
+func (s *Subagent) StopWithResult(reason gen.StopPayloadReason, _ string) error {
+	return s.Stop(reason)
+}
+
 func (s *Subagent) doneWasObserved() bool  { return s.doneObserved.Load() }
 func (s *Subagent) stopWasRequested() bool { return s.stopRequested.Load() }
 
@@ -345,6 +353,14 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string) {
 				rec.UsageIn, rec.UsageOut = &u.InputTokens, &u.OutputTokens
 			}
 		}
+		var terminal *gen.DonePayload
+		if ev.Kind == gen.KindSubagentDone {
+			var d gen.DonePayload
+			if err := json.Unmarshal(ev.Payload, &d); err != nil {
+				return err
+			}
+			terminal = &d
+		}
 		if _, err := w.Submit(context.Background(), rec); err != nil {
 			return fmt.Errorf("subagent: 이벤트 기록: %w", err)
 		}
@@ -358,11 +374,7 @@ func (s *Subagent) pump(w *logd.Writer, traceID, parentSpan string) {
 			}
 		}
 		if ev.Kind == gen.KindSubagentDone {
-			var d gen.DonePayload
-			if err := json.Unmarshal(ev.Payload, &d); err != nil {
-				return err
-			}
-			done = &d
+			done = terminal
 			s.doneObserved.Store(true)
 			// callback은 성공하지만 drain은 계속된다 — done 이후 출력 감시.
 		}

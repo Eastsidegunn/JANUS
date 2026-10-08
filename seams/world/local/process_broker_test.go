@@ -249,6 +249,72 @@ func TestProcessBrokerExitObservationIsIndependentOfOutputEOF(t *testing.T) {
 	}
 }
 
+func TestProcessBrokerKillAgentPreservesWireUntilTerminalDrain(t *testing.T) {
+	waiter, attach := newFakeStartedCommand(t), newFakeStartedCommand(t)
+	stopEntered := make(chan struct{})
+	releaseStop := make(chan struct{})
+	var stopOnce sync.Once
+	runtime := &fakeProcessRuntime{waiter: waiter, attach: attach, onStop: func() {
+		stopOnce.Do(func() { close(stopEntered) })
+		<-releaseStop
+	}}
+	b := mustProcessBroker(t, context.Background(), runtime)
+	client := connectProcessClient(t, b)
+	defer client.close()
+	client.send(t, processwire.KindStart, nil)
+	client.ack(t, "start ack")
+	stop, _ := processwire.Marshal(processwire.Stop{Reason: "signal"})
+	client.send(t, processwire.KindStop, stop)
+	<-stopEntered
+	killed := make(chan error, 1)
+	go func() { killed <- b.KillAgent(context.Background()) }()
+	select {
+	case err := <-killed:
+		if err != nil {
+			close(releaseStop)
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		close(releaseStop)
+		t.Fatal("KillAgent waited behind podman stop grace period")
+	}
+	close(releaseStop)
+	client.ack(t, "stop ack after concurrent kill")
+	_, _, _, kills := runtime.counts()
+	if kills != 1 {
+		t.Fatalf("podman kill calls=%d", kills)
+	}
+	runtime.mu.Lock()
+	gotKill := append([]string(nil), runtime.runs[len(runtime.runs)-1]...)
+	runtime.mu.Unlock()
+	if strings.Join(gotKill, " ") != "kill "+fakeAgentID {
+		t.Fatalf("kill argv=%v", gotKill)
+	}
+	select {
+	case <-b.Done():
+		t.Fatal("KillAgent closed the process broker")
+	default:
+	}
+
+	// Both wire connections remain usable after SIGKILL escalation: the adapter
+	// can arm Wait, receive the authoritative exit, and drain stream_end.
+	client.send(t, processwire.KindWait, nil)
+	client.ack(t, "wait ack after kill")
+	waiter.completeWait("137")
+	if frame := readFrame(t, client.control, client.controlDec, "exit after kill"); frame.Kind != processwire.KindExitObserved {
+		t.Fatalf("exit kind=%d", frame.Kind)
+	}
+	attach.closeWriters()
+	attach.finish(nil)
+	for {
+		frame := readFrame(t, client.output, client.outputDec, "stream drain after kill")
+		if frame.Kind == processwire.KindStreamEnd {
+			break
+		}
+	}
+	shutdownBroker(t, b)
+}
+
 func TestProcessBrokerRedactsSecretFromOutputFrames(t *testing.T) {
 	secret := []byte("synthetic-oauth-token")
 	input := []byte(`{"result":"synthetic-oauth-token", "stderr":"synthetic-oauth-token"}`)

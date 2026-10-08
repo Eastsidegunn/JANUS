@@ -907,6 +907,16 @@ func (l *lease) ApprovalEndpoint() world.ApprovalEndpoint { return l.approvalEnd
 func (l *lease) UpperDir() string                    { return l.upperDir }
 func (l *lease) Effects() <-chan world.EffectAttempt { return l.effects }
 
+// KillAgent is the signal-escalation boundary. It deliberately leaves the
+// process broker, adapter wire, approval broker, and collectors alive so the
+// adapter can observe the killed container and emit done{stopped}.
+func (l *lease) KillAgent(ctx context.Context) error {
+	if l.process == nil {
+		return nil
+	}
+	return l.process.KillAgent(ctx)
+}
+
 // AcknowledgeCollection consumes a durable, lease-bound fs snapshot receipt
 // and only then removes this lease's upper directory. No raw path is accepted;
 // the package-private capability computes the exact target from lease state.
