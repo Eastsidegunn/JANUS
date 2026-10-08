@@ -285,6 +285,22 @@ func TestClaudeCommandUsesApprovedIsolationFlags(t *testing.T) {
 	}
 }
 
+func TestClaudeCommandUsesStrictMCPConfig(t *testing.T) {
+	got := claudeCommand(Config{ClaudeBin: "/bin/claude"}, gen.TaskPayload{Instruction: "x"})
+	count := 0
+	for _, arg := range got {
+		if arg == "--strict-mcp-config" {
+			count++
+		}
+		if arg == "--mcp-config" {
+			t.Fatalf("unexpected --mcp-config in argv=%q", got)
+		}
+	}
+	if count != 1 {
+		t.Fatalf("--strict-mcp-config count=%d argv=%q", count, got)
+	}
+}
+
 func TestLocalPodmanConfigSelectsProcessEndpointBeforeHostProcgroup(t *testing.T) {
 	var out, stderr bytes.Buffer
 	line := taskCommandLine(t, t.TempDir())
@@ -866,7 +882,7 @@ func TestTokenExpiryMonitorStopsOnlyAtDeadline(t *testing.T) {
 
 func TestContainerArgvMatchesHostCommand(t *testing.T) {
 	instruction := "ls /workspace\n한글 'quoted' $HOME"
-	want := []string{"/opt/bin/claude", "-p", instruction, "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--permission-mode", "manual", "--setting-sources", "project,local", "--settings", `{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"hxapprove || exit 2","timeout":600}]}]}}`}
+	want := []string{"/opt/bin/claude", "-p", instruction, "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--strict-mcp-config", "--permission-mode", "manual", "--setting-sources", "project,local", "--settings", `{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"hxapprove || exit 2","timeout":600}]}]}}`}
 	container := ContainerArgv(want[0], instruction)
 	host := claudeCommand(Config{ClaudeBin: want[0]}, gen.TaskPayload{Instruction: instruction})
 	if !reflect.DeepEqual(container, want) || !reflect.DeepEqual(host, want) {

@@ -16,6 +16,7 @@ Entries are grouped by implementation task (T0–T33). Requirement IDs refer to 
 ### Security
 
 - Host and world Claude paths share the same approval-decision-send ledger and stop the native process after a detected bypass. Parser-synthesized `permission_denied`/`user-rejected` non-execution results and the exact pre-hook input-validation shape remain valid without broad tool-name or generic-error exceptions.
+- Claude Code starts with `--strict-mcp-config` and no `--mcp-config`, preventing workspace or user-configured MCP servers from forging approval-gate exemption output.
 
 ## [0.1.1] - 2026-10-08
 
