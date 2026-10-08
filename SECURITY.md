@@ -41,7 +41,9 @@ Out of scope or known limits:
 - A PEM credential that crosses the 64 KiB line-writer boundary is subject to the same line-oriented limitation; event payload redaction still uses the full pattern.
 - Host mode (`hx run --session --adapter`, no container) is a development path: only the default credential regexes are applied to its event log, and adapter stdout/stderr is not masked.
 - The gateway access key is visible in host `podman inspect` (container Config.Env) by design, and it can be sent to any allowlisted domain (no content inspection). Whether a world-config env value is a gateway key or a vendor key is the operator's responsibility; JANUS only rejects the subscription OAuth env name.
-- Runtime Unix sockets are placed below `HX_RUNTIME_DIR` when set (otherwise `/tmp`). The directory must already exist, be absolute, and be short enough for the platform's Unix socket limit. Shared-writable directories require the sticky bit; mode `0700` is recommended so unrelated local users cannot access runtime capabilities.
+- Runtime Unix sockets are placed below `HX_RUNTIME_DIR` when set (otherwise `/tmp`). The directory must already exist, be absolute, and be short enough for the platform's Unix socket limit. Shared-writable directories require the sticky bit; mode `0700` is recommended so unrelated local users cannot access runtime capabilities. At startup, a refused stale approval socket is removed; a live listener or a non-socket object at that path is rejected before the session claim.
+- A SIGINT/SIGTERM received during claim, before the session writer is open, retains the process default and may terminate immediately after consuming the claim.
+- After the first signal, if the adapter ignores the graceful stop request, shutdown waits for a second signal; that wait is not bounded.
 
 ## Secrets
 

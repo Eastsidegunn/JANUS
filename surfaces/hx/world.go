@@ -35,6 +35,7 @@ type worldLaunch struct {
 	Depth          int64
 	ProfileID      string
 	Approval       subagent.Spec
+	Signals        *sessionSignals
 	// SessionMode: 빈 값 = oneshot(spawn 기록에 필드 없음, T24 바이트 무변경).
 	SessionMode gen.SubagentSpawnPayloadSessionMode
 }
@@ -130,7 +131,10 @@ func startProductionWorld(ctx context.Context, launch worldLaunch) (_ *activeWor
 	// this point the backend owns cleanup even when activation fails; calling
 	// Abort would be both invalid and a misleading secondary error.
 	abort = false
-	lease, err := prepared.Activate(ctx, receipt)
+	// Activate creates long-lived brokers whose parent context must outlive the
+	// assembly phase. Signal cancellation is handled by the explicit lifecycle,
+	// never by broker parent watchers.
+	lease, err := prepared.Activate(context.WithoutCancel(ctx), receipt)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +155,10 @@ func startProductionWorld(ctx context.Context, launch worldLaunch) (_ *activeWor
 		spec.TokenExpiresAtUnixMs = secret.ExpiresAtUnixMs()
 	}
 	spec.Descriptor = descriptor
-	sub, spawnErr := subagent.SpawnPrepared(ctx, launch.Writer, launch.TraceID, launch.ParentSpan, childSpan, 1, spec)
+	// A session signal is delivered through the explicit Stop path. A canceled
+	// assembly context must never race procgroup's cancellation kill against the
+	// adapter's done{stopped} response.
+	sub, spawnErr := subagent.SpawnPrepared(context.WithoutCancel(ctx), launch.Writer, launch.TraceID, launch.ParentSpan, childSpan, 1, spec)
 	if spawnErr != nil {
 		return nil, errors.Join(spawnErr, lease.Close(context.Background()))
 	}
@@ -159,6 +166,10 @@ func startProductionWorld(ctx context.Context, launch worldLaunch) (_ *activeWor
 		Subagent: sub, Lease: lease, Writer: launch.Writer, TraceID: launch.TraceID,
 		ChildSpan: childSpan, Baseline: baseline, effectsDone: make(chan struct{}),
 	}
+	// A second signal can arrive before runProductionLifecycle installs its
+	// full finalizer. Arm the already-active lease immediately so containers,
+	// brokers, and networks cannot be orphaned in that window.
+	armForcedLeaseCleanup(launch.Signals, active)
 	go active.collectEffects()
 	return active, nil
 }

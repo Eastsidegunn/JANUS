@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -195,7 +197,7 @@ func TestWorldIntegration(t *testing.T) {
 	t.Run("surface-overlay-egress-approval-backpressure", func(t *testing.T) {
 		runNormalIntegration(t, ctx, artifacts)
 	})
-	for _, mode := range []string{"abnormal", "stop", "stop-ignore", "orphan"} {
+	for _, mode := range []string{"abnormal", "stop", "stop-ignore", "signal", "signal-force", "orphan"} {
 		t.Run("lifecycle-"+mode, func(t *testing.T) {
 			runLifecycleIntegration(t, ctx, artifacts, mode)
 		})
@@ -503,43 +505,115 @@ func runLifecycleIntegration(t *testing.T, parent context.Context, artifacts int
 	_ = writer.InitBatch(ctx, []gen.EventRecord{{Ts: time.Now().UnixMilli(), TraceID: traceID, SpanID: parentSpan, Kind: gen.KindSessionStart, Actor: "parent", Payload: json.RawMessage(`{}`)}})
 	budget := gen.Budget{Tokens: 1000, TimeMs: 60_000, MaxDepth: 2}
 	effective := world.NewEffectivePolicy(policy.SandboxConfig{ProfileID: "lifecycle-" + mode, Workspace: lower, FSScope: []string{lower}, Egress: []string{"example.com"}, Budget: budget, Approval: policy.ApprovalManual})
-	instruction, _ := json.Marshal(map[string]any{"mode": mode})
-	active, err := startProductionWorld(ctx, worldLaunch{
+	scenarioMode := mode
+	if mode == "signal" {
+		scenarioMode = "stop"
+	} else if mode == "signal-force" {
+		scenarioMode = "stop-ignore"
+	}
+	launchCtx := ctx
+	var signalHub *FakeSignalHub
+	var signals *sessionSignals
+	forced := make(chan int, 1)
+	if mode == "signal" || mode == "signal-force" {
+		signalHub = &FakeSignalHub{}
+		hooks := signalHub.hooks(forced)
+		launchCtx, signals = startSessionSignals(ctx, &hooks)
+		defer signals.stop()
+	}
+	instruction, _ := json.Marshal(map[string]any{"mode": scenarioMode})
+	active, err := startProductionWorld(launchCtx, worldLaunch{
 		Backend:   newIntegrationBackend(t, stateRoot, artifacts),
 		SpawnSpec: world.NewSpawnSpec(effective, world.NewImageReference(artifacts.agentRepository, artifacts.agentDigest), []string{"integration"}, 0, traceID, childSpan, world.AgentIdentity{UID: 1000, GID: 1000}, nil),
 		Writer:    writer, TraceID: traceID, ParentSpan: parentSpan, AdapterCommand: []string{artifacts.adapter},
 		AdapterStderr: os.Stderr,
 		AdapterName:   "world-testagent", ControlMode: gen.SubagentSpawnPayloadControlModeToolApproval, Instruction: string(instruction), Workspace: "/workspace",
 		Budget: budget, ProfileID: "lifecycle-" + mode, Approval: subagent.Spec{Approval: policy.ApprovalManual, Decider: policy.DenyAll{}},
+		Signals: signals,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode == "stop" || mode == "stop-ignore" {
+	if mode == "stop" || mode == "stop-ignore" || mode == "signal" || mode == "signal-force" {
 		waitRecord(t, store, gen.KindSubagentReady, 30*time.Second)
+	}
+	if mode == "stop" || mode == "stop-ignore" {
 		if err := active.Subagent.Stop(gen.StopPayloadReasonUser); err != nil {
 			t.Fatal(err)
 		}
 	}
-	waitCtx, waitCancel := context.WithTimeout(ctx, 30*time.Second)
-	done, waitErr := active.Subagent.Wait(waitCtx)
-	waitCancel()
 	started := time.Now()
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), 20*time.Second)
-	closeErr := active.FinalizeCollection(closeCtx)
-	closeCancel()
+	var done gen.DonePayload
+	var waitErr, closeErr error
+	if mode == "signal" || mode == "signal-force" {
+		lifecycleDone := make(chan lifecycleResult, 1)
+		go func() {
+			got, err := runProductionLifecycle(launchCtx, signals, newActiveWorldLifecycle(active), io.Discard)
+			lifecycleDone <- lifecycleResult{done: got, err: err}
+		}()
+		signalHub.Send(syscall.SIGTERM)
+		select {
+		case <-signals.gracefulStarted:
+		case <-time.After(30 * time.Second):
+			t.Fatal("first signal did not enter graceful stop")
+		}
+		if mode == "signal-force" {
+			signalHub.Send(syscall.SIGINT)
+			select {
+			case code := <-forced:
+				if code != 130 {
+					t.Fatalf("forced exit code=%d", code)
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatal("second signal did not complete bounded cleanup")
+			}
+		}
+		result := <-lifecycleDone
+		done, waitErr = result.done, result.err
+	} else {
+		waitCtx, waitCancel := context.WithTimeout(ctx, 30*time.Second)
+		done, waitErr = active.Subagent.Wait(waitCtx)
+		waitCancel()
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		closeErr = active.FinalizeCollection(closeCtx)
+		closeCancel()
+	}
 	assertNoRuntimeArtifacts(t, ctx, artifacts.agentRepository+"@"+artifacts.agentDigest, childSpan)
 	if closeErr != nil || time.Since(started) > 20*time.Second {
 		t.Fatalf("%s bounded cleanup: elapsed=%v err=%v", mode, time.Since(started), closeErr)
 	}
-	if mode == "stop" || mode == "stop-ignore" {
+	if mode == "stop" || mode == "stop-ignore" || mode == "signal" || mode == "signal-force" {
 		if waitErr != nil || done.Status != gen.DonePayloadStatusStopped {
 			t.Fatalf("stop result=%+v err=%v", done, waitErr)
+		}
+		if mode == "signal" || mode == "signal-force" {
+			assertDurableStoppedDone(t, store.snapshot())
 		}
 	} else if waitErr != nil || done.Status != gen.DonePayloadStatusError {
 		t.Fatalf("%s result=%+v err=%v", mode, done, waitErr)
 	}
 	assertCollectionEvent(t, store.snapshot(), childSpan)
+}
+
+func assertDurableStoppedDone(t *testing.T, records []gen.EventRecord) {
+	t.Helper()
+	count := 0
+	for _, record := range records {
+		if record.Kind != gen.KindSubagentDone {
+			continue
+		}
+		var done gen.DonePayload
+		if err := json.Unmarshal(record.Payload, &done); err != nil {
+			t.Fatal(err)
+		}
+		if done.Status != gen.DonePayloadStatusStopped {
+			t.Fatalf("durable done status=%s payload=%s", done.Status, record.Payload)
+		}
+		count++
+	}
+	if count != 1 {
+		t.Fatalf("durable stopped done count=%d records=%+v", count, records)
+	}
 }
 
 func assertCollectionEvent(t *testing.T, records []gen.EventRecord, spanID string) {

@@ -15,8 +15,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Eastsidegunn/JANUS/contracts/gen"
@@ -88,6 +92,10 @@ type sessionLaunch struct {
 	PolicyHash string
 	Redactor   *logd.Redactor
 	Stderr     io.Writer
+	Signals    *sessionSignals
+	// approvalLock is held from the pre-claim stale-endpoint check through
+	// relay bind, closing the check/remove/bind race between hx processes.
+	approvalLock *approvalEndpointLock
 }
 
 type productionRun struct {
@@ -103,6 +111,7 @@ type productionRun struct {
 	ApprovalEndpoint  string
 	RedactionValues   map[string][]string
 	RedactionPatterns []string
+	SignalHooks       *signalHooks
 }
 
 type redactedError struct {
@@ -235,6 +244,16 @@ func runProduction(ctx context.Context, run productionRun) error {
 			return reject(newRunError(codePolicyDenied, "%v", err))
 		}
 	}
+	// The approval capability must be usable before the idempotency key is
+	// consumed. A live owner, a non-socket path, or an unsafe stale-path check
+	// therefore rejects the run before Claim and before the session DB exists.
+	approvalLock, err := lockAndPrepareApprovalEndpoint(run.ApprovalEndpoint, stderr)
+	if err != nil {
+		return reject(newRunError(codeIOError, "%v", err))
+	}
+	if approvalLock != nil {
+		defer approvalLock.Close()
+	}
 
 	registry, err := accept.Open(run.AcceptRoot)
 	if err != nil {
@@ -273,6 +292,8 @@ func runProduction(ctx context.Context, run productionRun) error {
 		return reject(newRunError(codeIOError, "세션 로그 열기: %v", err))
 	}
 	defer log.Close()
+	_, sessionSignals := startSessionSignals(ctx, run.SignalHooks)
+	defer sessionSignals.stop()
 	rootSpan := logd.NewSpanID()
 	bindingPayload, err := json.Marshal(struct {
 		ExecutionBinding executionBinding `json:"execution_binding"`
@@ -318,9 +339,12 @@ func runProduction(ctx context.Context, run productionRun) error {
 		_ = emitControl(run.Stdout, controlMessage{OperationID: req.OperationID, Status: "terminal", Error: terr})
 		return redactErr(redactor, terr)
 	}
+	// Signals drive only the explicit Stop → Wait → Cleanup lifecycle. Passing
+	// NotifyContext's canceled context here would let procgroup kill the adapter
+	// concurrently with Stop and lose its durable done{stopped} event.
 	done, launchErr := run.Launcher.Launch(ctx, sessionLaunch{
 		Log: log, TraceID: traceID, RootSpan: rootSpan, Sandbox: sandbox, Request: req, PolicyHash: policyHash,
-		Redactor: redactor, Stderr: stderr,
+		Redactor: redactor, Stderr: stderr, Signals: sessionSignals, approvalLock: approvalLock,
 	})
 	// launch 성패와 무관하게 세션 종료를 durable하게 남긴다.
 	_, endErr := log.Writer.Submit(ctx, gen.EventRecord{
@@ -332,7 +356,7 @@ func runProduction(ctx context.Context, run productionRun) error {
 	if launchErr != nil {
 		terminal.Error = newRunError(codeLaunchFailed, "%v", launchErr)
 	} else {
-		terminal.Done = &doneRef{Status: string(done.Status), Result: done.Result}
+		terminal.Done = &doneRef{Status: string(done.Status), Result: done.Result, Reason: sessionSignals.terminalReason()}
 	}
 	if err := emitControl(run.Stdout, terminal); err != nil {
 		return redactErr(redactor, errors.Join(launchErr, endErr, err))
@@ -346,9 +370,132 @@ func runProduction(ctx context.Context, run productionRun) error {
 	return nil
 }
 
-func selectApprovalDecider(endpoint, traceID, policyHash string, timeoutMs int64, session approvalrelay.SessionControl) (policy.ApprovalDecider, io.Closer, *approvalrelay.Server, error) {
+const approvalEndpointProbeTimeout = 200 * time.Millisecond
+
+type approvalEndpointLock struct {
+	endpoint string
+	file     *os.File
+	once     sync.Once
+}
+
+func (l *approvalEndpointLock) Close() error {
+	if l == nil {
+		return nil
+	}
+	var closeErr error
+	l.once.Do(func() {
+		unlockErr := syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+		closeErr = errors.Join(unlockErr, l.file.Close())
+	})
+	return closeErr
+}
+
+func acquireApprovalEndpointLock(endpoint string) (*approvalEndpointLock, error) {
+	dir := filepath.Dir(endpoint)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("approval endpoint lock directory: %w", err)
+	}
+	file, err := os.OpenFile(endpoint+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("approval endpoint lock: %w", err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("approval endpoint lock is held by another hx: %w", err)
+	}
+	return &approvalEndpointLock{endpoint: endpoint, file: file}, nil
+}
+
+func lockAndPrepareApprovalEndpoint(endpoint string, stderr io.Writer) (*approvalEndpointLock, error) {
+	if endpoint == "" {
+		return nil, nil
+	}
+	if !filepath.IsAbs(endpoint) {
+		return nil, fmt.Errorf("approval relay endpoint must be absolute")
+	}
+	dir := filepath.Dir(endpoint)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("approval endpoint lock directory: %w", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return nil, fmt.Errorf("approval endpoint lock directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 {
+		return nil, fmt.Errorf("approval relay socket directory must be mode 0700")
+	}
+	before, beforeErr := os.Lstat(endpoint)
+	if beforeErr != nil && !errors.Is(beforeErr, os.ErrNotExist) {
+		return nil, beforeErr
+	}
+	lock, err := acquireApprovalEndpointLock(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	fail := func(err error) (*approvalEndpointLock, error) {
+		_ = lock.Close()
+		return nil, err
+	}
+	current, currentErr := os.Lstat(endpoint)
+	if errors.Is(currentErr, os.ErrNotExist) {
+		if beforeErr == nil {
+			return fail(fmt.Errorf("approval endpoint disappeared while acquiring %s.lock", endpoint))
+		}
+		return lock, nil
+	}
+	if currentErr != nil {
+		return fail(currentErr)
+	}
+	if beforeErr == nil && !os.SameFile(before, current) {
+		return fail(fmt.Errorf("approval endpoint changed while acquiring lock"))
+	}
+	if current.Mode()&os.ModeSocket == 0 {
+		return fail(fmt.Errorf("endpoint path exists and is not a socket"))
+	}
+	conn, err := net.DialTimeout("unix", endpoint, approvalEndpointProbeTimeout)
+	if err == nil {
+		_ = conn.Close()
+		return fail(fmt.Errorf("another hx is serving this endpoint"))
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return fail(fmt.Errorf("approval endpoint probe: %w", err))
+	}
+	if err := os.Remove(endpoint); err != nil {
+		return fail(fmt.Errorf("remove stale approval endpoint: %w", err))
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	fmt.Fprintln(stderr, "hx: removed stale approval endpoint socket")
+	return lock, nil
+}
+
+func prepareApprovalEndpoint(endpoint string, stderr io.Writer) error {
+	lock, err := lockAndPrepareApprovalEndpoint(endpoint, stderr)
+	if lock != nil {
+		defer lock.Close()
+	}
+	return err
+}
+
+func selectApprovalDecider(endpoint, traceID, policyHash string, timeoutMs int64, session approvalrelay.SessionControl, stderr io.Writer) (policy.ApprovalDecider, io.Closer, *approvalrelay.Server, error) {
+	return selectApprovalDeciderWithLock(endpoint, traceID, policyHash, timeoutMs, session, stderr, nil)
+}
+
+func selectApprovalDeciderWithLock(endpoint, traceID, policyHash string, timeoutMs int64, session approvalrelay.SessionControl, stderr io.Writer, held *approvalEndpointLock) (policy.ApprovalDecider, io.Closer, *approvalrelay.Server, error) {
 	if endpoint == "" {
 		return policy.DenyAll{}, nil, nil, nil
+	}
+	lock := held
+	if lock == nil {
+		var err error
+		lock, err = lockAndPrepareApprovalEndpoint(endpoint, stderr)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		defer lock.Close()
+	} else if lock.endpoint != endpoint {
+		return nil, nil, nil, fmt.Errorf("approval endpoint lock does not match endpoint")
 	}
 	t := time.Duration(timeoutMs) * time.Millisecond
 	srv, err := approvalrelay.NewServer(endpoint, t)
@@ -358,24 +505,9 @@ func selectApprovalDecider(endpoint, traceID, policyHash string, timeoutMs int64
 	// 세션 바인딩은 listen 전에 둔다 — 첫 연결부터 send_message·events_tail이
 	// 결정적으로 판정된다(T25).
 	srv.SetSession(session)
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Listen() }()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, err := os.Stat(endpoint); err == nil {
-			break
-		}
-		select {
-		case err := <-errCh:
-			_ = srv.Close()
-			return nil, nil, nil, err
-		default:
-		}
-		if time.Now().After(deadline) {
-			_ = srv.Close()
-			return nil, nil, nil, fmt.Errorf("approval endpoint did not appear")
-		}
-		time.Sleep(5 * time.Millisecond)
+	if err := startApprovalServer(srv); err != nil {
+		_ = srv.Close()
+		return nil, nil, nil, err
 	}
 	relay, err := approvalrelay.NewServerApprovalRelay(srv, approvalrelay.RelayConfig{Endpoint: endpoint, TraceID: traceID, PolicyHash: policyHash, Timeout: t})
 	if err != nil {
@@ -383,6 +515,21 @@ func selectApprovalDecider(endpoint, traceID, policyHash string, timeoutMs int64
 		return nil, nil, nil, err
 	}
 	return relay, srv, srv, nil
+}
+
+func startApprovalServer(srv *approvalrelay.Server) error {
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Listen() }()
+	readyDeadline := time.NewTimer(2 * time.Second)
+	defer readyDeadline.Stop()
+	select {
+	case <-srv.Ready():
+		return nil
+	case err := <-errCh:
+		return err
+	case <-readyDeadline.C:
+		return fmt.Errorf("approval endpoint listen deadline exceeded")
+	}
 }
 
 // replayAcceptance는 동일 key 재요청의 무spawn 경로다: 응답 유실 재조회는
@@ -544,6 +691,55 @@ type worldLauncher struct {
 	approvalEndpoint string
 }
 
+type activeWorldLifecycle struct {
+	active      *activeWorldSubagent
+	cleanupOnce sync.Once
+	cleanupDone chan struct{}
+	cleanupErr  error
+}
+
+func newActiveWorldLifecycle(active *activeWorldSubagent) *activeWorldLifecycle {
+	return &activeWorldLifecycle{active: active, cleanupDone: make(chan struct{})}
+}
+
+func armForcedLeaseCleanup(signals *sessionSignals, active *activeWorldSubagent) {
+	if signals == nil || active == nil || active.Lease == nil {
+		return
+	}
+	signals.setForceCleanup(func() {
+		forceCtx, cancel := context.WithTimeout(context.Background(), forcedCleanupTimeout)
+		defer cancel()
+		_ = active.Lease.Close(forceCtx)
+	})
+}
+
+func (l *activeWorldLifecycle) StopWithResult(reason gen.StopPayloadReason, result string) error {
+	return l.active.Subagent.StopWithResult(reason, result)
+}
+
+func (l *activeWorldLifecycle) Wait(ctx context.Context) (gen.DonePayload, error) {
+	return l.active.Subagent.Wait(ctx)
+}
+
+func (l *activeWorldLifecycle) ForceClose(ctx context.Context) error {
+	return l.active.Lease.Close(ctx)
+}
+
+func (l *activeWorldLifecycle) Cleanup(ctx context.Context) error {
+	l.cleanupOnce.Do(func() {
+		go func() {
+			l.cleanupErr = l.active.FinalizeCollection(ctx)
+			close(l.cleanupDone)
+		}()
+	})
+	select {
+	case <-l.cleanupDone:
+		return l.cleanupErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func newWorldLauncher(cfg worldConfig) (*worldLauncher, error) {
 	pins, err := cfg.egressPins()
 	if err != nil {
@@ -582,8 +778,8 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 		// events_tail은 세션 로그 Reader의 읽기 전용 사영이다 — writer 없음.
 		events = in.Log.Reader.ReadFrom
 	}
-	decider, closer, srv, err := selectApprovalDecider(l.approvalEndpoint, in.TraceID, in.PolicyHash, timeoutMs,
-		approvalrelay.SessionControl{SessionID: in.TraceID, Multiturn: multiturn, Events: events})
+	decider, closer, srv, err := selectApprovalDeciderWithLock(l.approvalEndpoint, in.TraceID, in.PolicyHash, timeoutMs,
+		approvalrelay.SessionControl{SessionID: in.TraceID, Multiturn: multiturn, Events: events}, in.Stderr, in.approvalLock)
 	if err != nil {
 		return gen.DonePayload{}, err
 	}
@@ -630,6 +826,7 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 		// 호스트 어댑터 환경은 최소로 유지 — 러너 자격증명이 컨테이너
 		// 자격증명이 되는 경로를 차단한다(T15와 동일).
 		AdapterBaseEnv: adapterBaseEnv(),
+		Signals:        in.Signals,
 	})
 	if err != nil {
 		return gen.DonePayload{}, err
@@ -657,19 +854,17 @@ func (l *worldLauncher) Launch(ctx context.Context, in sessionLaunch) (gen.DoneP
 			_ = active.Lease.Close(context.Background())
 		}
 	}()
-	done, waitErr := active.Subagent.Wait(ctx)
-	closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	closeErr := active.FinalizeCollection(closeCtx)
-	cancel()
+	done, lifecycleErr := runProductionLifecycle(ctx, in.Signals, newActiveWorldLifecycle(active), in.Stderr)
 	finalized = true
-	if waitErr != nil {
-		return gen.DonePayload{}, errors.Join(waitErr, closeErr)
-	}
-	if closeErr != nil {
-		return gen.DonePayload{}, closeErr
+	if lifecycleErr != nil {
+		return gen.DonePayload{}, lifecycleErr
 	}
 	if srv != nil {
-		if events, e := in.Log.Reader.ReadFrom(ctx, 1); e == nil {
+		readCtx := ctx
+		if in.Signals != nil {
+			readCtx = in.Signals.parent
+		}
+		if events, e := in.Log.Reader.ReadFrom(readCtx, 1); e == nil {
 			for _, ev := range events {
 				if ev.Kind == gen.KindSubagentDone {
 					srv.MarkTerminal(ev.Seq)

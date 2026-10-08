@@ -27,6 +27,10 @@ type Server struct {
 	byID           map[string]requestKey
 	meta           map[requestKey]PendingMeta
 	ln             net.Listener
+	listenerMu     sync.Mutex
+	closed         bool
+	ready          chan struct{}
+	readyOnce      sync.Once
 	OwnerUID       int
 	peerCheck      func(net.Conn) (int, error)
 	budgetExceeded func() bool
@@ -86,14 +90,22 @@ func NewServer(endpoint string, timeout time.Duration) (*Server, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return &Server{Endpoint: endpoint, Timeout: timeout, OwnerUID: os.Getuid(), peerCheck: peerUID, pending: map[requestKey]chan Result{}, decided: map[requestKey]Result{}, byID: map[string]requestKey{}, meta: map[requestKey]PendingMeta{}, stops: map[stopKey]Result{}, connSem: make(chan struct{}, 32)}, nil
+	return &Server{Endpoint: endpoint, Timeout: timeout, OwnerUID: os.Getuid(), peerCheck: peerUID, pending: map[requestKey]chan Result{}, decided: map[requestKey]Result{}, byID: map[string]requestKey{}, meta: map[requestKey]PendingMeta{}, stops: map[stopKey]Result{}, connSem: make(chan struct{}, 32), ready: make(chan struct{})}, nil
 }
 
+// Ready is closed only after the Unix socket is bound and its permissions are
+// fixed. Callers must still observe Listen's returned error because failures
+// before this point deliberately leave Ready open.
+func (s *Server) Ready() <-chan struct{} { return s.ready }
+
 func (s *Server) Listen() error {
-	if err := os.MkdirAll(filepath.Dir(s.Endpoint), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.Endpoint), 0o700); err != nil {
 		return err
 	}
 	if info, err := os.Stat(filepath.Dir(s.Endpoint)); err != nil || info.Mode().Perm() != 0700 {
+		if err != nil {
+			return err
+		}
 		return fmt.Errorf("approval relay socket directory must be mode 0700")
 	}
 	if _, err := os.Stat(s.Endpoint); err == nil {
@@ -109,7 +121,15 @@ func (s *Server) Listen() error {
 		ln.Close()
 		return err
 	}
+	s.listenerMu.Lock()
+	if s.closed {
+		s.listenerMu.Unlock()
+		_ = ln.Close()
+		return net.ErrClosed
+	}
 	s.ln = ln
+	s.readyOnce.Do(func() { close(s.ready) })
+	s.listenerMu.Unlock()
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -119,10 +139,13 @@ func (s *Server) Listen() error {
 	}
 }
 func (s *Server) Close() error {
-	if s.ln != nil {
-		err := s.ln.Close()
-		_ = os.Remove(s.Endpoint)
-		return err
+	s.listenerMu.Lock()
+	s.closed = true
+	ln := s.ln
+	s.ln = nil
+	s.listenerMu.Unlock()
+	if ln != nil {
+		return ln.Close()
 	}
 	return nil
 }

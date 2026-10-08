@@ -118,6 +118,7 @@ type sessionRef struct {
 type doneRef struct {
 	Status string `json:"status"`
 	Result string `json:"result"`
+	Reason string `json:"reason,omitempty"`
 }
 
 func emitControl(w io.Writer, msg controlMessage) error {

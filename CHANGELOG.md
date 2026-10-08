@@ -4,9 +4,16 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/) from its first tagged release, v0.1.0. Until 1.0, minor versions may contain breaking changes.
 
-Entries are grouped by implementation task (T0–T30). Requirement IDs refer to the [functional spec](docs/hx-기능명세서-v0.1.md); test evidence is in [docs/traceability.md](docs/traceability.md).
+Entries are grouped by implementation task (T0–T32). Requirement IDs refer to the [functional spec](docs/hx-기능명세서-v0.1.md); test evidence is in [docs/traceability.md](docs/traceability.md).
 
 ## [Unreleased]
+
+### Fixed
+
+- **Approval relay startup race (FR-POL-05, FR-CLI-06).** `hx run` now serializes stale-socket inspection, removal, and bind with an endpoint lock; it rejects live or non-socket owners before claim and treats the relay as ready only after `Listen` has bound successfully.
+- Approval endpoint locking uses a permanent `<endpoint>.lock` file with `flock`; the lock file is deliberately not removed on shutdown.
+- **Signal-safe production shutdown (FR-CLI-06, FR-SBX-01, FR-LOG-02).** A first SIGINT/SIGTERM now reaches the adapter only through the graceful stop lifecycle, preserving the adapter-authored durable `done{stopped}` payload; a second signal closes the active lease (stopping containers, which can take tens of seconds; containers are not orphaned) and then forces exit with code 128+signal.
+- Terminal control messages include the optional `done.reason` field for lifecycle-consumed signals and omit it when empty.
 
 ## [0.1.0] - 2026-10-08
 
