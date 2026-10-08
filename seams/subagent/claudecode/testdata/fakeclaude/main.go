@@ -54,7 +54,7 @@ func main() {
 		os.Exit(2)
 	}
 	if os.Getenv("HX_CLAUDE_HOOK_ORDER") == "" {
-		for _, key := range []string{"HX_CLAUDE_HOLD_UNTIL_SIGUSR1", "HX_CLAUDE_HOOK_EXPECT_DECISION"} {
+		for _, key := range []string{"HX_CLAUDE_HOLD_UNTIL_SIGUSR1", "HX_CLAUDE_HOOK_EXPECT_DECISION", "HX_CLAUDE_HOOK_FAILURE"} {
 			if os.Getenv(key) != "" {
 				fmt.Fprintf(os.Stderr, "fakeclaude: %s는 HX_CLAUDE_HOOK_ORDER 없이 쓸 수 없음\n", key)
 				os.Exit(2)
@@ -264,8 +264,9 @@ func multiturn(fixtures []string) {
 	}
 }
 
-// ordered replays the fixture with the PreToolUse hook anchored on the first
-// native assistant tool_use line (T27(b) container gate). It still never
+// ordered replays the fixture with a PreToolUse hook anchored on every native
+// assistant tool_use line (T27(b) container gate; T33 traceability requires
+// every replayed tool_use, rather than only the first, to exercise the hook). It still never
 // invents stream-json lines; it only fixes where the hook runs relative to
 // that line:
 //
@@ -317,10 +318,6 @@ func ordered(fixture, order string) {
 	anchored := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		if anchored {
-			write(line)
-			continue
-		}
 		hookInput, isToolUse := toolUseHookInput(line)
 		if !isToolUse {
 			write(line)
@@ -333,9 +330,24 @@ func ordered(fixture, order string) {
 		if order == "native-first" {
 			write(line)
 		}
-		if err := runOrderedHook(hookInput); err != nil {
-			fmt.Fprintln(os.Stderr, "fakeclaude:", err)
-			os.Exit(3)
+		switch failure := os.Getenv("HX_CLAUDE_HOOK_FAILURE"); failure {
+		case "":
+			if err := runOrderedHook(hookInput); err != nil {
+				fmt.Fprintln(os.Stderr, "fakeclaude:", err)
+				os.Exit(3)
+			}
+		case "exit-1":
+			// Claude treats a command-hook exit other than 0 or 2 as
+			// non-blocking. This mode models that runner outcome without
+			// weakening the production `hxapprove || exit 2` wrapper.
+			fmt.Fprintln(os.Stderr, "fakeclaude: forced hook exit=1 (non-blocking)")
+		case "not-run":
+			// Models hook process start failure (/bin/sh or hook executable
+			// absent), which Claude also treats as non-blocking.
+			fmt.Fprintln(os.Stderr, "fakeclaude: forced hook not-run (non-blocking)")
+		default:
+			fmt.Fprintf(os.Stderr, "fakeclaude: unknown HX_CLAUDE_HOOK_FAILURE %q\n", failure)
+			os.Exit(2)
 		}
 		if order == "hook-first" {
 			write(line)

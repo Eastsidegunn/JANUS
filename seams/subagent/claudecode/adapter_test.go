@@ -41,6 +41,25 @@ func TestAuthenticationFailureDiagnosticIsNarrowAndCredentialFree(t *testing.T) 
 	}
 }
 
+func TestConfigFromEnvRestrictsApprovalGateDisableToFakeExecutable(t *testing.T) {
+	t.Setenv(testApprovalGateDisabledEnv, "1")
+	t.Setenv("HX_CLAUDE_BIN", "/tmp/fakeclaude-test")
+	cfg := ConfigFromEnv()
+	if cfg.configErr != nil || !cfg.disableApprovalGateForTest {
+		t.Fatalf("Fake test mode was not accepted: disabled=%v err=%v", cfg.disableApprovalGateForTest, cfg.configErr)
+	}
+	for _, item := range cfg.Env {
+		if strings.HasPrefix(item, testApprovalGateDisabledEnv+"=") {
+			t.Fatalf("test-only control leaked to native environment: %q", item)
+		}
+	}
+	t.Setenv("HX_CLAUDE_BIN", "/usr/bin/claude")
+	cfg = ConfigFromEnv()
+	if cfg.configErr == nil {
+		t.Fatal("non-Fake executable accepted approval gate disable")
+	}
+}
+
 func buildAdapterBinaries(t *testing.T) adapterBinaries {
 	t.Helper()
 	dir := t.TempDir()
@@ -206,7 +225,9 @@ func TestAdapterExecutableReplaysAllClaudeFixtures(t *testing.T) {
 		path := path
 		name := strings.TrimSuffix(filepath.Base(path), ".ndjson")
 		t.Run(name, func(t *testing.T) {
-			run := runFixtureProcess(t, bins, path, nil, nil)
+			// This test owns executable/parser byte preservation, not approval.
+			// The Fake-only switch keeps the reviewed fixtures/goldens unchanged.
+			run := runFixtureProcess(t, bins, path, []string{testApprovalGateDisabledEnv + "=1"}, nil)
 			if run.err != nil {
 				t.Fatalf("adapter exit: %v\n%s", run.err, run.stderr)
 			}

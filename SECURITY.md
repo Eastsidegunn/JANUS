@@ -23,7 +23,29 @@ JANUS runs coding agents that you do not trust. The design assumes:
   timeout is deliberately non-blocking; `hxapprove` is bounded below it and
   gives up first. The agent image must provide `/bin/sh` and `hxapprove` on
   `PATH`; if the hook cannot start, Claude proceeds (fail-open by the host
-  tool's documented semantics).
+  tool's documented semantics). As a detective check, a tool result without a
+  preceding approval decision send ends the session with an error; the
+  tool may already have run once. Detection depends on Claude emitting a
+  `tool_result`; if an already-executed tool ends Claude first, the session ends
+  with an abnormal-exit error. If a decision is sent but `hxapprove` stalls
+  before writing it to stdout and Claude later times out the hook, this detector
+  cannot distinguish that failure from a delivered decision.
+- A narrowly measured pre-hook exception applies only when an unapproved
+  `tool_result` has `is_error=true` and its entire trimmed text content is
+  wrapped by `<tool_use_error>...</tool_use_error>`. Array content must contain
+  exactly one text block with that shape; partial matches, mixed/multiple
+  blocks, plain execution errors, successful results, and duplicate results
+  remain fatal. The adapter writes an exemption diagnostic to stderr, while
+  the normalized result's existing `raw` field preserves the native shape and
+  call ID for recomputation from the session log. This ordering and wrapper
+  were measured six times with claude-code 2.1.293: a validation failure
+  (Edit with an unmatched `old_string`) returned the wrapper without running
+  the hook, while normal results and execution errors (missing-file Read,
+  non-zero Bash exit, Read of a directory, Write into a read-only directory)
+  all ran the hook and came back as plain text, so the wrapper cannot shield
+  a tool that actually executed (short of stdout forgery). The fixed
+  container version 2.1.252 has not yet been measured and is an explicit
+  assumption covered by the operator-only `smoke` build-tag test.
 - **OS-level isolation is the backstop.** The agent runs in a rootless Podman container. Network egress is denied by default and goes through an egress proxy that enforces a domain allowlist and records every allow and deny. File changes land in an overlay and are observed from outside the agent. These do not depend on the agent's cooperation.
 - **The log is evidence.** The event log is append-only through a single writer, and the effect plane (what the sandbox observed) can be compared against what the agent reported (`hx audit`).
 - **Policy only narrows.** Merging policy profiles can only reduce permissions and budgets.

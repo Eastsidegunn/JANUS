@@ -175,6 +175,7 @@ func (c *worldApprovalClient) pollOne() error {
 		return err
 	}
 	decision := c.state.awaitDecision(pending)
+	c.state.writer.markApprovalDecisionSent(pending.callID, pending.name)
 	if err := encoder.Encode(worldApprovalDecision{
 		RequestID: requestID, Decision: decision.Decision, Reason: decision.Reason,
 	}); err != nil {

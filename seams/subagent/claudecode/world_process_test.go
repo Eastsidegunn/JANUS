@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +18,18 @@ import (
 	"github.com/Eastsidegunn/JANUS/core/world"
 	"github.com/Eastsidegunn/JANUS/core/world/processwire"
 )
+
+func TestWorldProcessTokenExpiryDoesNotOverwriteApprovalGateBypass(t *testing.T) {
+	expired := make(chan struct{})
+	close(expired)
+	bypass := &approvalGateBypassError{Name: "Bash", CallID: "call-1"}
+	if got := applyWorldTokenExpiry(bypass, expired); !errors.Is(got, errApprovalGateBypass) || errors.Is(got, errTokenExpired) {
+		t.Fatalf("token expiry overwrote approval bypass: %v", got)
+	}
+	if got := applyWorldTokenExpiry(errors.New("native failed"), expired); !errors.Is(got, errTokenExpired) {
+		t.Fatalf("ordinary terminal error was not classified as token expiry: %v", got)
+	}
+}
 
 // A test-only process broker launches fakeclaude with the container PID1 argv.
 // It accepts no StdinData frame, and fakeclaude independently checks zero-byte
